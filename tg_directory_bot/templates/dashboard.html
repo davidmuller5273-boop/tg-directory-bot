@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 · {{ site.site_name }}{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>仪表盘</h1><p>机器人运行数据与待处理事项</p></div></header>
+<section class="stats">
+  <a href="/users"><strong>{{ stats.users }}</strong><span>累计用户</span></a>
+  <a href="/entries?status=pending"><strong>{{ stats.pending }}</strong><span>待审核</span></a>
+  <a href="/entries?status=approved"><strong>{{ stats.approved }}</strong><span>已收录</span></a>
+  <a href="/support"><strong>{{ stats.unread_support }}</strong><span>客服未读</span></a>
+  <a href="/reports"><strong>{{ stats.open_reports }}</strong><span>待处理举报</span></a>
+  <a href="/broadcasts"><strong>{{ stats.queued_messages }}</strong><span>待发消息</span></a>
+  <a href="/groups"><strong>{{ stats.groups }}</strong><span>已接入群组</span></a>
+  <a href="/groups"><strong>{{ stats.active_raffles }}</strong><span>进行中抽奖</span></a>
+</section>
+<div class="two-col">
+  <section><div class="section-head"><h2>待审核收录</h2><a href="/entries?status=pending">查看全部</a></div>
+    <div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>分类</th><th>提交者</th></tr></thead><tbody>
+    {% for e in pending %}<tr><td>#{{ e.id }}</td><td><a href="/entries/{{ e.id }}">{{ e.title }}</a></td><td>{{ e.category }}</td><td>{{ e.username or e.user_id }}</td></tr>
+    {% else %}<tr><td colspan="4" class="empty">暂无待审核</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+  <section><div class="section-head"><h2>最近客服会话</h2><a href="/support">进入客服台</a></div>
+    <div class="conversation-list">
+    {% for c in conversations %}<a href="/support?user_id={{ c.user_id }}"><strong>{{ c.first_name or c.username or c.user_id }}</strong><span>{{ c.last_body }}</span>{% if c.unread %}<b>{{ c.unread }}</b>{% endif %}</a>
+    {% else %}<p class="empty">暂无客服消息</p>{% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}

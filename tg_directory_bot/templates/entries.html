@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block title %}收录管理{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>收录管理</h1><p>共 {{ total }} 条匹配记录</p></div><a class="button" href="/entries-export.csv">导出 CSV</a></header>
+<form class="filters" method="get"><input name="q" value="{{ q }}" placeholder="搜索关键词、网址、内容或用户名">
+  <select name="status"><option value="">全部状态</option>{% for value,label in [('pending','待审核'),('approved','已通过'),('rejected','已拒绝'),('removed','已下架')] %}<option value="{{ value }}" {{ 'selected' if selected_status == value }}>{{ label }}</option>{% endfor %}</select>
+  <button class="button" type="submit">筛选</button></form>
+<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题 / 网址</th><th>分类</th><th>提交者</th><th>状态</th><th>时间</th><th></th></tr></thead><tbody>
+{% for e in entries %}<tr><td>#{{ e.id }}</td><td><strong>{{ e.title }}</strong>{% if e.content_text %}<small>{{ e.content_text }}</small>{% elif not e.url.startswith('tgcontent://') %}<small class="url">{{ e.url }}</small>{% endif %}{% if e.media_file_id %}<small>附件：{{ e.media_type }} {{ e.media_name }}</small>{% endif %}</td><td>{{ e.category }}</td><td>@{{ e.username or '-' }}<small>{{ e.user_id }}</small></td><td><span class="status {{ e.status }}">{{ e.status }}</span></td><td>{{ e.created_at|beijing_time }}</td><td><a href="/entries/{{ e.id }}">编辑</a></td></tr>
+{% else %}<tr><td colspan="7" class="empty">没有匹配记录</td></tr>{% endfor %}</tbody></table></div>
+<div class="pager">{% if page > 1 %}<a class="button" href="?status={{ selected_status }}&q={{ q }}&page={{ page-1 }}">上一页</a>{% endif %}{% if page*30 < total %}<a class="button" href="?status={{ selected_status }}&q={{ q }}&page={{ page+1 }}">下一页</a>{% endif %}</div>
+{% endblock %}

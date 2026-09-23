@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block title %}搜索统计{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>搜索统计</h1><p>关键词搜索量和搜索用户，仅超级管理员后台可见</p></div></header>
+<section><div class="section-head"><h2>关键词搜索量排名</h2><span>共 {{ keyword_total }} 个关键词 · 每页 10 个</span></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>关键词</th><th>搜索量</th><th>搜索人数</th><th>搜索用户</th><th>最后搜索</th></tr></thead><tbody>
+{% for row in keyword_rows %}<tr><td>{{ (keyword_page - 1) * 10 + loop.index }}</td><td><strong>{{ row.query }}</strong></td><td>{{ row.searches }}</td><td>{{ row.unique_users }}</td><td>{% for u in row.searchers %}<span>{{ u.display_name or ('@' + u.username if u.username else u.user_id) }}（{{ u.searches }}次）{{ '、' if not loop.last }}</span>{% endfor %}</td><td>{{ row.last_searched_at|beijing_time }}</td></tr>{% else %}<tr><td colspan="6" class="empty">暂无搜索记录</td></tr>{% endfor %}</tbody></table></div>
+{% if keyword_pages > 1 %}<div class="pager">{% if keyword_page > 1 %}<a class="button" href="?keyword_page={{ keyword_page - 1 }}&event_page={{ event_page }}">上一页</a>{% endif %}<span>第 {{ keyword_page }}/{{ keyword_pages }} 页</span>{% if keyword_page < keyword_pages %}<a class="button" href="?keyword_page={{ keyword_page + 1 }}&event_page={{ event_page }}">下一页</a>{% endif %}</div>{% endif %}</section>
+
+<section><div class="section-head"><h2>谁搜索了什么</h2><span>共 {{ event_total }} 条 · 每页 10 条</span></div>
+<div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>Telegram ID</th><th>搜索内容</th><th>来源</th><th>命中</th><th>Chat ID</th></tr></thead><tbody>
+{% for row in event_rows %}<tr><td>{{ row.created_at|beijing_time }}</td><td><strong>{{ row.display_name or '-' }}</strong><small>@{{ row.username or '-' }}</small></td><td>{{ row.user_id }}</td><td><strong>{{ row.query }}</strong></td><td>{{ '群关键词' if row.source == 'group_keyword' else '搜索命令' }}</td><td>{{ row.result_count }} 条</td><td>{{ row.chat_id }}</td></tr>{% else %}<tr><td colspan="7" class="empty">暂无搜索记录</td></tr>{% endfor %}</tbody></table></div>
+{% if event_pages > 1 %}<div class="pager">{% if event_page > 1 %}<a class="button" href="?keyword_page={{ keyword_page }}&event_page={{ event_page - 1 }}">上一页</a>{% endif %}<span>第 {{ event_page }}/{{ event_pages }} 页</span>{% if event_page < event_pages %}<a class="button" href="?keyword_page={{ keyword_page }}&event_page={{ event_page + 1 }}">下一页</a>{% endif %}</div>{% endif %}</section>
+{% endblock %}

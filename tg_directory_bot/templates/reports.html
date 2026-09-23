@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}举报记录{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>举报记录</h1><p>用户对已收录网址提交的问题</p></div></header>
+<div class="table-wrap"><table><thead><tr><th>编号</th><th>收录</th><th>举报用户</th><th>原因</th><th>状态</th><th>时间</th></tr></thead><tbody>
+{% for r in reports %}<tr><td>#{{ r.id }}</td><td><a href="/entries/{{ r.entry_id }}">{{ r.title }}</a><small class="url">{{ r.url }}</small></td><td>{{ r.user_id }}</td><td>{{ r.reason }}</td><td>{{ r.status }}</td><td>{{ r.created_at|beijing_time }}</td></tr>{% else %}<tr><td colspan="6" class="empty">暂无举报</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

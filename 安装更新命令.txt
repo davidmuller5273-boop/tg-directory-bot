@@ -1,0 +1,104 @@
+TG Directory Bot - Windows 远程 Ubuntu 安装和更新命令
+=====================================================
+
+一、第一次安装
+
+1. 在 Windows 中打开 tg 文件夹。
+
+2. 点击文件夹地址栏，输入 powershell 后按回车。
+
+3. 在 Windows PowerShell 执行下面命令上传压缩包：
+
+scp .\tg-directory-bot-ubuntu.tar.gz root@服务器IP:/tmp/
+
+4. 继续在 Windows PowerShell 登录服务器：
+
+ssh root@服务器IP
+
+5. 登录成功后，在 Ubuntu 服务器窗口执行：
+
+sudo mkdir -p /opt
+cd /opt
+sudo tar xzf /tmp/tg-directory-bot-ubuntu.tar.gz
+sudo bash /opt/tg-directory-bot/deploy/ubuntu/install.sh
+sudo nano /opt/tg-directory-bot/.env
+
+在 .env 中至少填写：
+
+BOT_TOKEN=机器人Token
+DEVELOPER_IDS=开发者Telegram数字ID
+
+保存后启动：
+
+sudo systemctl restart tg-directory-bot tg-directory-bot-web
+sudo systemctl status tg-directory-bot tg-directory-bot-web --no-pager
+
+
+二、以后更新（推荐，一条命令，无需再 scp 压缩包）
+
+已安装过、且服务器能访问 GitHub 时，在 Ubuntu 上直接执行：
+
+curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/update-from-git.sh | sudo bash
+
+脚本会浅克隆最新 main 分支，自动备份数据库，保留 .env、.venv、data、backups，
+覆盖其他程序文件，重新安装依赖并重启机器人和 Web 后台。
+
+
+三、备用：继续用压缩包更新（无 GitHub 或网络受限时）
+
+1. 在 Windows 的 tg 文件夹内打开 PowerShell，上传新版压缩包：
+
+scp .\tg-directory-bot-ubuntu.tar.gz root@服务器IP:/tmp/
+
+2. 用 Windows PowerShell 登录服务器：
+
+ssh root@服务器IP
+
+3. 在 Ubuntu 服务器窗口执行：
+
+sudo bash /opt/tg-directory-bot/deploy/ubuntu/update.sh /tmp/tg-directory-bot-ubuntu.tar.gz
+
+如果你用 FinalShell 把压缩包上传到了 /opt，也可以直接执行同一条命令；
+新版更新脚本会自动在 /tmp、/opt、当前目录和 /root 查找更新包。
+
+更新脚本会自动备份数据库，保留 .env、data、backups，删除并覆盖其他旧程序文件，
+重新安装依赖并重启机器人和 Web 后台。
+
+
+四、旧版本没有 update.sh 时
+
+先按上面的方式把新版压缩包上传到 /tmp/，然后在 Ubuntu 服务器执行下面两行：
+
+tar xOf /tmp/tg-directory-bot-ubuntu.tar.gz tg-directory-bot/deploy/ubuntu/update.sh > /tmp/tg-update.sh
+sudo bash /tmp/tg-update.sh /tmp/tg-directory-bot-ubuntu.tar.gz
+
+
+五、常用检查命令
+
+sudo systemctl status tg-directory-bot tg-directory-bot-web --no-pager
+sudo journalctl -u tg-directory-bot -n 100 --no-pager
+sudo journalctl -u tg-directory-bot-web -n 100 --no-pager
+
+
+六、回滚数据库
+
+备份目录：/opt/tg-directory-bot/backups/
+
+sudo bash /opt/tg-directory-bot/deploy/ubuntu/restore.sh /opt/tg-directory-bot/backups/备份文件.sqlite3
+
+
+七、Windows 没有 scp 命令时
+
+可以安装 WinSCP，把 tg-directory-bot-ubuntu.tar.gz 上传到服务器的 /tmp/ 目录，
+然后用平时的 SSH 软件登录 Ubuntu，继续执行上面的 Ubuntu 命令。
+
+
+八、Windows 一键脚本
+
+在 tg 文件夹内打开 PowerShell，执行：
+
+powershell -ExecutionPolicy Bypass -File .\Windows一键安装更新.ps1 -Server 服务器IP
+
+指定登录用户名：
+
+powershell -ExecutionPolicy Bypass -File .\Windows一键安装更新.ps1 -Server 服务器IP -User root

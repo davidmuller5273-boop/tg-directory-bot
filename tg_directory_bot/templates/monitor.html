@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block title %}运行监控{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>运行监控</h1><p>服务心跳、失败队列与群运营状态</p></div><a class="button" href="/monitor">刷新</a></header>
+<section class="stats monitor-stats">
+  <a href="/groups"><strong>{{ stats.groups }}</strong><span>群组</span></a>
+  <a href="/groups"><strong>{{ stats.active_raffles }}</strong><span>进行中抽奖</span></a>
+  <a href="/groups"><strong>{{ stats.today_messages }}</strong><span>今日群消息</span></a>
+  <a href="/groups"><strong>{{ stats.today_active }}</strong><span>今日活跃记录</span></a>
+  <a href="/groups"><strong>{{ stats.today_blocked }}</strong><span>今日拦截</span></a>
+  <a href="/broadcasts"><strong>{{ stats.failed_outbox }}</strong><span>发送失败</span></a>
+  <a href="/chain"><strong>{{ stats.failed_chain_24h }}</strong><span>24h 接口失败</span></a>
+</section>
+<div class="two-col">
+  <section><div class="section-head"><h2>服务心跳</h2><span>超过 90 秒视为异常</span></div>
+  <div class="service-list">{% for s in services %}<div><span class="health-dot {{ 'ok' if s.age_seconds < 90 else 'bad' }}"></span><strong>{{ s.service }}</strong><span>{{ s.age_seconds }} 秒前</span><code>{{ s.detail }}</code></div>{% else %}<p class="empty">服务启动后会显示心跳。</p>{% endfor %}</div></section>
+  <section><div class="section-head"><h2>最近活跃群组</h2><a href="/groups">查看全部</a></div>
+  <div class="conversation-list">{% for g in groups %}<a href="/groups?chat_id={{ g.chat_id }}"><strong>{{ g.title or g.chat_id }}</strong><span>今日 {{ g.today_messages }} 条 · {{ g.today_active }} 人活跃 · {{ g.blocked_count }} 条拦截</span></a>{% else %}<p class="empty">暂无群组数据</p>{% endfor %}</div></section>
+</div>
+{% endblock %}

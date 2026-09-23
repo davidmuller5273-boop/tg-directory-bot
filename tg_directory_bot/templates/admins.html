@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}管理员{% endblock %}
+{% block content %}
+<section class="toolbar">
+  <div>
+    <h1>管理员</h1>
+    <p>管理可以收录地址、审核、回复客服的 Telegram 数字 ID。</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>添加管理员</h2>
+  <form class="inline-form" action="/admins" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <input type="number" name="user_id" placeholder="Telegram 数字 ID" required>
+    <button type="submit">添加</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>当前管理员</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>用户 ID</th>
+          <th>级别</th>
+          <th>用户名</th>
+          <th>来源</th>
+          <th>添加时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in admins %}
+        <tr>
+          <td><code>{{ row.user_id }}</code></td>
+          <td>{{ "超级管理员" if row.role == "super" else "管理员" }}</td>
+          <td>{% if row.username %}@{{ row.username }}{% else %}-{% endif %}</td>
+          <td>
+            {% if row.user_id in super_admin_ids %}
+              .env 主超级管理员
+            {% elif row.user_id in config_admin_ids %}
+              .env 管理员
+            {% else %}
+              后台/命令添加
+            {% endif %}
+          </td>
+          <td>{{ row.created_at|beijing_time }}</td>
+          <td>
+            {% if row.user_id in super_admin_ids or row.user_id in config_admin_ids %}
+              -
+            {% else %}
+              <form action="/admins/{{ row.user_id }}/delete" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf }}">
+                <button class="danger" type="submit">删除</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">暂无管理员</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

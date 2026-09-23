@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block title %}链上与报价{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>链上与报价</h1><p>波场只读余额查询与 OKX P2P USDT/CNY 商户广告榜 · {{ quote_time }}</p></div></header>
+<section class="balance-tool">
+  <form method="post" action="/chain/balance" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input name="address" required minlength="34" maxlength="34" placeholder="输入以 T 开头的波场地址"><button class="button primary" type="submit">查询余额</button></form>
+  {% if balance_error %}<div class="flash error">{{ balance_error }}</div>{% endif %}
+  {% if balance %}<div class="balance-result"><div><span>地址状态</span><strong>{{ '已激活' if balance.activated else '未激活' }}</strong></div><div><span>TRX</span><strong>{{ '{:,.6f}'.format(balance.trx) }}</strong></div><div><span>TRC20-USDT</span><strong>{{ '{:,.6f}'.format(balance.usdt) }}</strong></div><div><span>注册时间</span><strong>{{ balance.created_at_ms|beijing_timestamp_ms }}</strong></div><code>{{ balance.address }}</code></div>
+  {% if balance.transactions_error %}<div class="flash error">最近交易接口：{{ balance.transactions_error }}</div>{% endif %}
+  <div class="table-wrap"><table><thead><tr><th>时间</th><th>方向</th><th>资产</th><th>金额</th><th>对方</th><th>TXID</th></tr></thead><tbody>{% for tx in balance.transactions %}<tr><td>{{ tx.timestamp_ms|beijing_timestamp_ms }}</td><td>{{ tx.direction }}</td><td>{{ tx.asset }}</td><td>{{ '{:,.6f}'.format(tx.amount) }}</td><td><code>{{ tx.counterparty }}</code></td><td><code>{{ tx.tx_id }}</code></td></tr>{% else %}<tr><td colspan="6" class="empty">暂无已确认的 TRX/USDT 转账记录</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+{% if quote_error %}<div class="flash error">{{ quote_error }}</div>{% endif %}
+<div class="quote-grid">
+  {% for title,quotes in [('用户买入 USDT',buy_quotes),('用户卖出 USDT',sell_quotes)] %}
+  <section><div class="section-head"><h2>OKX · {{ title }}</h2><span>前 10 商户广告</span></div>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>商户</th><th>单价</th><th>可用 U</th><th>CNY 限额</th><th>成交</th></tr></thead><tbody>
+    {% for q in quotes %}<tr><td>{{ q.rank }}</td><td><strong>{{ q.merchant }}</strong><small>{{ '/'.join(q.payment_methods) }}</small></td><td class="quote-price">¥{{ '{:,.2f}'.format(q.price) }}</td><td>{{ '{:,.2f}'.format(q.available_usdt) }}</td><td>{{ '{:,.0f}'.format(q.min_cny) }} - {{ '{:,.0f}'.format(q.max_cny) }}</td><td>{{ '{:.2f}'.format(q.completion_rate) }}%<small>{{ q.orders }} 单 · {{ q.avg_seconds }}s</small></td></tr>
+    {% else %}<tr><td colspan="6" class="empty">暂无报价</td></tr>{% endfor %}</tbody></table></div>
+  </section>{% endfor %}
+</div>
+<p class="notice">OKX P2P 显示的是商户广告报价，受商户等级、质量、价格和广告排序影响，不是法定汇率或成交保证。系统缓存 30 秒。</p>
+<section><div class="section-head"><h2>最近查询</h2><span>最多 200 条</span></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>来源用户</th><th>类型</th><th>地址</th><th>结果</th><th>状态</th></tr></thead><tbody>
+{% for q in queries %}<tr><td>{{ q.created_at|beijing_time }}</td><td>{{ q.user_id or '后台' }}</td><td>{{ q.query_type }}</td><td><code>{{ q.address }}</code></td><td>{{ q.result_summary }}</td><td>{{ '成功' if q.success else '失败' }}</td></tr>{% else %}<tr><td colspan="6" class="empty">暂无查询</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

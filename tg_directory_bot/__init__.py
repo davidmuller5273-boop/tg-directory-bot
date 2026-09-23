@@ -1,0 +1,2 @@
+"""Telegram directory bot package."""
+

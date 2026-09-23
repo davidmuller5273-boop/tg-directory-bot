@@ -1,0 +1,23 @@
+[Unit]
+Description=TG Directory Bot Web Admin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg-directory-bot
+EnvironmentFile=/opt/tg-directory-bot/.env
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/tg-directory-bot/.venv/bin/python /opt/tg-directory-bot/run_web.py
+Restart=always
+RestartSec=5
+User=tgbot
+Group=tgbot
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/tg-directory-bot/data /opt/tg-directory-bot/backups
+
+[Install]
+WantedBy=multi-user.target

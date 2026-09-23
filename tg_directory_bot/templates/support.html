@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block title %}双向客服{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>双向客服</h1><p>用户消息与后台回复会保存在同一会话中</p></div></header>
+<div class="support-layout">
+  <aside class="thread-list">{% for c in conversations %}<a class="{{ 'selected' if selected_user == c.user_id }}" href="/support?user_id={{ c.user_id }}"><strong>{{ c.first_name or c.username or c.user_id }}</strong><span>{{ c.last_body }}</span>{% if c.unread %}<b>{{ c.unread }}</b>{% endif %}</a>{% else %}<p class="empty">暂无会话</p>{% endfor %}</aside>
+  <section class="thread">
+  {% if selected_user %}
+    <div class="thread-head"><h2>用户 {{ selected_user }}</h2><code>/reply {{ selected_user }} 内容</code></div>
+    <div class="messages">{% for m in thread %}<article class="{{ m.direction }}"><p>{{ m.body }}</p><small>{{ m.admin_name or selected_user }} · {{ m.created_at|beijing_time }} · {{ m.status }}</small></article>{% else %}<p class="empty">暂无消息</p>{% endfor %}</div>
+    <form class="reply-box" method="post" action="/support/{{ selected_user }}/reply"><input type="hidden" name="csrf_token" value="{{ csrf }}"><textarea name="body" rows="4" required placeholder="输入回复内容"></textarea><button class="button primary" type="submit">发送回复</button></form>
+  {% else %}<div class="empty-state"><h2>选择一个会话</h2><p>从左侧打开用户消息。</p></div>{% endif %}
+  </section>
+</div>
+{% endblock %}

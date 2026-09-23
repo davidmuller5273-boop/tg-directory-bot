@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block title %}备份管理{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>备份管理</h1><p>在线 SQLite 一致性备份，可随时下载迁移</p></div>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="button primary" type="submit">立即创建备份</button></form></header>
+<div class="table-wrap"><table><thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th>SHA-256</th><th></th></tr></thead><tbody>
+{% for b in backups %}<tr><td>{{ b.name }}</td><td>{{ '%.2f'|format(b.size / 1048576) }} MB</td><td>{{ b.modified }}</td><td><code class="hash">{{ b.checksum }}</code></td><td><a href="/backups/{{ b.name }}">下载</a></td></tr>{% else %}<tr><td colspan="5" class="empty">暂无备份</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

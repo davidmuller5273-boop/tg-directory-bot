@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% block title %}系统设置{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>系统设置</h1><p>修改后机器人无需重启即可读取</p></div></header>
+<section class="narrow"><form method="post" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label>后台名称<input name="site_name" value="{{ settings.site_name }}" maxlength="100" required></label>
+  <label>欢迎语<textarea name="welcome_text" rows="5" maxlength="2000" required>{{ settings.welcome_text }}</textarea></label>
+  <label>未收录提示<textarea name="not_found_text" rows="3" maxlength="2000" required>{{ settings.not_found_text }}</textarea></label>
+  <label>转人工确认语<textarea name="support_ack_text" rows="3" maxlength="2000" required>{{ settings.support_ack_text }}</textarea></label>
+  <fieldset><legend>功能开关</legend>
+    <label class="check"><input type="checkbox" name="support_enabled" value="1" {{ 'checked' if settings.support_enabled == '1' }}>启用双向客服</label>
+    <label class="check"><input type="checkbox" name="auto_reply_enabled" value="1" {{ 'checked' if settings.auto_reply_enabled == '1' }}>启用关键词自动回复</label>
+    <label class="check"><input type="checkbox" name="group_keyword_enabled" value="1" {{ 'checked' if settings.group_keyword_enabled == '1' }}>启用群关键词响应</label>
+    <label class="check"><input type="checkbox" name="chain_enabled" value="1" {{ 'checked' if settings.chain_enabled == '1' }}>启用波场余额查询</label>
+    <label class="check"><input type="checkbox" name="rate_enabled" value="1" {{ 'checked' if settings.rate_enabled == '1' }}>启用 OKX P2P 报价榜</label>
+    <label class="check"><input type="checkbox" name="lottery_enabled" value="1" {{ 'checked' if settings.lottery_enabled == '1' }}>启用官方开奖结果查询</label>
+    <label class="check"><input type="checkbox" name="lottery_broadcast_enabled" value="1" {{ 'checked' if settings.lottery_broadcast_enabled == '1' }}>启用新期开奖自动播报</label>
+    <label class="check"><input type="checkbox" name="group_monitoring_enabled" value="1" {{ 'checked' if settings.group_monitoring_enabled == '1' }}>启用群活跃统计（不保存聊天正文）</label>
+    <label class="check"><input type="checkbox" name="group_moderation_enabled" value="1" {{ 'checked' if settings.group_moderation_enabled == '1' }}>启用群违规处罚（超级管理员；链接/违规关键词，3天禁言，累计5次踢出）</label>
+    <label class="check"><input type="checkbox" name="maintenance_mode" value="1" {{ 'checked' if settings.maintenance_mode == '1' }}>维护模式（管理员仍可使用）</label>
+  </fieldset>
+  <fieldset><legend>群关键词</legend>
+    <label>地址检索后缀<input name="group_directory_trigger" value="{{ settings.group_directory_trigger }}" maxlength="40" placeholder="地址"></label>
+    <label>实时汇率关键词<input name="group_rate_trigger" value="{{ settings.group_rate_trigger }}" maxlength="40" placeholder="z0"></label>
+  </fieldset>
+  <button class="button primary" type="submit">保存设置</button>
+</form></section>
+<section class="narrow stack">
+  <header class="section-head"><div><h2>违规关键词</h2><p>独立于收录搜索词；管理员添加后用于群违规处罚</p></div></header>
+  <form method="post" action="/moderation-keywords" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>新增违规关键词<input name="keyword" maxlength="100" required placeholder="输入关键词"></label>
+    <button class="button primary" type="submit">添加</button>
+  </form>
+  {% if moderation_keywords %}
+  <div class="table-wrap"><table><thead><tr><th>关键词</th><th>添加时间</th><th>操作</th></tr></thead><tbody>
+    {% for row in moderation_keywords %}<tr>
+      <td>{{ row.keyword }}</td><td>{{ row.created_at|beijing_time }}</td>
+      <td><form method="post" action="/moderation-keywords/{{ row.id }}/delete">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="link-button danger" type="submit">删除</button>
+      </form></td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<p class="empty">暂无违规关键词；启用处罚后，链接仍会被处理。</p>{% endif %}
+</section>
+{% endblock %}

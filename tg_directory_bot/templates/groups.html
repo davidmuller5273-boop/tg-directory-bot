@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% block title %}群组与抽奖{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>群组与抽奖</h1><p>群活跃只保存计数，不保存普通聊天正文</p></div></header>
+<section><div class="section-head"><h2>已接入群组</h2><span>{{ groups|length }} 个</span></div>
+<div class="table-wrap"><table><thead><tr><th>群组</th><th>Chat ID</th><th>今日消息</th><th>今日活跃</th><th>累计消息</th><th>拦截</th><th>进行中抽奖</th><th></th></tr></thead><tbody>
+{% for g in groups %}<tr><td><strong>{{ g.title or '未命名群组' }}</strong><small>@{{ g.username or '-' }}</small></td><td>{{ g.chat_id }}</td><td>{{ g.today_messages }}</td><td>{{ g.today_active }}</td><td>{{ g.message_count }}</td><td>{{ g.blocked_count }}</td><td>{{ g.active_raffles }}</td><td><a href="/groups?chat_id={{ g.chat_id }}">详情</a></td></tr>
+{% else %}<tr><td colspan="8" class="empty">机器人加入群组并收到消息后，这里会自动出现统计。</td></tr>{% endfor %}</tbody></table></div></section>
+
+{% if selected %}
+<section class="stats group-stats">
+  <a><strong>{{ selected.today_messages }}</strong><span>今日消息</span></a>
+  <a><strong>{{ selected.today_active }}</strong><span>今日活跃</span></a>
+  <a><strong>{{ selected.joins_count }}</strong><span>累计进群</span></a>
+  <a><strong>{{ selected.leaves_count }}</strong><span>累计退群</span></a>
+  <a><strong>{{ selected.blocked_count }}</strong><span>累计拦截</span></a>
+</section>
+<section><div class="section-head"><h2>{{ selected.title }} · 成员发言统计</h2><span>共 {{ speaker_total }} 人 · 每页 10 人 · 明细保留 31 天</span></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>成员</th><th>用户名</th><th>Telegram ID</th><th>今日</th><th>近 7 天</th><th>近 31 天</th><th>最后发言</th></tr></thead><tbody>
+{% for s in speakers %}<tr><td>{{ (speaker_page - 1) * 10 + loop.index }}</td><td><strong>{{ s.display_name }}</strong></td><td>@{{ s.username or '-' }}</td><td>{{ s.user_id }}</td><td>{{ s.today_messages }}</td><td>{{ s.week_messages }}</td><td>{{ s.month_messages }}</td><td>{{ s.last_seen_at|beijing_time }}</td></tr>{% else %}<tr><td colspan="8" class="empty">近 31 天还没有成员发言记录</td></tr>{% endfor %}</tbody></table></div>
+{% if speaker_pages > 1 %}<div class="pager">{% if speaker_page > 1 %}<a class="button" href="/groups?chat_id={{ selected.chat_id }}&speaker_page={{ speaker_page - 1 }}">上一页</a>{% endif %}<span>第 {{ speaker_page }}/{{ speaker_pages }} 页</span>{% if speaker_page < speaker_pages %}<a class="button" href="/groups?chat_id={{ selected.chat_id }}&speaker_page={{ speaker_page + 1 }}">下一页</a>{% endif %}</div>{% endif %}</section>
+<section><div class="section-head"><h2>{{ selected.title }} · 最近 30 天</h2><span>日期</span></div>
+<div class="table-wrap"><table><thead><tr><th>日期</th><th>消息</th><th>活跃用户</th><th>进群</th><th>退群</th><th>拦截</th></tr></thead><tbody>
+{% for d in daily %}<tr><td>{{ d.day }}</td><td>{{ d.messages }}</td><td>{{ d.active_users }}</td><td>{{ d.joins }}</td><td>{{ d.leaves }}</td><td>{{ d.blocked }}</td></tr>{% else %}<tr><td colspan="6" class="empty">暂无每日统计</td></tr>{% endfor %}</tbody></table></div></section>
+{% endif %}
+
+<section><div class="section-head"><h2>{{ selected.title + ' · ' if selected else '' }}抽奖记录</h2><span>最近 50 条</span></div>
+<div class="table-wrap"><table><thead><tr><th>编号</th><th>群组</th><th>奖品</th><th>报名</th><th>中奖人数</th><th>截止时间</th><th>状态</th><th></th></tr></thead><tbody>
+{% for r in raffles %}<tr><td>#{{ r.id }}</td><td>{{ r.group_title or r.chat_id }}</td><td>{{ r.prize }}</td><td>{{ r.entries }}</td><td>{{ r.winner_count }}</td><td>{{ r.ends_at|beijing_time }}</td><td><span class="status {{ 'pending' if r.status == 'active' else ('approved' if r.status == 'drawn' else 'removed') }}">{{ r.status }}</span></td><td>{% if r.status == 'active' %}<div class="row-actions"><form method="post" action="/raffles/{{ r.id }}/draw"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button" type="submit">开奖</button></form><form method="post" action="/raffles/{{ r.id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button danger" type="submit">取消</button></form></div>{% endif %}</td></tr>
+{% else %}<tr><td colspan="8" class="empty">暂无抽奖记录</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

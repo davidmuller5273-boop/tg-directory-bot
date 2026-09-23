@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block title %}编辑 #{{ entry.id }}{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>编辑收录 #{{ entry.id }}</h1><p>提交者 {{ entry.username or entry.user_id }} · {{ entry.created_at|beijing_time }}</p></div><a class="button" href="/entries">返回列表</a></header>
+<div class="form-grid">
+  <section><h2>收录内容</h2><form class="stack" method="post" action="/entries/{{ entry.id }}/update"><input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>标题<input name="title" value="{{ entry.title }}" maxlength="120" required></label>
+    {% if entry.url.startswith('tgcontent://') or entry.media_file_id %}
+    <input type="hidden" name="url" value="{{ entry.url }}">
+    <label>文字内容<textarea name="content_text" rows="6" maxlength="4000">{{ entry.content_text }}</textarea></label>
+    {% if entry.media_file_id %}<p>附件：{{ entry.media_type }} {{ entry.media_name }}</p>{% endif %}
+    {% else %}
+    <label>网址<input name="url" value="{{ entry.url }}" required></label>
+    <input type="hidden" name="content_text" value="">
+    {% endif %}
+    <label>分类<select name="category">{% for c in categories %}<option {{ 'selected' if c == entry.category }}>{{ c }}</option>{% endfor %}</select></label>
+    <label>简介<textarea name="description" rows="5" maxlength="500">{{ entry.description }}</textarea></label>
+    <button class="button primary" type="submit">保存内容</button>
+  </form></section>
+  <section><h2>审核状态</h2><p>当前：<span class="status {{ entry.status }}">{{ entry.status }}</span></p>
+    <form class="stack" method="post" action="/entries/{{ entry.id }}/status"><input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>新状态<select name="status">{% for value,label in [('approved','通过'),('rejected','拒绝'),('pending','待审核'),('removed','下架')] %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
+      <label>原因<textarea name="reason" rows="4">{{ entry.reason }}</textarea></label>
+      <button class="button warning" type="submit">更新状态并通知用户</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup TG Directory Bot SQLite database
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/tg-directory-bot
+EnvironmentFile=/opt/tg-directory-bot/.env
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/tg-directory-bot/.venv/bin/python /opt/tg-directory-bot/scripts/backup.py --out-dir /opt/tg-directory-bot/backups --keep 30
+User=tgbot
+Group=tgbot

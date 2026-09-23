@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% block title %}自动回复{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>自动回复</h1><p>私聊消息优先匹配规则，未命中时进入双向客服</p></div></header>
+<div class="two-col auto-reply-layout">
+  <section><h2>新建规则</h2><form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>关键词<input name="keyword" maxlength="200" required></label>
+    <label>匹配方式<select name="match_mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>
+    <label>作用范围<select name="scope"><option value="private">仅私聊</option><option value="group">仅群组</option><option value="both">私聊和群组</option></select></label>
+    <label>回复内容<textarea name="reply_text" rows="7" maxlength="4000" required></textarea></label>
+    <button class="button primary" type="submit">创建规则</button>
+  </form></section>
+  <section><div class="section-head"><h2>规则列表</h2><span>{{ rows|length }} 条</span></div>
+  <div class="table-wrap"><table><thead><tr><th>关键词</th><th>方式</th><th>范围</th><th>回复内容</th><th>命中</th><th>状态</th><th></th></tr></thead><tbody>
+  {% for r in rows %}<tr><td><strong>{{ r.keyword }}</strong></td><td>{{ '完全匹配' if r.match_mode == 'exact' else '包含' }}</td><td>{{ {'private':'私聊','group':'群组','both':'全部'}.get(r.scope, r.scope) }}</td><td class="reply-preview">{{ r.reply_text }}</td><td>{{ r.hits }}</td><td><span class="status {{ 'approved' if r.is_enabled else 'removed' }}">{{ '启用' if r.is_enabled else '停用' }}</span></td><td><div class="row-actions"><form method="post" action="/auto-replies/{{ r.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="enabled" value="{{ 0 if r.is_enabled else 1 }}"><button class="link-button" type="submit">{{ '停用' if r.is_enabled else '启用' }}</button></form><form method="post" action="/auto-replies/{{ r.id }}/delete"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button danger" type="submit">删除</button></form></div></td></tr>
+  {% else %}<tr><td colspan="7" class="empty">暂无自动回复规则</td></tr>{% endfor %}</tbody></table></div></section>
+</div>
+{% endblock %}

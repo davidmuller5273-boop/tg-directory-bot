@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block title %}开奖播报{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>开奖播报</h1><p>福彩、体彩、香港官方结果及明确标注的第三方结果</p></div><a class="button" href="/lottery">刷新</a></header>
+<section><div class="section-head"><h2>数据源</h2><span>每 {{ poll_seconds }} 秒检查</span></div>
+  <div class="service-list">{% for s in sources %}<div><span class="health-dot {{ 'ok' if not s.last_error else 'bad' }}"></span><strong>{{ source_labels.get(s.source, s.source) }}</strong><span>{{ s.age_seconds }} 秒前</span><code>{{ s.last_error or ('成功 ' + (s.last_success_at|beijing_time if s.last_success_at else '')) }}</code></div>{% else %}<p class="empty">机器人首次检查后显示接口状态。</p>{% endfor %}</div>
+</section>
+<section><div class="section-head"><h2>最新开奖结果</h2><span>{{ results|length }} 个彩种</span></div>
+  <div class="lottery-grid">{% for r in results %}<article><div><strong>{{ r.game_name }}</strong><span>第{{ r.issue }}期</span></div><p>{{ r.primary_numbers }}{% if r.secondary_numbers %}<b> + {{ r.secondary_numbers }}</b>{% endif %}</p><small>{{ r.draw_time or '未提供具体时间' }} · {{ source_labels.get(r.source, r.source) }}</small></article>{% else %}<p class="empty">机器人取得开奖结果后会显示在这里。</p>{% endfor %}</div>
+</section>
+<section><div class="section-head"><h2>群播报订阅</h2><span>{{ subscriptions|length }} 条</span></div>
+  <div class="table-wrap"><table><thead><tr><th>群组</th><th>Chat ID</th><th>订阅范围</th><th>创建者</th><th>创建时间</th><th></th></tr></thead><tbody>
+  {% for s in subscriptions %}<tr><td><strong>{{ s.group_title or '未记录群名' }}</strong></td><td>{{ s.chat_id }}</td><td>{{ selector_labels.get(s.selector, s.selector) }}</td><td>{{ s.created_by }}</td><td>{{ s.created_at|beijing_time }}</td><td><form method="post" action="/lottery/subscriptions/delete"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="chat_id" value="{{ s.chat_id }}"><input type="hidden" name="selector" value="{{ s.selector }}"><button class="link-button danger" type="submit">删除</button></form></td></tr>
+  {% else %}<tr><td colspan="6" class="empty">在群里使用 /lotterysub 添加订阅。</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}

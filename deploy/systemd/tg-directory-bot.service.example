@@ -1,0 +1,18 @@
+[Unit]
+Description=TG Directory Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg-directory-bot
+EnvironmentFile=/opt/tg-directory-bot/.env
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/tg-directory-bot/.venv/bin/python /opt/tg-directory-bot/run.py
+Restart=always
+RestartSec=5
+User=tgbot
+Group=tgbot
+
+[Install]
+WantedBy=multi-user.target

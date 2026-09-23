@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}{{ site.site_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">TG</span><span>{{ site.site_name }}</span></a>
+    <nav>
+      <a class="{{ 'active' if active == 'dashboard' }}" href="/">仪表盘</a>
+      <a class="{{ 'active' if active == 'entries' }}" href="/entries">收录管理</a>
+      <a class="{{ 'active' if active == 'admins' }}" href="/admins">管理员</a>
+      <a class="{{ 'active' if active == 'users' }}" href="/users">用户管理</a>
+      <a class="{{ 'active' if active == 'support' }}" href="/support">双向客服</a>
+      <a class="{{ 'active' if active == 'auto_replies' }}" href="/auto-replies">自动回复</a>
+      <a class="{{ 'active' if active == 'broadcasts' }}" href="/broadcasts">消息群发</a>
+      <a class="{{ 'active' if active == 'groups' }}" href="/groups">群组与抽奖</a>
+      <a class="{{ 'active' if active == 'search_stats' }}" href="/search-stats">搜索统计</a>
+      <a class="{{ 'active' if active == 'monitor' }}" href="/monitor">运行监控</a>
+      <a class="{{ 'active' if active == 'lottery' }}" href="/lottery">开奖播报</a>
+      <a class="{{ 'active' if active == 'chain' }}" href="/chain">链上与报价</a>
+      <a class="{{ 'active' if active == 'reports' }}" href="/reports">举报记录</a>
+      <a class="{{ 'active' if active == 'backups' }}" href="/backups">备份管理</a>
+      <a class="{{ 'active' if active == 'settings' }}" href="/settings">系统设置</a>
+      <a class="{{ 'active' if active == 'audit' }}" href="/audit">审计日志</a>
+    </nav>
+    <form action="/logout" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="nav-logout" type="submit">退出后台</button>
+    </form>
+  </aside>
+  <main class="page">
+    {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.message }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
