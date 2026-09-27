@@ -17,6 +17,7 @@ from telegram import (
     InlineQueryResultCachedDocument, InlineQueryResultCachedMpeg4Gif,
     InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo,
     InlineQueryResultCachedVoice, InlineQueryResultCachedSticker,
+    InputMediaPhoto, InputMediaVideo,
     InputTextMessageContent, KeyboardButton, ReplyKeyboardMarkup, Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
@@ -4199,12 +4200,159 @@ PENDING_NOTE_SAVE_WORDS = {"保存", "保存笔记", "确认保存"}
 PENDING_NOTE_CANCEL_WORDS = {"取消", "取消保存"}
 
 
-def private_note_file_label(row) -> str:
+def private_note_file_label(row, below: bool = False) -> str:
     file_type = str(row["file_type"] or "")
     label = PRIVATE_NOTE_FILE_LABELS.get(file_type, "文件")
     name = str(row["file_name"] or "").strip()
     extra = f"（{html.escape(name)}）" if name else ""
-    return f"📎 附件：{label}{extra}"
+    hint = "（见下方）" if below else ""
+    return f"📎 附件：{label}{extra}{hint}"
+
+
+PRIVATE_NOTE_CAPTION_LIMIT = 1024
+PRIVATE_NOTE_GROUPABLE = {"photo", "video"}
+PRIVATE_NOTE_NO_CAPTION = {"sticker", "video_note"}
+
+
+def private_note_caption_parts(header: str, body: str) -> tuple[str, str]:
+    """Return (caption_html, overflow_html). Plain header/body in; HTML out.
+
+    Caption stays within Telegram's 1024-char limit; long bodies go to a
+    separate text message instead of being cut.
+    """
+    header = str(header or "").strip()
+    body = str(body or "").strip()
+    plain = f"{header}\n{body}" if header and body else (header or body)
+    if len(plain) <= PRIVATE_NOTE_CAPTION_LIMIT:
+        return html.escape(plain), ""
+    caption = html.escape(f"{header}\n（说明较长，见下一条消息）" if header else "（说明较长，见下一条消息）")
+    return caption, html.escape(body)
+
+
+def _split_text_chunks(text: str, limit: int = 4000) -> list[str]:
+    return [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
+
+
+async def _send_private_note_single(bot, chat_id: int, row, caption: str):
+    file_id = str(row["file_id"] or "")
+    file_type = str(row["file_type"] or "")
+    kwargs = {"parse_mode": ParseMode.HTML}
+    if caption and file_type not in PRIVATE_NOTE_NO_CAPTION:
+        kwargs["caption"] = caption
+    else:
+        kwargs = {}
+    if file_type == "photo":
+        return await bot.send_photo(chat_id, file_id, **kwargs)
+    if file_type == "video":
+        return await bot.send_video(chat_id, file_id, **kwargs)
+    if file_type == "animation":
+        return await bot.send_animation(chat_id, file_id, **kwargs)
+    if file_type == "audio":
+        return await bot.send_audio(chat_id, file_id, **kwargs)
+    if file_type == "voice":
+        return await bot.send_voice(chat_id, file_id, **kwargs)
+    if file_type == "sticker":
+        return await bot.send_sticker(chat_id, file_id)
+    if file_type == "video_note":
+        return await bot.send_video_note(chat_id, file_id)
+    return await bot.send_document(chat_id, file_id, **kwargs)
+
+
+async def send_private_note_media(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, items: list,
+) -> list:
+    """Send the original saved media for notes, in order.
+
+    ``items`` is a list of ``(header_plain_text, row)``. Consecutive photos /
+    videos are sent as media groups (max 10); everything else individually
+    (documents as the original file, videos as the original video…). Invalid
+    file_ids produce a short fallback line; never raises. All sent messages
+    get the same 10-minute private cleanup as note replies.
+    """
+    bot = context.bot
+    sent: list = []
+
+    def track(result) -> None:
+        if result is None:
+            return
+        messages = list(result) if isinstance(result, (list, tuple)) else [result]
+        for msg in messages:
+            sent.append(msg)
+            try:
+                schedule_setting_cleanup(context, msg)
+            except Exception:  # noqa: BLE001 - cleanup is best-effort
+                pass
+
+    async def send_text(text: str) -> None:
+        for chunk in _split_text_chunks(text):
+            try:
+                track(await bot.send_message(
+                    chat_id, chunk, parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                logging.info("Could not send private note text: %s", exc)
+
+    async def send_one(header: str, row) -> None:
+        caption, overflow = private_note_caption_parts(header, str(row["body"] or ""))
+        file_type = str(row["file_type"] or "")
+        try:
+            track(await _send_private_note_single(bot, chat_id, row, caption))
+        except Exception as exc:  # noqa: BLE001 - invalid/expired file_id etc.
+            logging.info("Could not send private note media: %s", exc)
+            label = PRIVATE_NOTE_FILE_LABELS.get(file_type, "文件")
+            await send_text(
+                f"⚠️ {html.escape(header)} {label}发送失败（文件可能已失效）"
+                + (f"\n{html.escape(str(row['body'] or '').strip())}" if str(row["body"] or "").strip() else "")
+            )
+            return
+        if file_type in PRIVATE_NOTE_NO_CAPTION and caption:
+            await send_text(caption)
+        if overflow:
+            await send_text(overflow)
+
+    async def send_group(group: list) -> None:
+        if len(group) == 1:
+            await send_one(*group[0])
+            return
+        media = []
+        overflows: list[str] = []
+        for header, row in group:
+            caption, overflow = private_note_caption_parts(header, str(row["body"] or ""))
+            cls = InputMediaPhoto if str(row["file_type"]) == "photo" else InputMediaVideo
+            media.append(cls(
+                media=str(row["file_id"]), caption=caption or None,
+                parse_mode=ParseMode.HTML,
+            ))
+            if overflow:
+                overflows.append(overflow)
+        try:
+            track(await bot.send_media_group(chat_id, media))
+        except Exception as exc:  # noqa: BLE001 - fall back to one by one
+            logging.info("Private note media group failed, sending singly: %s", exc)
+            for header, row in group:
+                await send_one(header, row)
+            return
+        for overflow in overflows:
+            await send_text(overflow)
+
+    pending_group: list = []
+    for header, row in items:
+        if not str(row["file_id"] or ""):
+            continue
+        if str(row["file_type"] or "") in PRIVATE_NOTE_GROUPABLE:
+            pending_group.append((header, row))
+            if len(pending_group) == 10:
+                await send_group(pending_group)
+                pending_group = []
+            continue
+        if pending_group:
+            await send_group(pending_group)
+            pending_group = []
+        await send_one(header, row)
+    if pending_group:
+        await send_group(pending_group)
+    return sent
 
 
 def private_note_preview_html(row, limit: int = PRIVATE_NOTE_PREVIEW_LIMIT) -> str:
@@ -4219,7 +4367,7 @@ def private_note_preview_html(row, limit: int = PRIVATE_NOTE_PREVIEW_LIMIT) -> s
             body = body[:limit].rstrip() + "…"
         lines.append(html.escape(body))
     if str(row["file_id"] or ""):
-        lines.append(private_note_file_label(row))
+        lines.append(private_note_file_label(row, below=True))
     return "\n".join(lines)
 
 
@@ -4249,6 +4397,19 @@ def private_note_saved_text(
     return text
 
 
+async def reply_private_note_saved(
+    context: ContextTypes.DEFAULT_TYPE, message, text: str, previous=None,
+) -> None:
+    """Send the save confirmation, then the previous note's original media (if any)."""
+    await message.reply_text(
+        text, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+    )
+    if previous is not None and str(previous["file_id"] or ""):
+        saved_at = format_beijing_time(previous["created_at"]) if previous["created_at"] else ""
+        header = "上一条保存的信息" + (f" · {saved_at}" if saved_at else "")
+        await send_private_note_media(context, message.chat_id, [(header, previous)])
+
+
 async def save_private_note(
     update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str, body: str,
     permanent: bool = False,
@@ -4276,9 +4437,10 @@ async def save_private_note(
         "private_note.add_permanent" if permanent else "private_note.add",
         keyword, f"id={note_id}",
     )
-    await message.reply_text(
+    await reply_private_note_saved(
+        context, message,
         private_note_saved_text(keyword, total, previous, permanent=permanent),
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        previous,
     )
 
 
@@ -4381,11 +4543,12 @@ async def handle_pending_private_note(
             store.audit(
                 f"tg:{user.id}", "private_note.add_permanent", keyword, f"batch={saved}",
             )
-            await message.reply_text(
+            await reply_private_note_saved(
+                context, message,
                 private_note_saved_text(
                     keyword, total, previous, permanent=True, saved_count=saved,
                 ),
-                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                previous,
             )
             return True
         parsed = parse_private_note_command(text)
@@ -4421,6 +4584,57 @@ async def handle_pending_private_note(
     return True
 
 
+def private_notes_page_view(store: DirectoryStore, keyword: str, page: int = 0):
+    """Build one list page (10 notes). Returns None if the keyword has no notes.
+
+    Returns ``(text_html, markup, media_items, page, rows, total)`` where
+    ``media_items`` are ``(header, row)`` for the media notes on this page.
+    """
+    page_size = 10
+    page = max(0, int(page))
+    total = store.count_private_notes(keyword)
+    if total <= 0:
+        return None
+    rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
+    if not rows:
+        page = max(0, (total - 1) // page_size)
+        rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
+    if not rows:
+        return None
+    start_no = page * page_size + 1
+    lines = [
+        f"🗒 <b>{html.escape(keyword)}</b> 私密笔记",
+        f"第 {start_no}-{start_no + len(rows) - 1} 条 / 共 {total} 条",
+        "",
+    ]
+    media_items: list = []
+    for index, row in enumerate(rows, start_no):
+        saved_at = format_beijing_time(row["created_at"])
+        lines.append(f"<b>#{index}</b> · {html.escape(saved_at)}")
+        body = str(row["body"] or "").strip()
+        file_id = str(row["file_id"] or "")
+        if body:
+            shown = body
+            if file_id and len(shown) > PRIVATE_NOTE_PREVIEW_LIMIT:
+                shown = shown[:PRIVATE_NOTE_PREVIEW_LIMIT].rstrip() + "…"
+            lines.append(html.escape(shown))
+        if file_id:
+            lines.append(private_note_file_label(row, below=True))
+            media_items.append((f"#{index} · {saved_at}", row))
+        lines.append("")
+    nav: list = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "⬅️ 上一页", callback_data=f"privnote:{page - 1}",
+        ))
+    if (page + 1) * page_size < total:
+        nav.append(InlineKeyboardButton(
+            "下一页 ➡️", callback_data=f"privnote:{page + 1}",
+        ))
+    markup = InlineKeyboardMarkup([nav]) if nav else None
+    return chr(10).join(lines).rstrip(), markup, media_items, page, rows, total
+
+
 async def send_private_notes(
     update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str,
     page: int = 0,
@@ -4434,50 +4648,20 @@ async def send_private_notes(
         schedule_setting_cleanup(context, sent)
         return
     store: DirectoryStore = context.application.bot_data["store"]
-    page_size = 10
-    page = max(0, int(page))
-    total = store.count_private_notes(keyword)
-    if total <= 0:
+    view = private_notes_page_view(store, keyword, page)
+    if view is None:
         sent = await message.reply_text(f"没有找到私密笔记：{keyword}")
         schedule_setting_cleanup(context, sent)
         return
-    rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
-    if not rows:
-        page = max(0, (total - 1) // page_size)
-        rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
-    start_no = page * page_size + 1
-    lines = [
-        f"🗒 <b>{html.escape(keyword)}</b> 私密笔记",
-        f"第 {start_no}-{start_no + len(rows) - 1} 条 / 共 {total} 条",
-        "",
-    ]
-    for index, row in enumerate(rows, start_no):
-        header = f"<b>#{index}</b> · {html.escape(format_beijing_time(row['created_at']))}"
-        body = str(row["body"] or "").strip()
-        file_id = str(row["file_id"] or "")
-        lines.append(header)
-        if body:
-            lines.append(html.escape(body))
-        if file_id:
-            lines.append(private_note_file_label(row))
-        lines.append("")
-    text = chr(10).join(lines).rstrip()
+    text, markup, media_items, page, rows, total = view
     context.user_data["privnote_keyword"] = keyword
-    nav: list = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(
-            "⬅️ 上一页", callback_data=f"privnote:{page - 1}",
-        ))
-    if (page + 1) * page_size < total:
-        nav.append(InlineKeyboardButton(
-            "下一页 ➡️", callback_data=f"privnote:{page + 1}",
-        ))
-    markup = InlineKeyboardMarkup([nav]) if nav else None
     sent = await message.reply_text(
         text, parse_mode=ParseMode.HTML, reply_markup=markup,
         disable_web_page_preview=True,
     )
     schedule_setting_cleanup(context, sent)
+    if media_items:
+        await send_private_note_media(context, message.chat_id, media_items)
     store.audit(
         f"tg:{update.effective_user.id}", "private_note.query", keyword,
         f"page={page}; count={len(rows)}; total={total}",
@@ -11374,48 +11558,19 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("请重新发送关键词查询。", show_alert=True)
             return
         await query.answer()
-        page_size = 10
-        total = store.count_private_notes(keyword)
-        rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
-        if not rows and total > 0:
-            page = max(0, (total - 1) // page_size)
-            rows = store.private_notes(keyword, limit=page_size, offset=page * page_size)
-        if not rows:
+        view = private_notes_page_view(store, keyword, page)
+        if view is None:
             await query.edit_message_text(f"没有找到私密笔记：{keyword}")
             return
-        start_no = page * page_size + 1
-        lines = [
-            f"🗒 <b>{html.escape(keyword)}</b> 私密笔记",
-            f"第 {start_no}-{start_no + len(rows) - 1} 条 / 共 {total} 条",
-            "",
-        ]
-        for index, row in enumerate(rows, start_no):
-            lines.append(
-                f"<b>#{index}</b> · {html.escape(format_beijing_time(row['created_at']))}"
-            )
-            body = str(row["body"] or "").strip()
-            if body:
-                lines.append(html.escape(body))
-            file_id = str(row["file_id"] or "")
-            if file_id:
-                lines.append(private_note_file_label(row))
-            lines.append("")
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(
-                "⬅️ 上一页", callback_data=f"privnote:{page - 1}",
-            ))
-        if (page + 1) * page_size < total:
-            nav.append(InlineKeyboardButton(
-                "下一页 ➡️", callback_data=f"privnote:{page + 1}",
-            ))
-        markup = InlineKeyboardMarkup([nav]) if nav else None
+        text, markup, media_items, page, _rows, _total = view
         await query.edit_message_text(
-            chr(10).join(lines).rstrip(),
+            text,
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
             disable_web_page_preview=True,
         )
+        if media_items and query.message:
+            await send_private_note_media(context, query.message.chat_id, media_items)
         return
     if data == "admin:notes":
         if not has_developer_access(context, user_id):

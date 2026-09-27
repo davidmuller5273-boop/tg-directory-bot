@@ -24,6 +24,9 @@ from tg_directory_bot.bot import (
     point_redeem_reply,
     private_message,
     private_note_saved_text,
+    private_notes_page_view,
+    send_private_note_media,
+    send_private_notes,
     raffle_pro_answers_from_row,
     raffle_text,
     spawn_daily_recur_raffles,
@@ -43,14 +46,16 @@ def _config(db_path: Path) -> Config:
 
 def _message(message_id: int, text=None, caption=None, **extra):
     fields = dict(
-        message_id=message_id, text=text, caption=caption, forward_origin=None,
+        message_id=message_id, chat_id=7, text=text, caption=caption, forward_origin=None,
         animation=None, document=None, photo=None, video=None, audio=None,
         voice=None, sticker=None, video_note=None, media_group_id=None,
         reply_to_message=None,
     )
     fields.update(extra)
     msg = SimpleNamespace(**fields)
-    msg.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=message_id + 1000))
+    msg.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=7, message_id=message_id + 1000)
+    )
     return msg
 
 
@@ -242,6 +247,149 @@ class PrivateNoteTests(unittest.TestCase):
         reply = self._send(_message(1, text="1 面板 内容"))
         self.assertIn("已保存私密笔记：面板", self._last_reply(reply))
         self.assertEqual(self.store.count_private_notes("面板"), 1)
+
+
+def _media_bot():
+    bot = AsyncMock()
+    counter = {"n": 5000}
+
+    def make(*_args, **_kwargs):
+        counter["n"] += 1
+        return SimpleNamespace(chat_id=7, message_id=counter["n"])
+
+    for name in (
+        "send_message", "send_photo", "send_video", "send_document", "send_audio",
+        "send_voice", "send_animation", "send_sticker", "send_video_note",
+    ):
+        setattr(bot, name, AsyncMock(side_effect=make))
+    bot.send_media_group = AsyncMock(
+        side_effect=lambda chat_id, media, **kw: tuple(make() for _ in media)
+    )
+    return bot
+
+
+class PrivateNoteMediaTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = _config(Path(self.tmp.name) / "db.sqlite3")
+        self.store = DirectoryStore(self.config.db_path)
+        self.store.init()
+        self.bot = _media_bot()
+        self.context = SimpleNamespace(
+            user_data={}, args=[], bot=self.bot,
+            application=SimpleNamespace(
+                bot_data={"store": self.store, "config": self.config}
+            ),
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _add(self, body, file_id="", file_type="", file_name=""):
+        self.store.add_private_note(
+            "资料", body, 7, file_id=file_id, file_type=file_type, file_name=file_name,
+        )
+        with self.store.connect() as conn:  # distinct, ordered created_at
+            conn.execute(
+                "UPDATE private_notes SET created_at=DATETIME('now', ? || ' seconds') WHERE id=(SELECT MAX(id) FROM private_notes)",
+                (str(len(self.store.private_notes("资料", limit=99))),),
+            )
+
+    def _query(self):
+        message = _message(1, text="资料")
+        update = SimpleNamespace(
+            effective_message=message, effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=7, type=ChatType.PRIVATE),
+        )
+        asyncio.run(send_private_notes(update, self.context, "资料"))
+        return message
+
+    def test_query_sends_original_media_after_list(self):
+        self._add("合同", "DOC", "document", "合同.pdf")
+        self._add("图1", "P1", "photo")
+        self._add("图2", "P2", "photo")
+        self._add("视频说明", "V1", "video")
+        self._add("纯文字")
+        message = self._query()
+        page_text = str(message.reply_text.await_args.args[0])
+        self.assertIn("纯文字", page_text)
+        self.assertIn("📎 附件：视频（见下方）", page_text)
+        self.assertIn("📎 附件：文件（合同.pdf）（见下方）", page_text)
+        # video + 2 photos are consecutive -> one media group, in list order
+        self.bot.send_media_group.assert_awaited_once()
+        media = self.bot.send_media_group.await_args.args[1]
+        self.assertEqual([m.media for m in media], ["V1", "P2", "P1"])
+        self.assertTrue(media[0].caption.startswith("#2 · "))
+        self.assertIn("视频说明", media[0].caption)
+        # document sent as the original file
+        self.bot.send_document.assert_awaited_once()
+        self.assertEqual(self.bot.send_document.await_args.args[1], "DOC")
+        self.assertIn("合同", self.bot.send_document.await_args.kwargs["caption"])
+
+    def test_single_video_and_invalid_file_fallback(self):
+        self.bot.send_video = AsyncMock(side_effect=BadRequest("wrong file identifier"))
+        self._add("坏视频", "BAD", "video")
+        self._query()
+        texts = [str(c.args[1]) for c in self.bot.send_message.await_args_list]
+        self.assertTrue(any("视频发送失败" in t and "坏视频" in t for t in texts))
+
+    def test_media_group_failure_falls_back_to_single_sends(self):
+        self.bot.send_media_group = AsyncMock(side_effect=BadRequest("bad group"))
+        self._add("a", "P1", "photo")
+        self._add("b", "V1", "video")
+        self._query()
+        self.bot.send_photo.assert_awaited_once()
+        self.bot.send_video.assert_awaited_once()
+
+    def test_long_caption_overflows_to_text_and_sticker_has_no_caption(self):
+        long_body = "<长>" + "字" * 1500
+        self._add(long_body, "D1", "document")
+        rows = self.store.private_notes("资料", limit=1)
+        asyncio.run(send_private_note_media(self.context, 7, [("#1 · t", rows[0])]))
+        caption = self.bot.send_document.await_args.kwargs["caption"]
+        self.assertLessEqual(len(caption), 1024)
+        self.assertIn("见下一条消息", caption)
+        overflow = str(self.bot.send_message.await_args.args[1])
+        self.assertIn("&lt;长&gt;", overflow)
+        self.assertEqual(len(overflow), len("&lt;长&gt;") + 1500)
+        self.store.add_private_note("贴", "贴纸说明", 7, file_id="S1", file_type="sticker", permanent=True)
+        sticker_row = self.store.private_notes("贴", limit=1)[0]
+        asyncio.run(send_private_note_media(self.context, 7, [("#1 · t", sticker_row)]))
+        self.bot.send_sticker.assert_awaited_once_with(7, "S1")
+        self.assertIn("贴纸说明", str(self.bot.send_message.await_args.args[1]))
+
+    def test_page_view_media_items_for_second_page(self):
+        for i in range(12):
+            if i == 0:
+                self._add("最早的视频", "V0", "video")
+            else:
+                self._add(f"文字{i}")
+        view = private_notes_page_view(self.store, "资料", 1)
+        text, markup, media_items, page, rows, total = view
+        self.assertEqual(page, 1)
+        self.assertEqual(total, 12)
+        self.assertEqual(len(media_items), 1)
+        self.assertTrue(media_items[0][0].startswith("#12 · "))
+        self.assertIn("（见下方）", text)
+        first = private_notes_page_view(self.store, "资料", 0)
+        self.assertEqual(first[2], [])
+
+    def test_save_confirmation_sends_previous_media(self):
+        self.store.add_private_note("客户", "上次的视频", 7, file_id="VPREV", file_type="video")
+        message = _message(1, text="2 客户 新文字")
+        update = SimpleNamespace(
+            effective_message=message, effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=7, type=ChatType.PRIVATE),
+        )
+        with patch("tg_directory_bot.bot.guard", new=AsyncMock(return_value=True)):
+            asyncio.run(private_message(update, self.context))
+        confirm = str(message.reply_text.await_args.args[0])
+        self.assertIn("上一条保存的信息：", confirm)
+        self.assertIn("📎 附件：视频（见下方）", confirm)
+        self.bot.send_video.assert_awaited_once()
+        self.assertEqual(self.bot.send_video.await_args.args[1], "VPREV")
+        self.assertIn("上一条保存的信息", self.bot.send_video.await_args.kwargs["caption"])
+        self.assertIn("上次的视频", self.bot.send_video.await_args.kwargs["caption"])
 
 
 class RafflePostponeTests(unittest.TestCase):
