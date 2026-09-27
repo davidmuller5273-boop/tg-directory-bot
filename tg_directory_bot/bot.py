@@ -894,6 +894,32 @@ def telegram_user_link(user_id: int, display_name: str) -> str:
     return f'<a href="tg://user?id={int(user_id)}">{html.escape(display_name)}</a>'
 
 
+RAFFLE_RULES_HEADING = "📜 规则："
+
+
+def raffle_rules_heading(rules: list[str]) -> str:
+    """Single 「规则」 heading line, unless the user's own text already starts with 规则."""
+    if not rules:
+        return ""
+    first = str(rules[0]).strip().lstrip("📜📋📌📝*#【[「<《 ").strip()
+    if first.startswith("规则"):
+        return ""
+    return RAFFLE_RULES_HEADING
+
+
+def raffle_min_participants(raffle) -> int:
+    try:
+        keys = raffle.keys()
+    except Exception:
+        return 0
+    if "min_participants" not in keys:
+        return 0
+    try:
+        return max(0, int(raffle["min_participants"] or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def raffle_text(raffle, show_count: bool = True) -> str:
     raffle_type = str(raffle["raffle_type"] or "universal")
     if raffle_type.startswith("activity_"):
@@ -945,6 +971,9 @@ def raffle_text(raffle, show_count: bool = True) -> str:
         how_to = "点击下方按钮参与抽奖。" + (f"也可发送关键词：{keyword}" if keyword else "")
     lines: list[str] = []
     if rules:
+        heading = raffle_rules_heading(rules)
+        if heading:
+            lines.append(heading)
         lines.extend(html.escape(rule) for rule in rules)
         lines.append("")
     lines.append(html.escape(title))
@@ -959,6 +988,9 @@ def raffle_text(raffle, show_count: bool = True) -> str:
         lines.append(f"├最低发言: {min_messages or int(conditions.get('messages') or 0)} 条")
     if conditions.get("boosts") or min_boosts:
         lines.append(f"├最低助推: {min_boosts or int(conditions.get('boosts') or 0)}")
+    min_participants = raffle_min_participants(raffle)
+    if min_participants > 0:
+        lines.append(f"├最少参与: {min_participants} 人（不足自动顺延一天）")
     if show_count:
         lines.append(f"├已参与: {raffle['entries']} 人")
     lines.append("├奖品列表:")
@@ -1424,6 +1456,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("support_button_id", None)
     context.user_data.pop("menu_mode", None)
     context.user_data.pop("group_poll_question", None)
+    context.user_data.pop("pending_private_note", None)
     await update.effective_message.reply_text(
         "已取消。",
         reply_markup=main_keyboard_for(
@@ -4154,23 +4187,238 @@ def parse_private_note_command(text: str) -> tuple[str, str, str] | None:
     return match.group(1), match.group(2), (match.group(3) or "").strip()
 
 
-async def save_private_note(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str, body: str) -> None:
+PRIVATE_NOTE_FILE_LABELS = {
+    "photo": "图片", "video": "视频", "audio": "音频",
+    "voice": "语音", "animation": "动图", "sticker": "贴纸",
+    "video_note": "视频消息",
+}
+PRIVATE_NOTE_PREVIEW_LIMIT = 500
+PENDING_NOTE_TIMEOUT_SECONDS = 600
+PENDING_NOTE_MAX_ITEMS = 50
+PENDING_NOTE_SAVE_WORDS = {"保存", "保存笔记", "确认保存"}
+PENDING_NOTE_CANCEL_WORDS = {"取消", "取消保存"}
+
+
+def private_note_file_label(row) -> str:
+    file_type = str(row["file_type"] or "")
+    label = PRIVATE_NOTE_FILE_LABELS.get(file_type, "文件")
+    name = str(row["file_name"] or "").strip()
+    extra = f"（{html.escape(name)}）" if name else ""
+    return f"📎 附件：{label}{extra}"
+
+
+def private_note_preview_html(row, limit: int = PRIVATE_NOTE_PREVIEW_LIMIT) -> str:
+    """HTML preview of one stored note: time, escaped/truncated text, media label."""
+    lines: list[str] = []
+    saved_at = format_beijing_time(row["created_at"]) if row["created_at"] else ""
+    if saved_at:
+        lines.append(f"🕒 {html.escape(saved_at)}")
+    body = str(row["body"] or "").strip()
+    if body:
+        if len(body) > limit:
+            body = body[:limit].rstrip() + "…"
+        lines.append(html.escape(body))
+    if str(row["file_id"] or ""):
+        lines.append(private_note_file_label(row))
+    return "\n".join(lines)
+
+
+def private_note_saved_text(
+    keyword: str, total: int, previous=None, *,
+    permanent: bool = False, saved_count: int = 1,
+) -> str:
+    """Save confirmation (HTML). Appends the previous note under the keyword if any."""
+    safe_keyword = html.escape(keyword)
+    if permanent:
+        lines = [f"已永久保存私密笔记：{safe_keyword}"]
+        if saved_count > 1:
+            lines.append(f"本次保存：{saved_count} 条")
+        lines.append(f"当前共有：{total} 条")
+        lines.append("保存时间：永久（不自动删除）")
+    else:
+        lines = [
+            f"已保存私密笔记：{safe_keyword}",
+            f"当前保留：{total}/99" if total <= 99 else f"当前保留：{total} 条",
+            "保存时间：9个月",
+        ]
+    text = "\n".join(lines)
+    if previous is not None:
+        preview = private_note_preview_html(previous)
+        if preview:
+            text += "\n\n上一条保存的信息：\n" + preview
+    return text
+
+
+async def save_private_note(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str, body: str,
+    permanent: bool = False,
+) -> None:
     message = update.effective_message
     if not keyword:
         await message.reply_text("用法：1 关键词 内容。带文件时把这句话写在文件说明里。")
         return
-    file_id, file_type, file_name = private_note_attachment(message)
+    file_id, file_type, file_name = (
+        publishing_attachment(message) if permanent else private_note_attachment(message)
+    )
     store: DirectoryStore = context.application.bot_data["store"]
+    previous = store.latest_private_note(keyword)
     try:
         note_id = store.add_private_note(
-            keyword, body, update.effective_user.id, file_id=file_id, file_type=file_type, file_name=file_name
+            keyword, body, update.effective_user.id, file_id=file_id, file_type=file_type,
+            file_name=file_name, permanent=permanent,
         )
     except ValueError as exc:
         await message.reply_text(str(exc))
         return
     total = store.count_private_notes(keyword)
-    store.audit(f"tg:{update.effective_user.id}", "private_note.add", keyword, f"id={note_id}")
-    await message.reply_text(f"已保存私密笔记：{keyword}\n当前保留：{total}/99\n保存时间：9个月")
+    store.audit(
+        f"tg:{update.effective_user.id}",
+        "private_note.add_permanent" if permanent else "private_note.add",
+        keyword, f"id={note_id}",
+    )
+    await message.reply_text(
+        private_note_saved_text(keyword, total, previous, permanent=permanent),
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+    )
+
+
+def pending_note_item(message) -> dict | None:
+    """Capture one collected message (text/caption + media file_id)."""
+    body = str(getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    file_id, file_type, file_name = publishing_attachment(message)
+    if not body and not file_id:
+        return None
+    return {
+        "body": body, "file_id": file_id, "file_type": file_type,
+        "file_name": file_name, "message_id": getattr(message, "message_id", 0),
+    }
+
+
+async def start_pending_private_note(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str,
+) -> None:
+    message = update.effective_message
+    previous_mode = str(context.user_data.pop("menu_mode", "") or "")
+    if previous_mode and previous_mode != "private_note_query":
+        clear_menu_input_failures(context, previous_mode)
+    context.user_data["pending_private_note"] = {
+        "keyword": keyword, "items": [], "touched": time.time(),
+        "media_groups": [],
+    }
+    store: DirectoryStore = context.application.bot_data["store"]
+    existing = store.count_private_notes(keyword)
+    existing_line = (
+        f"该关键词已有 {existing} 条笔记（查询请直接发送关键词）。\n" if existing else ""
+    )
+    await message.reply_text(
+        f"📥 开始收集私密笔记：{keyword}\n{existing_line}"
+        "请发送或转发要保存的消息（文字、图片、视频、文件等都可以，可多条）。\n"
+        "全部发完后发送「保存」（或回复任意一条消息「保存」）永久保存；发送「取消」放弃。\n"
+        "10 分钟内没有操作将自动取消。"
+    )
+
+
+async def handle_pending_private_note(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Return True if the message was consumed by the 2-关键词 pending-save mode."""
+    pending = context.user_data.get("pending_private_note")
+    if not isinstance(pending, dict):
+        return False
+    message = update.effective_message
+    if not message:
+        return False
+    if context.user_data.get("settings_draft") or context.user_data.get("menu_mode") not in (
+        None, "", "private_note_query",
+    ):
+        return False
+    keyword = str(pending.get("keyword") or "")
+    items = pending.setdefault("items", [])
+    if time.time() - float(pending.get("touched") or 0) > PENDING_NOTE_TIMEOUT_SECONDS:
+        context.user_data.pop("pending_private_note", None)
+        await message.reply_text(
+            f"「{keyword}」的待保存已超时（10分钟），"
+            + (f"收集的 {len(items)} 条未保存。" if items else "未保存任何内容。")
+        )
+        return False
+    user = update.effective_user
+    if not has_developer_access(context, user.id if user else None):
+        context.user_data.pop("pending_private_note", None)
+        return False
+    text = str(message.text or "").strip() if getattr(message, "text", None) else ""
+    has_media = bool(publishing_attachment(message)[0])
+    is_forward = bool(getattr(message, "forward_origin", None))
+    if text and not has_media and not is_forward:
+        if text in PENDING_NOTE_CANCEL_WORDS:
+            context.user_data.pop("pending_private_note", None)
+            await message.reply_text(f"已取消保存「{keyword}」，收集的 {len(items)} 条未保存。")
+            return True
+        if text in PENDING_NOTE_SAVE_WORDS:
+            if not items:
+                pending["touched"] = time.time()
+                await message.reply_text(
+                    f"还没有收集到任何消息。请先发送或转发要保存到「{keyword}」的内容，"
+                    "或发送「取消」退出。"
+                )
+                return True
+            store: DirectoryStore = context.application.bot_data["store"]
+            previous = store.latest_private_note(keyword)
+            saved = 0
+            for item in items:
+                try:
+                    store.add_private_note(
+                        keyword, str(item.get("body") or ""), user.id,
+                        file_id=str(item.get("file_id") or ""),
+                        file_type=str(item.get("file_type") or ""),
+                        file_name=str(item.get("file_name") or ""),
+                        permanent=True,
+                    )
+                    saved += 1
+                except ValueError:
+                    continue
+            context.user_data.pop("pending_private_note", None)
+            total = store.count_private_notes(keyword)
+            store.audit(
+                f"tg:{user.id}", "private_note.add_permanent", keyword, f"batch={saved}",
+            )
+            await message.reply_text(
+                private_note_saved_text(
+                    keyword, total, previous, permanent=True, saved_count=saved,
+                ),
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            )
+            return True
+        parsed = parse_private_note_command(text)
+        if parsed and parsed[0] == "2" and parsed[1] and not parsed[2]:
+            pending["touched"] = time.time()
+            await message.reply_text(
+                f"正在收集「{keyword}」（已收集 {len(items)} 条）。"
+                "请先发送「保存」或「取消」，再开始新的关键词。"
+            )
+            return True
+    item = pending_note_item(message)
+    if item is None:
+        pending["touched"] = time.time()
+        await message.reply_text("这类消息暂不支持保存，请发送文字、图片、视频、文件等。")
+        return True
+    if len(items) >= PENDING_NOTE_MAX_ITEMS:
+        await message.reply_text(
+            f"单次最多收集 {PENDING_NOTE_MAX_ITEMS} 条，请先发送「保存」。"
+        )
+        return True
+    items.append(item)
+    pending["touched"] = time.time()
+    context.user_data["preserve_incoming_message_id"] = message.message_id
+    media_group = str(getattr(message, "media_group_id", "") or "")
+    groups = pending.setdefault("media_groups", [])
+    if media_group and media_group in groups:
+        return True
+    if media_group:
+        groups.append(media_group)
+    await message.reply_text(
+        f"已收集第 {len(items)} 条（{keyword}）。继续发送，或发送「保存」完成、「取消」放弃。"
+    )
+    return True
 
 
 async def send_private_notes(
@@ -4207,18 +4455,11 @@ async def send_private_notes(
         header = f"<b>#{index}</b> · {html.escape(format_beijing_time(row['created_at']))}"
         body = str(row["body"] or "").strip()
         file_id = str(row["file_id"] or "")
-        file_type = str(row["file_type"] or "")
         lines.append(header)
         if body:
             lines.append(html.escape(body))
         if file_id:
-            label = {
-                "photo": "图片", "video": "视频", "audio": "音频",
-                "voice": "语音", "animation": "动图",
-            }.get(file_type, "文件")
-            name = str(row["file_name"] or "").strip()
-            extra = f"（{html.escape(name)}）" if name else ""
-            lines.append(f"📎 附件：{label}{extra}")
+            lines.append(private_note_file_label(row))
         lines.append("")
     text = chr(10).join(lines).rstrip()
     context.user_data["privnote_keyword"] = keyword
@@ -4271,6 +4512,8 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     message = update.effective_message
     if message and context.user_data.get("consumed_private_message") == message.message_id:
         context.user_data.pop("consumed_private_message", None)
+        return
+    if await handle_pending_private_note(update, context):
         return
     text = (message.text or message.caption or "").strip() if message else ""
     config: Config = context.application.bot_data["config"]
@@ -4354,8 +4597,18 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         action, keyword, body = note_command
         if action == "1":
             await save_private_note(update, context, keyword, body)
+        elif keyword and (body or publishing_attachment(message)[0]):
+            # 2 关键词 内容：立即永久保存
+            await save_private_note(update, context, keyword, body, permanent=True)
+        elif keyword:
+            # 2 关键词：进入待保存模式，收集后续转发/发送的消息
+            await start_pending_private_note(update, context, keyword)
         else:
-            await send_private_notes(update, context, keyword)
+            await message.reply_text(
+                "用法：\n2 关键词 内容 —— 立即永久保存\n"
+                "2 关键词 —— 之后发送/转发多条消息，再发「保存」一起永久保存\n"
+                "查询笔记请直接发送关键词。"
+            )
         return
     normalized_note_keyword = " ".join(text.split())
     if (
@@ -4396,6 +4649,10 @@ async def process_menu_input(
             context.user_data.pop("menu_mode", None)
             await message.reply_text("仅开发者可用。")
             return True
+        parsed_note = parse_private_note_command(text)
+        if parsed_note and parsed_note[1]:
+            # 「1 关键词 内容」/「2 关键词 …」交给私人笔记命令处理
+            return False
         keyword = " ".join(text.split())
         record_selected_bot_usage(update, store)
         await send_private_notes(update, context, keyword)
@@ -5140,16 +5397,25 @@ async def send_due_channel_broadcasts(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def pin_raffle_message(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, raffle_id: int
-) -> None:
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, raffle_id: int | str
+) -> bool:
+    """Pin a raffle-related group message silently; never raise (e.g. no pin rights)."""
     try:
+        if not message_id or int(chat_id) >= 0:
+            return False
         await context.bot.pin_chat_message(
             chat_id, message_id, disable_notification=True
         )
-    except TelegramError as exc:
-        context.application.bot_data["store"].audit(
-            "bot", "raffle.pin_failed", str(raffle_id), str(exc)
-        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - pinning is best-effort
+        logging.info("Could not pin raffle message %s in %s: %s", message_id, chat_id, exc)
+        try:
+            context.application.bot_data["store"].audit(
+                "bot", "raffle.pin_failed", str(raffle_id), str(exc)[:300]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
 
 
@@ -5230,6 +5496,18 @@ def name_history_view(
     return "\n".join(lines)
 
 
+def parse_min_participants(value: object) -> int:
+    raw = str(value if value is not None else "").strip()
+    if raw in {"", "无", "不限", "不限制", "-", "关闭"}:
+        return 0
+    if not raw.isdigit():
+        raise ValueError("最少参与人数请填写整数，0 表示不限制")
+    number_value = int(raw)
+    if number_value > 100000:
+        raise ValueError("最少参与人数不能大于 100000")
+    return number_value
+
+
 def build_raffle_extras_from_pro(answers: list[str]) -> tuple[str, int, str, dict]:
     """Return ends_at, winner_count, prize, extras from raffle_pro answers."""
     if len(answers) < 8:
@@ -5271,6 +5549,7 @@ def build_raffle_extras_from_pro(answers: list[str]) -> tuple[str, int, str, dic
         prize = " | ".join(parts[1:])
     parse_raffle_prizes(prize, winner_count, strict=True)
     recur = str(answers[7] or "").strip() in {"是", "开启", "on", "1", "yes"}
+    min_participants = parse_min_participants(answers[8] if len(answers) > 8 else "")
     join_keyword = str(conditions.get("keyword") or "")
     channel_ref = str(conditions.get("channel") or "")
     min_messages = int(conditions.get("messages") or 0)
@@ -5293,6 +5572,7 @@ def build_raffle_extras_from_pro(answers: list[str]) -> tuple[str, int, str, dic
         "recur_daily": 1 if recur else 0,
         "stats_start_mode": stats_start_mode,
         "stats_start_at": stats_start_at,
+        "min_participants": min_participants,
     }
     extras["template_json"] = json.dumps(
         {
@@ -5305,6 +5585,7 @@ def build_raffle_extras_from_pro(answers: list[str]) -> tuple[str, int, str, dic
             "recur_daily": 1 if recur else 0,
             "stats_start_mode": stats_start_mode,
             "draw_clock": str(answers[2] or "").strip(),
+            "min_participants": min_participants,
         },
         ensure_ascii=False,
     )
@@ -5419,7 +5700,7 @@ def sight_user_profile_from_tg(store: DirectoryStore, chat_id: int, user) -> Non
 
 
 def raffle_pro_answers_from_row(raffle) -> list[str]:
-    """Rebuild the 8 raffle_pro wizard answers from a stored raffle row."""
+    """Rebuild the 9 raffle_pro wizard answers from a stored raffle row."""
     title = str(_raffle_field(raffle, "title", "") or "").strip() or "通用抽奖"
     rules = parse_raffle_rules(_raffle_field(raffle, "rules_json", ""))
     rules_text = "\n".join(rules) if rules else "无"
@@ -5487,9 +5768,10 @@ def raffle_pro_answers_from_row(raffle) -> list[str]:
         prize_name = tiers[0][1] if tiers else prize
         prize_text = f"{winner_count} | {prize_name}"
     recur = "是" if int(_raffle_field(raffle, "recur_daily", 0) or 0) else "否"
+    min_participants = str(raffle_min_participants(raffle))
     return [
         title, rules_text, draw_clock, stats_text, conditions_text,
-        how_to, prize_text, recur,
+        how_to, prize_text, recur, min_participants,
     ]
 
 
@@ -7071,7 +7353,13 @@ async def point_draw_gift(
             f"消耗：{format_points(result['points_spent'])} 积分 · 剩余：{format_points(result['balance'])} 积分"
         )
         with persistent_message():
-            await context.bot.send_message(draw_chat_id, text, parse_mode=ParseMode.HTML)
+            win_message = await context.bot.send_message(
+                draw_chat_id, text, parse_mode=ParseMode.HTML
+            )
+        await pin_raffle_message(
+            context, draw_chat_id, getattr(win_message, "message_id", 0),
+            f"points:{result['redemption_id']}",
+        )
         await query.answer(
             f"恭喜中奖！本次消耗 {format_points(result['points_spent'])} 积分，"
             f"剩余 {format_points(result['balance'])} 积分。",
@@ -7224,11 +7512,19 @@ async def point_redeem_reply(
         await message.reply_text(str(exc))
         return
     mention = telegram_user_link(user.id, user.full_name or user.username or "群成员")
-    await message.reply_text(
+    redeem_text = (
         f"🎁 {mention} 兑换成功\n礼品：{html.escape(gift_name)}\n"
-        f"兑换编号：#{redemption_id}\n剩余积分：{format_points(balance)}\n请联系群主领取。",
-        parse_mode=ParseMode.HTML,
+        f"兑换编号：#{redemption_id}\n剩余积分：{format_points(balance)}\n请联系群主领取。"
     )
+    in_group = chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+    if in_group:
+        with persistent_message():
+            sent = await message.reply_text(redeem_text, parse_mode=ParseMode.HTML)
+        await pin_raffle_message(
+            context, chat.id, getattr(sent, "message_id", 0), f"redeem:{redemption_id}",
+        )
+    else:
+        await message.reply_text(redeem_text, parse_mode=ParseMode.HTML)
 
 
 async def welcome_new_members(
@@ -8552,6 +8848,12 @@ async def draw_raffle(context: ContextTypes.DEFAULT_TYPE, raffle_id: int, reques
         entries = store.raffle_entries(raffle_id)
     else:
         entries = store.raffle_entries(raffle_id)
+    min_participants = raffle_min_participants(raffle)
+    if min_participants > 0 and len(entries) < min_participants:
+        await postpone_raffle_for_min_participants(
+            context, raffle, len(entries), min_participants, requested_by,
+        )
+        return
     winner_total = min(int(raffle["winner_count"]), len(entries))
     if raffle_type == "activity_rank":
         candidate_order = {
@@ -8635,11 +8937,99 @@ async def draw_raffle(context: ContextTypes.DEFAULT_TYPE, raffle_id: int, reques
         )
     try:
         with persistent_message():
-            await context.bot.send_message(int(raffle["chat_id"]), result, parse_mode=ParseMode.HTML)
+            result_message = await context.bot.send_message(
+                int(raffle["chat_id"]), result, parse_mode=ParseMode.HTML
+            )
+        await pin_raffle_message(
+            context, int(raffle["chat_id"]),
+            getattr(result_message, "message_id", 0), raffle_id,
+        )
     except TelegramError as exc:
         logging.exception("Could not announce raffle %s", raffle_id)
         store.audit("bot", "raffle.announce_failed", str(raffle_id), str(exc))
     store.audit(requested_by, "raffle.draw", str(raffle_id), f"entries={len(entries)} winners={winner_total}")
+
+
+def next_postponed_ends_at(ends_at: str, now: datetime | None = None) -> str:
+    """Same Beijing clock on the next day (repeat until it is in the future)."""
+    now = now or datetime.now(timezone.utc)
+    end_dt = DirectoryStore._parse_utc_text(str(ends_at or "")) or now
+    new_dt = end_dt + timedelta(days=1)  # Beijing has no DST: +24h == next day same clock
+    while new_dt <= now:
+        new_dt += timedelta(days=1)
+    return new_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def raffle_postpone_text(raffle, entries: int, minimum: int, new_ends_at: str) -> str:
+    title = str(_raffle_field(raffle, "title", "") or "").strip()
+    name = f"抽奖 #{raffle['id']}" + (f"「{html.escape(title)}」" if title else "")
+    return (
+        f"⏳ {name}人数不足（当前 {entries}/{minimum}），"
+        f"顺延到 {html.escape(format_raffle_draw_time(new_ends_at))} 开奖。\n"
+        f"已参与记录保留，参与人数达到 {minimum} 人后将按时开奖。"
+    )
+
+
+async def postpone_raffle_for_min_participants(
+    context: ContextTypes.DEFAULT_TYPE, raffle, entries: int, minimum: int,
+    requested_by: str = "scheduler",
+) -> str:
+    """Postpone an under-subscribed raffle by one day; announce + pin in group."""
+    store: DirectoryStore = context.application.bot_data["store"]
+    raffle_id = int(raffle["id"])
+    chat_id = int(raffle["chat_id"])
+    new_ends_at = next_postponed_ends_at(str(raffle["ends_at"] or ""))
+    if not store.postpone_raffle(raffle_id, new_ends_at):
+        return ""
+    store.audit(
+        requested_by, "raffle.postpone", str(raffle_id),
+        f"entries={entries}/{minimum}; ends={new_ends_at}",
+    )
+    try:
+        await refresh_raffle_announcement(context, raffle_id, chat_id)
+    except TelegramError as exc:
+        logging.info("Could not refresh postponed raffle %s: %s", raffle_id, exc)
+    try:
+        with persistent_message():
+            notice = await context.bot.send_message(
+                chat_id, raffle_postpone_text(raffle, entries, minimum, new_ends_at),
+                parse_mode=ParseMode.HTML,
+            )
+        await pin_raffle_message(
+            context, chat_id, getattr(notice, "message_id", 0), raffle_id,
+        )
+    except TelegramError as exc:
+        logging.info("Could not announce raffle postponement %s: %s", raffle_id, exc)
+        store.audit("bot", "raffle.postpone_announce_failed", str(raffle_id), str(exc))
+    return new_ends_at
+
+
+async def announce_new_raffle(
+    context: ContextTypes.DEFAULT_TYPE, raffle_id: int,
+) -> None:
+    """Post + pin the start announcement for a raffle created without one (daily recur)."""
+    store: DirectoryStore = context.application.bot_data["store"]
+    raffle = store.get_raffle(raffle_id)
+    if not raffle:
+        return
+    chat_id = int(raffle["chat_id"])
+    show_count = raffle_count_visible(store, chat_id)
+    markup = (
+        raffle_keyboard(raffle_id, int(raffle["entries"] or 0), show_count, raffle=raffle)
+        if str(raffle["raffle_type"] or "") == "universal" else None
+    )
+    try:
+        with persistent_message():
+            sent = await context.bot.send_message(
+                chat_id, raffle_text(raffle, show_count),
+                parse_mode=ParseMode.HTML, reply_markup=markup,
+            )
+    except TelegramError as exc:
+        logging.info("Could not announce recurring raffle %s: %s", raffle_id, exc)
+        store.audit("bot", "raffle.announce_failed", str(raffle_id), str(exc))
+        return
+    store.set_raffle_message(raffle_id, sent.message_id)
+    await pin_raffle_message(context, chat_id, sent.message_id, raffle_id)
 
 
 async def spawn_daily_recur_raffles(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8686,9 +9076,14 @@ async def spawn_daily_recur_raffles(context: ContextTypes.DEFAULT_TYPE) -> None:
             stats_start_mode=stats_mode,
             stats_start_at=stats_start_at,
             template_json=str(raffle["template_json"] or ""),
+            min_participants=int(
+                template.get("min_participants")
+                or raffle_min_participants(raffle) or 0
+            ),
         )
         store.mark_raffle_recur_spawned(int(raffle["id"]))
         store.audit("scheduler", "raffle.recur", str(raffle["id"]), f"new={new_id}; ends={ends_at}")
+        await announce_new_raffle(context, new_id)
 
 
 async def draw_due_raffles(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10784,8 +11179,9 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         if plan == "pro":
             context.user_data.pop("edit_raffle_id", None)
-            context.user_data.pop("wizard_prefills", None)
             context.user_data.pop("wizard_action_title", None)
+            # 最少参与人数默认 0（不限制），可直接「保留并下一步」
+            context.user_data["wizard_prefills"] = [None] * 8 + ["0"]
             context.user_data["menu_mode"] = "raffle_pro"
             await query.answer()
             return
@@ -11002,13 +11398,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 lines.append(html.escape(body))
             file_id = str(row["file_id"] or "")
             if file_id:
-                label = {
-                    "photo": "图片", "video": "视频", "audio": "音频",
-                    "voice": "语音", "animation": "动图",
-                }.get(str(row["file_type"] or ""), "文件")
-                name = str(row["file_name"] or "").strip()
-                extra = f"（{html.escape(name)}）" if name else ""
-                lines.append(f"📎 附件：{label}{extra}")
+                lines.append(private_note_file_label(row))
             lines.append("")
         nav = []
         if page > 0:
@@ -11034,7 +11424,9 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["menu_mode"] = "private_note_query"
         await query.answer()
         await query.edit_message_text(
-            "🗒 私人笔记\n\n录入：1 关键词 内容\n查询：直接发送关键词（一次显示 10 条，可翻页）\n"
+            "🗒 私人笔记\n\n录入：1 关键词 内容（保存9个月）\n"
+            "永久：2 关键词 内容；或发 2 关键词 后转发多条消息，再发「保存」\n"
+            "查询：直接发送关键词（一次显示 10 条，可翻页）\n"
             "每次显示最近5条，最多保留99条，保存9个月。\n"
             "查询消息和结果连续3分钟没有点击按钮后撤回。",
             reply_markup=admin_menu_keyboard(True, True),

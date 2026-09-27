@@ -936,6 +936,8 @@ class DirectoryStore:
             self._ensure_column(conn, "raffles", "stats_start_mode", "TEXT NOT NULL DEFAULT 'immediate'")
             self._ensure_column(conn, "raffles", "stats_start_at", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "raffles", "template_json", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "raffles", "min_participants", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "private_notes", "is_permanent", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "raffle_winners", "note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "raffle_entries", "via_keyword", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(
@@ -4044,6 +4046,8 @@ class DirectoryStore:
         with self.connect() as conn:
             conn.execute("DELETE FROM private_notes WHERE expires_at < CURRENT_TIMESTAMP")
 
+    PERMANENT_NOTE_EXPIRES_AT = "9999-12-31 23:59:59"
+
     def add_private_note(
         self,
         keyword: str,
@@ -4052,6 +4056,7 @@ class DirectoryStore:
         file_id: str = "",
         file_type: str = "",
         file_name: str = "",
+        permanent: bool = False,
     ) -> int:
         keyword = keyword.strip().casefold()
         if not keyword:
@@ -4060,26 +4065,45 @@ class DirectoryStore:
             raise ValueError("内容或文件不能为空")
         with self.connect() as conn:
             conn.execute("DELETE FROM private_notes WHERE expires_at < CURRENT_TIMESTAMP")
-            cursor = conn.execute(
-                """INSERT INTO private_notes
-                   (keyword, body, file_id, file_type, file_name, created_by, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, DATETIME('now', '+9 months'))""",
-                (
-                    keyword[:120], body.strip()[:4000], file_id.strip()[:512],
-                    file_type.strip()[:40], file_name.strip()[:240], created_by,
-                ),
-            )
+            if permanent:
+                cursor = conn.execute(
+                    """INSERT INTO private_notes
+                       (keyword, body, file_id, file_type, file_name, created_by,
+                        expires_at, is_permanent)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
+                    (
+                        keyword[:120], body.strip()[:4000], file_id.strip()[:512],
+                        file_type.strip()[:40], file_name.strip()[:240], created_by,
+                        self.PERMANENT_NOTE_EXPIRES_AT,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """INSERT INTO private_notes
+                       (keyword, body, file_id, file_type, file_name, created_by, expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, DATETIME('now', '+9 months'))""",
+                    (
+                        keyword[:120], body.strip()[:4000], file_id.strip()[:512],
+                        file_type.strip()[:40], file_name.strip()[:240], created_by,
+                    ),
+                )
+            # 永久笔记不参与 99 条上限裁剪，只裁剪普通（9个月）笔记。
             conn.execute(
                 """DELETE FROM private_notes
-                   WHERE keyword=? AND id NOT IN (
+                   WHERE keyword=? AND COALESCE(is_permanent,0)=0 AND id NOT IN (
                      SELECT id FROM private_notes
-                     WHERE keyword=?
+                     WHERE keyword=? AND COALESCE(is_permanent,0)=0
                      ORDER BY created_at DESC, id DESC
                      LIMIT 99
                    )""",
                 (keyword[:120], keyword[:120]),
             )
             return int(cursor.lastrowid)
+
+    def latest_private_note(self, keyword: str) -> sqlite3.Row | None:
+        """Most recent (non-expired) note under keyword, or None."""
+        rows = self.private_notes(keyword, limit=1)
+        return rows[0] if rows else None
 
     def private_notes(
         self, keyword: str, limit: int = 10, offset: int = 0,
@@ -4675,7 +4699,7 @@ class DirectoryStore:
         how_to_join: str = "", join_keyword: str = "", channel_ref: str = "",
         min_messages: int = 0, min_boosts: int = 0, recur_daily: int = 0,
         stats_start_mode: str = "immediate", stats_start_at: str = "",
-        template_json: str = "",
+        template_json: str = "", min_participants: int = 0,
     ) -> int:
         if raffle_type not in {"universal", "activity_random", "activity_rank"}:
             raise ValueError("未知抽奖类型")
@@ -4688,8 +4712,8 @@ class DirectoryStore:
                     activity_start_at, activity_min_messages, title, rules_json,
                     conditions_json, how_to_join, join_keyword, channel_ref,
                     min_messages, min_boosts, recur_daily, stats_start_mode,
-                    stats_start_at, template_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    stats_start_at, template_json, min_participants)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     raffle_id, chat_id, creator_id, prize[:500], winner_count, ends_at,
                     raffle_type, activity_start_at, max(0, activity_min_messages),
@@ -4701,6 +4725,7 @@ class DirectoryStore:
                     str(stats_start_mode or "immediate")[:20],
                     str(stats_start_at or "")[:40],
                     str(template_json or "")[:8000],
+                    max(0, int(min_participants or 0)),
                 ),
             )
             return raffle_id
@@ -4716,7 +4741,7 @@ class DirectoryStore:
         how_to_join: str = "", join_keyword: str = "", channel_ref: str = "",
         min_messages: int = 0, min_boosts: int = 0, recur_daily: int = 0,
         stats_start_mode: str = "immediate", stats_start_at: str = "",
-        template_json: str = "",
+        template_json: str = "", min_participants: int = 0,
     ) -> bool:
         """Update an active raffle owned by chat_id; entries/winners untouched."""
         with self.connect() as conn:
@@ -4733,7 +4758,7 @@ class DirectoryStore:
                     title=?, rules_json=?, conditions_json=?, how_to_join=?,
                     join_keyword=?, channel_ref=?, min_messages=?, min_boosts=?,
                     recur_daily=?, stats_start_mode=?, stats_start_at=?,
-                    template_json=?
+                    template_json=?, min_participants=?
                    WHERE id=? AND chat_id=? AND status='active'""",
                 (
                     prize[:500], winner_count, ends_at,
@@ -4745,6 +4770,7 @@ class DirectoryStore:
                     str(stats_start_mode or "immediate")[:20],
                     str(stats_start_at or "")[:40],
                     str(template_json or "")[:8000],
+                    max(0, int(min_participants or 0)),
                     raffle_id, chat_id,
                 ),
             )
@@ -5063,6 +5089,15 @@ class DirectoryStore:
                     (entries, int(raffle["id"])),
                 ).fetchone())
         return qualified
+
+    def postpone_raffle(self, raffle_id: int, new_ends_at: str) -> bool:
+        """Move an active raffle's draw time; entries are kept untouched."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE raffles SET ends_at=? WHERE id=? AND status='active'",
+                (str(new_ends_at)[:40], raffle_id),
+            )
+            return cursor.rowcount > 0
 
     def due_raffles(self, limit: int = 20) -> list[sqlite3.Row]:
         with self.connect() as conn:

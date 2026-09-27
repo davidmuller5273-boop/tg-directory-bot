@@ -251,7 +251,8 @@ class NameHistoryAndRaffleTests(unittest.TestCase):
         )
         self.store.join_raffle(rid, 88, "member", "成员")
         answers = raffle_pro_answers_from_row(self.store.get_raffle(rid))
-        self.assertEqual(len(answers), 8)
+        self.assertEqual(len(answers), 9)
+        self.assertEqual(answers[8], "0")
         self.assertEqual(answers[0], "春日福利")
         self.assertEqual(answers[1], "规则A")
         self.assertEqual(answers[2], "2099-09-15 21:00")
@@ -294,11 +295,11 @@ class NameHistoryAndRaffleTests(unittest.TestCase):
 
     def test_recur_daily_message_window_only_counts_draw_day(self):
         chat_id, creator, user_id = -3001, 1, 77
-        # Draw at Beijing 2026-09-24 21:00 → UTC 2026-09-24 13:00
-        ends_bj = datetime(2026, 9, 24, 21, 0, 0, tzinfo=BEIJING_TZ)
+        # Draw at Beijing 2099-09-24 21:00 → UTC 2099-09-24 13:00
+        ends_bj = datetime(2099, 9, 24, 21, 0, 0, tzinfo=BEIJING_TZ)
         ends_at = ends_bj.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         # Old absolute stats_start from previous day (Beijing Sep 23 09:00)
-        old_stats_bj = datetime(2026, 9, 23, 9, 0, 0, tzinfo=BEIJING_TZ)
+        old_stats_bj = datetime(2099, 9, 23, 9, 0, 0, tzinfo=BEIJING_TZ)
         old_stats = old_stats_bj.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         rid = self.store.create_raffle(
             chat_id, creator, "奖品", 1, ends_at,
@@ -312,13 +313,13 @@ class NameHistoryAndRaffleTests(unittest.TestCase):
         raffle = self.store.get_raffle(rid)
         start, end = DirectoryStore._raffle_message_window(raffle)
         # Day stats start = Sep 24 09:00 Beijing
-        expect_start_bj = datetime(2026, 9, 24, 9, 0, 0, tzinfo=BEIJING_TZ)
+        expect_start_bj = datetime(2099, 9, 24, 9, 0, 0, tzinfo=BEIJING_TZ)
         expect_start = expect_start_bj.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self.assertEqual(start, expect_start)
         self.assertEqual(end, ends_at)
 
         # Yesterday messages (after old absolute start) must NOT qualify
-        yesterday = datetime(2026, 9, 23, 12, 0, 0, tzinfo=BEIJING_TZ)
+        yesterday = datetime(2099, 9, 23, 12, 0, 0, tzinfo=BEIJING_TZ)
         self._insert_message_at(
             chat_id, user_id,
             yesterday.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -330,7 +331,7 @@ class NameHistoryAndRaffleTests(unittest.TestCase):
         )
 
         # Same-day messages after day_stats_start DO qualify
-        today_msg = datetime(2026, 9, 24, 10, 0, 0, tzinfo=BEIJING_TZ)
+        today_msg = datetime(2099, 9, 24, 10, 0, 0, tzinfo=BEIJING_TZ)
         self._insert_message_at(
             chat_id, user_id,
             today_msg.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
