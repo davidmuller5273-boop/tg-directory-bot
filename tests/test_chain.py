@@ -1898,7 +1898,12 @@ class ChainTest(unittest.TestCase):
             self.assertEqual(rows[0].user_id, 123)
             self.assertEqual(rows[0].title, "菠菜")
             self.assertEqual(rows[0].url, "https://t.me/example")
-            context.bot.send_message.assert_awaited_once()
+            # 审核通知：先发原样内容，再发审核卡片
+            self.assertEqual(context.bot.send_message.await_count, 2)
+            self.assertEqual(
+                context.bot.send_message.await_args_list[0].args[1], "https://t.me/example"
+            )
+            self.assertIn("待审核", context.bot.send_message.await_args_list[1].args[1])
 
     def test_approved_keyword_triggers_without_address_suffix(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -12,6 +14,25 @@ from datetime import datetime, timezone
 from .time_utils import BEIJING_TZ
 from .validation import Submission
 
+
+
+ENTRY_KEYWORD_SUFFIX = "地址"
+_INVISIBLE_KEYWORD_CHARS = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+
+
+def entry_keyword_key(value: str, suffix: str = ENTRY_KEYWORD_SUFFIX) -> str:
+    """Normalize a 收录 keyword for exact matching and de-duplication.
+
+    NFKC (full-width -> half-width), drop all whitespace and zero-width chars,
+    casefold, then strip one trailing suffix (default 「地址」) so that
+    「XX」 and 「XX地址」 share the same key.
+    """
+    text = unicodedata.normalize("NFKC", str(value or "")).translate(_INVISIBLE_KEYWORD_CHARS)
+    text = "".join(text.split()).casefold()
+    suffix_key = "".join(unicodedata.normalize("NFKC", str(suffix or "")).split()).casefold()
+    if suffix_key and len(text) > len(suffix_key) and text.endswith(suffix_key):
+        text = text[:-len(suffix_key)]
+    return text
 
 
 POINTS_QUANT = Decimal("0.01")
@@ -90,6 +111,11 @@ class Entry:
     media_name: str = ""
     source_chat_id: int = 0
     source_message_id: int = 0
+    entities_json: str = "[]"
+    buttons_json: str = "[]"
+    copy_chat_id: int = 0
+    copy_message_id: int = 0
+    keyword_key: str = ""
 
 
 class DirectoryStore:
@@ -879,6 +905,14 @@ class DirectoryStore:
             self._ensure_column(conn, "entries", "media_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "entries", "source_chat_id", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "entries", "source_message_id", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "entries", "keyword_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "entries", "entities_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "entries", "buttons_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "entries", "copy_chat_id", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "entries", "copy_message_id", "INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entries_keyword_key ON entries(keyword_key, status)"
+            )
             self._ensure_column(conn, "group_ads", "buttons_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "group_ads", "source_chat_id", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "group_ads", "source_message_id", "INTEGER NOT NULL DEFAULT 0")
@@ -1044,6 +1078,11 @@ class DirectoryStore:
             self._ensure_column(conn, "bot_clones", "status", "TEXT NOT NULL DEFAULT 'pending'")
             self._ensure_column(conn, "bot_clones", "reviewed_by", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "bot_clones", "reviewed_at", "TEXT")
+            self._ensure_column(conn, "bot_clones", "parent_clone_id", "INTEGER NOT NULL DEFAULT 0")
+            # 旧记录均视为已通知；子机器人提交的新申请写入 notified=0，由母机器人推送审核
+            self._ensure_column(conn, "bot_clones", "notified", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(conn, "bot_clones", "owner_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "bot_clones", "result_notified", "INTEGER NOT NULL DEFAULT 1")
             conn.execute(
                 "DELETE FROM group_operations WHERE created_at<DATETIME('now','-7 days')"
             )
@@ -1124,6 +1163,13 @@ class DirectoryStore:
                 conn.execute(
                     "INSERT INTO settings (key,value) VALUES ('entry_titles_address_suffix_v1','1')"
                 )
+            # 关键词精确匹配键：每次启动校正一次（幂等，不删除任何数据）
+            for row in conn.execute("SELECT id, title, keyword_key FROM entries").fetchall():
+                key = entry_keyword_key(str(row["title"] or ""))
+                if key != str(row["keyword_key"] or ""):
+                    conn.execute(
+                        "UPDATE entries SET keyword_key=? WHERE id=?", (key, int(row["id"]))
+                    )
 
     def ensure_config_admins(
         self, admin_ids: set[int], super_admin_ids: set[int],
@@ -1386,19 +1432,28 @@ class DirectoryStore:
             return cursor.rowcount > 0
 
     def save_bot_clone_request(
-        self, owner_id: int, bot_id: int, bot_username: str, token_cipher: str
+        self, owner_id: int, bot_id: int, bot_username: str, token_cipher: str,
+        parent_clone_id: int = 0, notified: bool = True, owner_name: str = "",
     ) -> int:
         with self.connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO bot_clones
-                       (owner_id,bot_id,bot_username,token_cipher,status,is_enabled)
-                   VALUES (?,?,?,?,'pending',0)
+                       (owner_id,bot_id,bot_username,token_cipher,status,is_enabled,
+                        parent_clone_id,notified,owner_name,result_notified)
+                   VALUES (?,?,?,?,'pending',0,?,?,?,?)
                    ON CONFLICT(bot_id) DO UPDATE SET
                      owner_id=excluded.owner_id, bot_username=excluded.bot_username,
                      token_cipher=excluded.token_cipher, status='pending',
                      is_enabled=0, reviewed_by=0, reviewed_at=NULL, last_error='',
+                     parent_clone_id=excluded.parent_clone_id,
+                     notified=excluded.notified, owner_name=excluded.owner_name,
+                     result_notified=excluded.result_notified,
                      updated_at=CURRENT_TIMESTAMP""",
-                (owner_id, bot_id, bot_username[:80], token_cipher),
+                (
+                    owner_id, bot_id, bot_username[:80], token_cipher,
+                    int(parent_clone_id or 0), int(bool(notified)), owner_name[:120],
+                    int(bool(notified)),
+                ),
             )
             row = conn.execute("SELECT id FROM bot_clones WHERE bot_id=?", (bot_id,)).fetchone()
             return int(row["id"] if row else cursor.lastrowid)
@@ -1414,8 +1469,95 @@ class DirectoryStore:
                           u.first_name AS owner_first_name
                    FROM bot_clones c LEFT JOIN users u ON u.user_id=c.owner_id
                    ORDER BY c.id DESC LIMIT ?""",
-                (max(1, min(limit, 500)),),
+                (max(1, min(limit, 5000)),),
             ).fetchall()
+
+    def bot_clone_by_bot_id(self, bot_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM bot_clones WHERE bot_id=?", (int(bot_id),)
+            ).fetchone()
+
+    def bot_clone_ancestors(self, clone_id: int) -> list[sqlite3.Row]:
+        """Chain from the given clone up to (not including) the mother bot."""
+        chain: list[sqlite3.Row] = []
+        seen: set[int] = set()
+        current = int(clone_id or 0)
+        with self.connect() as conn:
+            while current and current not in seen:
+                seen.add(current)
+                row = conn.execute("SELECT * FROM bot_clones WHERE id=?", (current,)).fetchone()
+                if not row:
+                    break
+                chain.append(row)
+                current = int(row["parent_clone_id"] or 0)
+        return chain
+
+    def bot_clone_descendants(self, clone_id: int) -> list[sqlite3.Row]:
+        """All clones below the given clone (any depth), breadth first."""
+        result: list[sqlite3.Row] = []
+        seen = {int(clone_id)}
+        frontier = [int(clone_id)]
+        with self.connect() as conn:
+            while frontier:
+                marks = ",".join("?" for _ in frontier)
+                rows = conn.execute(
+                    f"SELECT * FROM bot_clones WHERE parent_clone_id IN ({marks}) ORDER BY id",
+                    tuple(frontier),
+                ).fetchall()
+                frontier = []
+                for row in rows:
+                    row_id = int(row["id"])
+                    if row_id in seen:
+                        continue
+                    seen.add(row_id)
+                    result.append(row)
+                    frontier.append(row_id)
+        return result
+
+    def delete_bot_clones(self, clone_ids: list[int]) -> int:
+        if not clone_ids:
+            return 0
+        marks = ",".join("?" for _ in clone_ids)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM bot_clones WHERE id IN ({marks})",
+                tuple(int(item) for item in clone_ids),
+            )
+            return int(cursor.rowcount or 0)
+
+    def unnotified_bot_clone_requests(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT * FROM bot_clones WHERE status='pending' AND notified=0
+                   ORDER BY id"""
+            ).fetchall()
+
+    def bot_clone_results_for_parent(self, parent_clone_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT * FROM bot_clones WHERE parent_clone_id=? AND result_notified=0
+                     AND status IN ('approved','rejected') ORDER BY id""",
+                (int(parent_clone_id),),
+            ).fetchall()
+
+    def mark_bot_clone_result_notified(self, clone_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE bot_clones SET result_notified=1 WHERE id=?", (int(clone_id),)
+            )
+
+    def mark_bot_clone_notified(self, clone_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE bot_clones SET notified=1 WHERE id=?", (int(clone_id),))
+
+    def pending_bot_clone_ids(self) -> list[int]:
+        with self.connect() as conn:
+            return [
+                int(row["id"]) for row in conn.execute(
+                    "SELECT id FROM bot_clones WHERE status<>'approved' OR is_enabled=0"
+                ).fetchall()
+            ]
 
     def review_bot_clone(self, clone_id: int, approved: bool, reviewed_by: int) -> bool:
         status = "approved" if approved else "rejected"
@@ -1465,20 +1607,29 @@ class DirectoryStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("这个网址已存在或正在审核中") from exc
+            entry_id = int(cursor.lastrowid)
+            self._sync_entry_key(conn, entry_id)
+            if status == "approved":
+                self._dedupe_entry_keyword(conn, entry_id)
             conn.execute("UPDATE users SET submissions_count = submissions_count + 1 WHERE user_id = ?", (user_id,))
-            return int(cursor.lastrowid)
+            return entry_id
 
     def add_rich_submission(
         self, keyword: str, unique_url: str, content_text: str, user_id: int,
         username: str, status: str = "pending", file_id: str = "",
         file_type: str = "", file_name: str = "", source_chat_id: int = 0,
-        source_message_id: int = 0,
+        source_message_id: int = 0, entities_json: str = "[]",
+        buttons_json: str = "[]", copy_chat_id: int = 0, copy_message_id: int = 0,
     ) -> int:
         keyword = " ".join(keyword.strip().split())
-        content_text = content_text.strip()
+        entities_json = entities_json or "[]"
+        if entities_json == "[]":
+            content_text = content_text.strip()
         if not keyword:
             raise ValueError("收录关键词不能为空")
-        if not content_text and not file_id:
+        if not entry_keyword_key(keyword):
+            raise ValueError("收录关键词不能为空")
+        if not content_text.strip() and not file_id and not copy_message_id:
             raise ValueError("请提供文字、地址、图片、视频或文件")
         with self.connect() as conn:
             try:
@@ -1486,22 +1637,120 @@ class DirectoryStore:
                     """INSERT INTO entries
                        (url, title, category, description, status, user_id, username,
                         content_text, media_file_id, media_type, media_name,
-                        source_chat_id, source_message_id)
-                       VALUES (?, ?, 'other', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        source_chat_id, source_message_id, entities_json,
+                        buttons_json, copy_chat_id, copy_message_id, keyword_key)
+                       VALUES (?, ?, 'other', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        unique_url[:2048], keyword[:120], content_text[:4000], status,
-                        user_id, username[:80], content_text[:4000], file_id[:512],
+                        unique_url[:2048], keyword[:120], content_text[:500], status,
+                        user_id, username[:80], content_text[:4096], file_id[:512],
                         file_type[:40], file_name[:240], source_chat_id,
-                        source_message_id,
+                        source_message_id, entities_json, buttons_json or "[]",
+                        int(copy_chat_id or 0), int(copy_message_id or 0),
+                        entry_keyword_key(keyword[:120]),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("这条内容已存在或正在审核中") from exc
+            entry_id = int(cursor.lastrowid)
+            if status == "approved":
+                self._dedupe_entry_keyword(conn, entry_id)
             conn.execute(
                 "UPDATE users SET submissions_count=submissions_count+1 WHERE user_id=?",
                 (user_id,),
             )
-            return int(cursor.lastrowid)
+            return entry_id
+
+    @staticmethod
+    def _sync_entry_key(conn: sqlite3.Connection, entry_id: int) -> None:
+        row = conn.execute("SELECT title FROM entries WHERE id=?", (entry_id,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE entries SET keyword_key=? WHERE id=?",
+                (entry_keyword_key(str(row["title"] or "")), entry_id),
+            )
+
+    @staticmethod
+    def _dedupe_entry_keyword(conn: sqlite3.Connection, entry_id: int) -> list[int]:
+        """Keep only the given (just approved) entry for its keyword.
+
+        Deletes every other entry with the same keyword key that is already
+        reviewed (approved / rejected / removed) plus older pending ones.
+        Newer pending submissions stay so their review is not lost.
+        """
+        row = conn.execute(
+            "SELECT keyword_key FROM entries WHERE id=? AND status='approved'", (entry_id,)
+        ).fetchone()
+        key = str(row["keyword_key"] or "") if row else ""
+        if not key:
+            return []
+        ids = [
+            int(item["id"]) for item in conn.execute(
+                """SELECT id FROM entries WHERE keyword_key=? AND id<>?
+                     AND (status<>'pending' OR id<?)""",
+                (key, entry_id, entry_id),
+            ).fetchall()
+        ]
+        for old_id in ids:
+            conn.execute("DELETE FROM reports WHERE entry_id=?", (old_id,))
+            conn.execute("DELETE FROM entries WHERE id=?", (old_id,))
+        return ids
+
+    def find_keyword_entry(self, text: str, extra_suffixes: tuple[str, ...] = ()) -> Entry | None:
+        """Exact keyword match: the whole message must equal a keyword.
+
+        「XX」 and 「XX地址」 both match an entry titled 「XX」 or 「XX地址」.
+        Returns only the newest approved entry.
+        """
+        keys = {entry_keyword_key(text)}
+        folded = "".join(unicodedata.normalize("NFKC", str(text or "")).split()).casefold()
+        for suffix in extra_suffixes:
+            suffix_key = "".join(unicodedata.normalize("NFKC", str(suffix or "")).split()).casefold()
+            if suffix_key and len(folded) > len(suffix_key) and folded.endswith(suffix_key):
+                keys.add(entry_keyword_key(folded[:-len(suffix_key)]))
+        keys.discard("")
+        if not keys:
+            return None
+        marks = ",".join("?" for _ in keys)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""SELECT * FROM entries WHERE status='approved' AND keyword_key IN ({marks})
+                    ORDER BY id DESC LIMIT 1""",
+                tuple(keys),
+            ).fetchone()
+        return self._entry(row) if row else None
+
+    def search_keyword_titles(self, query: str, limit: int = 10) -> list[Entry]:
+        """Broader search for /search and the menu: keyword contains query.
+
+        One (newest) entry per keyword, at most ``limit`` results.
+        """
+        key = entry_keyword_key(query)
+        if not key:
+            return []
+        like = "%" + key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM entries WHERE id IN (
+                       SELECT MAX(id) FROM entries WHERE status='approved'
+                          AND keyword_key LIKE ? ESCAPE '\\' GROUP BY keyword_key)
+                   ORDER BY id DESC LIMIT ?""",
+                (like, max(1, min(int(limit), 20))),
+            ).fetchall()
+        return [self._entry(row) for row in rows]
+
+    def storage_usage_bytes(self) -> int:
+        """Bytes used by this bot's data: SQLite file plus WAL/SHM.
+
+        Media is stored on Telegram servers (file_id only), so the database
+        is the complete local footprint of a bot.
+        """
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(str(self.db_path) + suffix)
+            except OSError:
+                pass
+        return total
 
     def get(self, entry_id: int) -> Entry | None:
         with self.connect() as conn:
@@ -1578,6 +1827,8 @@ class DirectoryStore:
                 "UPDATE entries SET status = ?, reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (status, reason[:500], entry_id),
             )
+            if cursor.rowcount and status == "approved":
+                self._dedupe_entry_keyword(conn, entry_id)
             return cursor.rowcount > 0
 
     def update_entry(self, entry_id: int, title: str, url: str, category: str, description: str) -> bool:
@@ -1590,6 +1841,9 @@ class DirectoryStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("网址已存在") from exc
+            if cursor.rowcount:
+                self._sync_entry_key(conn, entry_id)
+                self._dedupe_entry_keyword(conn, entry_id)
             return cursor.rowcount > 0
 
     def update_rich_entry(
@@ -1604,11 +1858,22 @@ class DirectoryStore:
         if not content_text and not entry.media_file_id:
             raise ValueError("文字内容和媒体不能同时为空")
         with self.connect() as conn:
+            content_changed = content_text != entry.content_text.strip()
             cursor = conn.execute(
                 """UPDATE entries SET title=?, content_text=?, description=?, category=?,
                    updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (title[:120], content_text[:4000], description[:500], category[:64], entry_id),
+                (title[:120], content_text[:4096], description[:500], category[:64], entry_id),
             )
+            if cursor.rowcount and content_changed:
+                # 文字被改写后，原格式与原消息不再对应
+                conn.execute(
+                    """UPDATE entries SET entities_json='[]', copy_chat_id=0,
+                       copy_message_id=0 WHERE id=?""",
+                    (entry_id,),
+                )
+            if cursor.rowcount:
+                self._sync_entry_key(conn, entry_id)
+                self._dedupe_entry_keyword(conn, entry_id)
             return cursor.rowcount > 0
 
     def suffix_entry_titles(self, suffix: str = "地址") -> dict[str, int]:
@@ -1644,6 +1909,7 @@ class DirectoryStore:
                        WHERE id=?""",
                     (new_title, int(row["id"])),
                 )
+                self._sync_entry_key(conn, int(row["id"]))
                 changed += 1
         return {"changed": changed, "skipped": skipped, "total": changed + skipped}
 
@@ -5503,4 +5769,18 @@ class DirectoryStore:
             media_type=str(row["media_type"]), media_name=str(row["media_name"]),
             source_chat_id=int(row["source_chat_id"]),
             source_message_id=int(row["source_message_id"]),
+            **DirectoryStore._entry_rich_fields(row),
         )
+
+    @staticmethod
+    def _entry_rich_fields(row: sqlite3.Row) -> dict:
+        keys = set(row.keys())
+        def value(name, default):
+            return row[name] if name in keys and row[name] is not None else default
+        return {
+            "entities_json": str(value("entities_json", "[]") or "[]"),
+            "buttons_json": str(value("buttons_json", "[]") or "[]"),
+            "copy_chat_id": int(value("copy_chat_id", 0) or 0),
+            "copy_message_id": int(value("copy_message_id", 0) or 0),
+            "keyword_key": str(value("keyword_key", "") or ""),
+        }

@@ -49,6 +49,11 @@ class Config:
     is_clone: bool = False
     telegram_api_id: int = 0
     telegram_api_hash: str = ""
+    clone_id: int = 0
+    mother_db_path: str = ""
+    mother_bot_id: int = 0
+    clone_cipher_key: str = ""
+    storage_quota_bytes: int = 0
 
 
 def _csv(value: str | None, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -111,6 +116,12 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
             first_admin = _first_admin_id(raw_admin_ids)
             developer_ids = {first_admin} if first_admin is not None else set()
     super_admin_ids = (admin_ids | legacy_super_ids) - developer_ids
+    try:
+        clone_id = int(os.getenv("CLONE_ID", "0") or "0")
+        mother_bot_id = int(os.getenv("MOTHER_BOT_ID", "0") or "0")
+        storage_quota_bytes = max(0, int(os.getenv("STORAGE_QUOTA_BYTES", "0") or "0"))
+    except ValueError as exc:
+        raise ValueError("CLONE_ID / MOTHER_BOT_ID / STORAGE_QUOTA_BYTES must be numbers") from exc
     return Config(
         bot_token=token,
         admin_ids=admin_ids,
@@ -159,4 +170,9 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         is_clone=is_clone,
         telegram_api_id=telegram_api_id,
         telegram_api_hash=os.getenv("TELEGRAM_API_HASH", "").strip(),
+        clone_id=clone_id if is_clone else 0,
+        mother_db_path=os.getenv("MOTHER_DB_PATH", "").strip() if is_clone else "",
+        mother_bot_id=mother_bot_id if is_clone else 0,
+        clone_cipher_key=os.getenv("CLONE_CIPHER_KEY", "").strip(),
+        storage_quota_bytes=storage_quota_bytes if is_clone else 0,
     )

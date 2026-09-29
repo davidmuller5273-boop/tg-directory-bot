@@ -5,9 +5,11 @@ import time
 import html
 import json
 import logging
+import math
 import re
 import secrets
 from dataclasses import replace
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -18,7 +20,7 @@ from telegram import (
     InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo,
     InlineQueryResultCachedVoice, InlineQueryResultCachedSticker,
     InputMediaPhoto, InputMediaVideo,
-    InputTextMessageContent, KeyboardButton, ReplyKeyboardMarkup, Update,
+    InputTextMessageContent, KeyboardButton, MessageEntity, ReplyKeyboardMarkup, Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import Forbidden, TelegramError
@@ -36,7 +38,7 @@ from telegram.ext import (
     filters,
 )
 
-from .auto_delete import AutoDeleteBot, advertisement_message, persistent_message
+from .auto_delete import AutoDeleteBot, advertisement_message, is_persistent_message, persistent_message
 from .config import Config
 from .clones import CloneManager
 from .chain import (
@@ -57,7 +59,7 @@ from .lottery import (
     resolve_lottery_history_keyword,
 )
 from .storage import DirectoryStore, Entry, format_points, normalize_points
-from .rich_content import button_content, buttons_markup, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
+from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
 from . import settings_wizard
 from .time_utils import (
     beijing_now, beijing_now_text,
@@ -125,53 +127,53 @@ def parse_group_permissions(value: str) -> set[str]:
         raise ValueError("未知权限：" + "、".join(sorted(invalid)))
     return permissions
 
-HELP_TEXT = """📖 精简使用教程
+HELP_TEXT = """📖 使用帮助
 
-🏠 常用入口
-• /start 打开菜单；/help 查看教程；/cancel 退出当前操作。
-• 群内关键词也可在私聊使用；先选择群组，再按已分配权限打开对应功能。
+🏠 基础
+• /start 打开菜单；/help 查看帮助；/cancel 退出当前操作
+• 操作页面3分钟无点击会自动撤回
 
-🔎 搜索与账户
-• /search 关键词：搜索收录；/list：最新3条；/my：我的提交。
-• 提交格式：关键词搜录 内容；审核通过后才公开。
-• /userinfo @用户名，或回复成员消息：查询数字ID和账户资料。
-• z0 或 /rate：查看 OKX 前10条商户报价，可切换买/卖、银行卡、微信和支付宝。
+🔎 搜索收录
+• 发送关键词即可查看内容，如 XX 或 XX地址
+• /search 关键词：模糊查找，最多列出10个
+• 提交：关键词 搜录 内容（可附图片、视频、文件）
+• 原样收录：回复一条消息，发送“关键词 搜录”
+• 超级管理员审核后公开；同一关键词以最新一条为准
+• /my：我的提交
 
 ⛓ 波场查询
-• 发送 T 开头地址或 /balance 地址：查余额、资源、冻结、多签、授权和注册时间。
-• 页面按钮可看最近10条、USDT记录、TRX记录或监控地址。
-• 地址监控可选 USDT、TRX 或两者；新交易、余额上下限独立设置，最小交易金额默认0.1。
+• 发送 T 开头地址或 /balance 地址：余额、资源、授权
+• 页面按钮可看交易记录、设置地址监控
 
 ⭐ 积分
-• 发送：签到、我的积分、积分排行、积分礼品、积分账单、中奖记录、兑换记录、游戏记录。
-• 群内可玩骰子：大3 / 小5 / 单10 / 双2；可设置最低参与积分及每日开放时段。
-• 兑换格式：兑换 礼品编号；发送“积分抽奖”打开积分抽奖。
-• 积分排行最多100名；所有账单和记录每页10条，积分历史保留6个月。
+• 签到、我的积分、积分排行、积分礼品、积分账单
+• 中奖记录、兑换记录、游戏记录、积分抽奖
+• 兑换 礼品编号；群内骰子：大3 / 小5 / 单10 / 双2
 
 🎁 全部抽奖
-• 发送“抽奖”查看本群进行中的抽奖；发送“抽奖历史”查看往期。
-• /raffle 分钟 人数 奖品；/raffles 查看记录；/draw 编号立即开奖。
-• 达标参加会@成员；中奖信息和开奖结果不自动撤回。
+• 抽奖：本群进行中；抽奖历史：往期
+• /raffle 分钟 人数 奖品；/raffles 记录；/draw 编号 立即开奖
 
 🎟 彩票
-• /lottery 彩种：最新开奖；/lotteryhistory 彩种：历史开奖。
-• 发送“开奖”查看本群已开启的播报彩种。
+• 开奖：本群已开启的彩种
+• /lottery 彩种：最新；/lotteryhistory 彩种：历史
 
 👥 群组管理
-• 点击“群组管理”跳到私聊，选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接等。
-• 快捷发布可保存多条消息、追加多个彩色按钮，并选择消息定时发布。
-• /link 生成并复制个人邀请链接；管理页可按 @用户名或链接查询进群、退出和仍在人员。
-• 群员可看今日和7天活跃排行；31天及综合统计按权限开放。
-• “机器人近期操作”和“群组近期操作”是两个独立入口，各自分页并保留7天。
+• 点“群组管理”，在私聊选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接、快捷发布
+• /link：生成个人邀请链接
 
-🛡 管理权限
-• 群管理员默认无功能权限，由超级管理员分配或重置。
-• 超级管理员管理本机器人和群管理员；开发者拥有审核、私人笔记及全部权限。
-• 操作页面连续3分钟没有点击按钮会自动撤回；每次点击都会重新计时。
-• 操作记录保留1周，积分与邀请历史保留6个月。
+🧰 其他
+• z0 或 /rate：OKX 商户报价
+• /userinfo @用户名：查询账户资料
 
-☎️ 联系开发者
-• 点击自定义双向按钮后发送消息；只有进入双向会话的内容才会转发。"""
+🛡 权限
+• 超级管理员：管理本机器人、管理员，审核收录
+• 群管理员默认无功能权限，由超级管理员分配
+
+🤖 克隆机器人
+• 主菜单点“克隆机器人”，发送 Bot Token，审核通过后自动启动
+• 提交 Token 的人是新机器人的超级管理员
+• 每个机器人的搜索收录数据独立，克隆机器人存储上限 2GB"""
 
 
 def is_admin(config: Config, user_id: int | None) -> bool:
@@ -201,12 +203,52 @@ def has_super_admin_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | No
     )
 
 
-def has_developer_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+def is_developer_user(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    """Raw developer membership (works on mother and child bots)."""
     if user_id is None:
         return False
     config: Config = context.application.bot_data["config"]
     store: DirectoryStore = context.application.bot_data["store"]
     return bool(user_id in config.developer_ids or store.is_developer(user_id))
+
+
+def has_developer_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    """Developer-only features: they exist only on the mother bot."""
+    config: Config = context.application.bot_data["config"]
+    if config.is_clone:
+        return False
+    return is_developer_user(context, user_id)
+
+
+def developer_only_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    config = context.application.bot_data.get("config")
+    if getattr(config, "is_clone", False):
+        return "该功能不可用。"
+    return "仅开发者可用。"
+
+
+def has_review_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    """搜索收录审核：每个机器人的超级管理员（及开发者）审核本机器人的收录。"""
+    return has_super_admin_access(context, user_id)
+
+
+def entry_reviewer_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+    config: Config = context.application.bot_data["config"]
+    store: DirectoryStore = context.application.bot_data["store"]
+    database = {
+        int(row["user_id"]): str(row["role"]) for row in store.list_bot_admins()
+        if row["role"] in {"super", "developer"}
+    }
+    ids = set(config.super_admin_ids) | {
+        user_id for user_id, role in database.items() if role == "super"
+    }
+    if not config.is_clone:
+        ids |= set(all_developer_ids(context))
+    else:
+        # 子机器人：开发者不接收审核通知，只有本机超级管理员（克隆提供者等）收到
+        ids |= set(config.admin_ids)
+        ids -= set(config.developer_ids) - set(config.admin_ids)
+    return sorted(ids)
 
 
 def has_permission(
@@ -223,7 +265,7 @@ def has_permission(
 def can_manage_bot_admin(
     context: ContextTypes.DEFAULT_TYPE, viewer_id: int, target_id: int
 ) -> bool:
-    if has_developer_access(context, viewer_id):
+    if is_developer_user(context, viewer_id):
         return True
     store: DirectoryStore = context.application.bot_data["store"]
     return target_id in {
@@ -283,13 +325,17 @@ def main_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def clone_available(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """母机器人和每个子机器人都能继续克隆（审核统一在母机器人）。"""
+    return context.application.bot_data.get("clone_manager") is not None
+
+
 def main_keyboard_for(
     context: ContextTypes.DEFAULT_TYPE, user_id: int | None
 ) -> InlineKeyboardMarkup:
-    config: Config = context.application.bot_data["config"]
     return main_keyboard(
         has_admin_access(context, user_id), has_super_admin_access(context, user_id),
-        not config.is_clone,
+        clone_available(context),
     )
 
 
@@ -338,9 +384,12 @@ def clone_records_view(store: DirectoryStore) -> tuple[str, InlineKeyboardMarkup
             f"@{row['bot_username']}" if row["bot_username"]
             else f"ID {row['bot_id']}"
         )
+        owner = row["owner_name"] or owner
+        parent_id = int(row["parent_clone_id"] or 0)
         lines.append(
             f"#{row['id']} · {labels.get(str(row['status']), row['status'])} · "
             f"{bot_label} · 申请人 {owner} ({row['owner_id']})"
+            + (f" · 来自子机器人 #{parent_id}" if parent_id else " · 来自母机器人")
             + (f" · 错误 {row['last_error']}" if row["last_error"] else "")
         )
         if row["status"] == "pending" and len(keyboard_rows) < 10:
@@ -352,6 +401,227 @@ def clone_records_view(store: DirectoryStore) -> tuple[str, InlineKeyboardMarkup
         lines.append("暂无克隆申请。")
     keyboard_rows.append([InlineKeyboardButton("⬅️ 返回管理员", callback_data="nav:admin")])
     return "\n".join(lines), InlineKeyboardMarkup(keyboard_rows)
+
+
+CLONE_TREE_PAGE_SIZE = 8
+CLONE_STATUS_LABELS = {"pending": "待审核", "approved": "已通过", "rejected": "已拒绝"}
+
+
+def clone_result_notice(clone_id: int, username: str, approved: bool) -> str:
+    if approved:
+        return (
+            f"✅ 你的克隆申请 #{clone_id} 已通过，@{username} 已启动。\n"
+            "你是该机器人的超级管理员，它拥有独立的搜索收录数据。"
+        )
+    return f"❌ 你的克隆申请 #{clone_id} 未通过审核。"
+
+
+def clone_tree_flat(rows) -> list[tuple[object, int]]:
+    """Depth-first (row, depth) list; depth 1 = cloned directly from the mother."""
+    ids = {int(row["id"]) for row in rows}
+    children: dict[int, list] = {}
+    for row in sorted(rows, key=lambda item: int(item["id"])):
+        parent = int(row["parent_clone_id"] or 0)
+        children.setdefault(parent if parent in ids else 0, []).append(row)
+    flat: list[tuple[object, int]] = []
+    seen: set[int] = set()
+
+    def walk(parent: int, depth: int) -> None:
+        for row in children.get(parent, []):
+            row_id = int(row["id"])
+            if row_id in seen:
+                continue
+            seen.add(row_id)
+            flat.append((row, depth))
+            walk(row_id, depth + 1)
+
+    walk(0, 1)
+    return flat
+
+
+def clone_bot_label(row) -> str:
+    return f"@{row['bot_username']}" if row["bot_username"] else f"ID {row['bot_id']}"
+
+
+def clone_tree_view(
+    context: ContextTypes.DEFAULT_TYPE, page: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    store: DirectoryStore = context.application.bot_data["store"]
+    manager: CloneManager | None = context.application.bot_data.get("clone_manager")
+    rows = store.list_bot_clones(limit=5000)
+    by_id = {int(row["id"]): row for row in rows}
+    flat = clone_tree_flat(rows)
+    pages = max(1, math.ceil(len(flat) / CLONE_TREE_PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    mother = context.application.bot_data.get("bot_username") or "母机器人"
+    lines = [
+        "🌳 子机器人管理",
+        f"母机器人 @{mother} · 子机器人共 {len(flat)} 个 · 第 {page + 1}/{pages} 页",
+        "",
+    ]
+    buttons: list[InlineKeyboardButton] = []
+    for row, depth in flat[page * CLONE_TREE_PAGE_SIZE:(page + 1) * CLONE_TREE_PAGE_SIZE]:
+        clone_id = int(row["id"])
+        pad = "　" * (depth - 1)
+        status = CLONE_STATUS_LABELS.get(str(row["status"]), str(row["status"]))
+        if row["status"] == "approved" and manager:
+            status = "运行中" if manager.is_running(clone_id) else "未运行"
+        parent_id = int(row["parent_clone_id"] or 0)
+        parent_row = by_id.get(parent_id)
+        parent = (
+            f"#{parent_id} {clone_bot_label(parent_row)}" if parent_row else "母机器人"
+        )
+        owner = (
+            row["owner_name"] or row["owner_first_name"] or row["owner_username"]
+            or row["owner_id"]
+        )
+        usage = format_storage_bytes(manager.storage_bytes(clone_id)) if manager else "-"
+        lines.append(f"{pad}{'└ ' if depth > 1 else ''}#{clone_id} {clone_bot_label(row)}（{row['bot_id']}）· {status}")
+        lines.append(f"{pad}　超管：{owner}（{row['owner_id']}）· 上级：{parent} · 第{depth}层")
+        lines.append(
+            f"{pad}　创建：{format_beijing_time(row['created_at'])} · 存储：{usage}"
+            + (f" · 错误：{row['last_error']}" if row["last_error"] else "")
+        )
+        buttons.append(InlineKeyboardButton(
+            f"🗑 删除 #{clone_id}", callback_data=f"clonedel:ask:{clone_id}:{page}"
+        ))
+    if not flat:
+        lines.append("暂无子机器人。")
+    keyboard = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"clonetree:{page - 1}"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"clonetree:{page + 1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("⬅️ 返回管理员", callback_data="nav:admin")])
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(keyboard)
+
+
+async def handle_clone_tree_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, data: str,
+) -> None:
+    """母机器人：子机器人列表 / 删除（级联删除全部下级，需二次确认）。"""
+    query = update.callback_query
+    user_id = query.from_user.id if query and query.from_user else None
+    manager: CloneManager | None = context.application.bot_data.get("clone_manager")
+    if not has_developer_access(context, user_id) or not manager or not manager.manage_processes:
+        await query.answer("仅母机器人开发者可用。", show_alert=True)
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    parts = data.split(":")
+    if parts[0] == "clonetree":
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        text, keyboard = clone_tree_view(context, page)
+        await query.answer()
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+    if len(parts) < 3 or not parts[2].isdigit():
+        await query.answer("编号无效。", show_alert=True)
+        return
+    action, clone_id = parts[1], int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    row = store.bot_clone(clone_id)
+    if not row:
+        await query.answer("该子机器人不存在或已删除。", show_alert=True)
+        text, keyboard = clone_tree_view(context, page)
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+    descendants = store.bot_clone_descendants(clone_id)
+    if action == "ask":
+        lines = [
+            "⚠️ 确认删除子机器人",
+            "",
+            f"#{clone_id} {clone_bot_label(row)}（{row['bot_id']}）",
+            f"下级子机器人：{len(descendants)} 个（将一并删除）",
+        ]
+        for item in descendants[:20]:
+            lines.append(f"　· #{item['id']} {clone_bot_label(item)}")
+        if len(descendants) > 20:
+            lines.append(f"　· …… 另有 {len(descendants) - 20} 个")
+        lines += [
+            "",
+            "删除后：停止运行、移除记录；数据库移入 data/clones/deleted 归档。",
+            "如需恢复，只能重新提交 Token 克隆。",
+        ]
+        await query.answer()
+        await query.edit_message_text(
+            "\n".join(lines)[:4000],
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"✅ 确认删除（共 {len(descendants) + 1} 个）",
+                    callback_data=f"clonedel:do:{clone_id}:{page}",
+                )],
+                [InlineKeyboardButton("⬅️ 取消", callback_data=f"clonetree:{page}")],
+            ]),
+        )
+        return
+    if action != "do":
+        await query.answer("未知操作。", show_alert=True)
+        return
+    try:
+        removed = manager.delete_tree(clone_id)
+    except ValueError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    store.audit(
+        f"tg:{user_id}", "clone.delete", str(clone_id),
+        ",".join(str(item) for item in removed),
+    )
+    await query.answer(f"已删除 {len(removed)} 个子机器人。", show_alert=True)
+    text, keyboard = clone_tree_view(context, page)
+    await query.edit_message_text(
+        f"✅ 已删除 #{clone_id} 及其下级，共 {len(removed)} 个。\n\n" + text,
+        reply_markup=keyboard,
+    )
+
+
+async def sync_clone_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """母机器人：把子机器人上提交的克隆申请推送给开发者审核。"""
+    manager: CloneManager | None = context.application.bot_data.get("clone_manager")
+    if not manager or not manager.manage_processes:
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    for row in manager.sync_requests():
+        parent = store.bot_clone(int(row["parent_clone_id"] or 0))
+        source = f"#{parent['id']} {clone_bot_label(parent)}" if parent else "子机器人"
+        for developer_id in all_developer_ids(context):
+            try:
+                with persistent_message():
+                    await context.bot.send_message(
+                        developer_id,
+                        f"🤖 新克隆申请 #{row['id']}（来自 {source}）\n"
+                        f"申请人：{row['owner_name'] or row['owner_id']} ({row['owner_id']})\n"
+                        f"机器人：{clone_bot_label(row)}",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ 通过", callback_data=f"clone:approve:{row['id']}"),
+                            InlineKeyboardButton("❌ 拒绝", callback_data=f"clone:reject:{row['id']}"),
+                        ]]),
+                    )
+            except TelegramError:
+                logging.exception("Failed to send clone approval request")
+
+
+async def notify_clone_results(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """子机器人：把母机器人的审核结果告诉在本机器人提交申请的人。"""
+    manager: CloneManager | None = context.application.bot_data.get("clone_manager")
+    config: Config = context.application.bot_data["config"]
+    if not manager or manager.manage_processes or not config.clone_id:
+        return
+    for row in manager.store.bot_clone_results_for_parent(config.clone_id):
+        approved = row["status"] == "approved"
+        try:
+            with persistent_message():
+                await context.bot.send_message(
+                    int(row["owner_id"]),
+                    clone_result_notice(
+                        int(row["id"]), str(row["bot_username"] or row["bot_id"]), approved
+                    ),
+                )
+        except TelegramError:
+            logging.warning("Could not notify clone owner %s", row["owner_id"])
+        manager.store.mark_bot_clone_result_notified(int(row["id"]))
 
 
 def search_menu_keyboard(is_developer: bool = False) -> InlineKeyboardMarkup:
@@ -506,18 +776,19 @@ def admin_menu_keyboard(
             ],
         ])
         rows.append([InlineKeyboardButton("📣 频道群发", callback_data="channelbroadcast:menu")])
+    if is_super or is_developer:
+        rows.insert(1, [InlineKeyboardButton("📥 待审核收录", callback_data="admin:pending")])
     if is_developer:
-        rows.insert(1, [
-            InlineKeyboardButton("📥 待审核收录", callback_data="admin:pending"),
-            InlineKeyboardButton("🗒 私人笔记", callback_data="admin:notes"),
-        ])
-        rows.insert(2, [
-            InlineKeyboardButton("🤖 克隆审核记录", callback_data="admin:clones")
-        ])
+        # 以下为开发者功能，只在母机器人显示（子机器人 has_developer_access 恒为 False）
+        rows.insert(2, [InlineKeyboardButton("🗒 私人笔记", callback_data="admin:notes")])
         rows.insert(3, [
-            InlineKeyboardButton("👤 机器人使用人员", callback_data="admin:usage:0")
+            InlineKeyboardButton("🤖 克隆审核记录", callback_data="admin:clones"),
+            InlineKeyboardButton("🌳 子机器人管理", callback_data="clonetree:0"),
         ])
         rows.insert(4, [
+            InlineKeyboardButton("👤 机器人使用人员", callback_data="admin:usage:0")
+        ])
+        rows.insert(5, [
             InlineKeyboardButton("⏰ 波场监控统计", callback_data="admin:tronmonitors:0")
         ])
     rows.append([InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")])
@@ -1218,6 +1489,182 @@ def entry_text(entry: Entry, include_owner: bool = False) -> str:
     )
 
 
+ENTRY_MEDIA_METHODS = {
+    "photo": "photo", "video": "video", "animation": "animation",
+    "audio": "audio", "voice": "voice", "document": "document",
+    "sticker": "sticker", "video_note": "video_note",
+}
+DIRECTORY_NOT_FOUND_MAX_QUERY = 20
+
+
+def entry_body(entry: Entry) -> tuple[str, list]:
+    """The stored 收录 content exactly as submitted (text + entities)."""
+    if entry.content_text:
+        try:
+            entities = [
+                MessageEntity.de_json(item, None)
+                for item in json.loads(entry.entities_json or "[]")
+            ]
+        except (TypeError, ValueError):
+            entities = []
+        return entry.content_text, entities
+    if entry.media_file_id or entry.copy_message_id:
+        return "", []
+    # 旧版“关键词 地址”收录：原样回复地址
+    return entry.url, []
+
+
+def _utf16_len(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+async def deliver_entry(
+    entry: Entry, *, message=None, bot=None, chat_id: int | None = None,
+) -> None:
+    """Send a 收录 exactly as it was captured, with no wrapper text.
+
+    Order: copy_message from the original message (keeps everything),
+    otherwise rebuild from stored text + entities + media + buttons.
+    With ``message`` the content is sent as a reply to it.
+    """
+    markup = buttons_markup(entry.buttons_json)
+    target_bot = bot
+    if target_bot is None and message is not None and hasattr(message, "get_bot"):
+        try:
+            target_bot = message.get_bot()
+        except RuntimeError:
+            target_bot = None
+
+    def call(kind: str, *args, **kwargs):
+        if message is not None:
+            name = "reply_text" if kind == "message" else f"reply_{kind}"
+            return getattr(message, name)(*args, **kwargs)
+        return getattr(bot, f"send_{kind}")(chat_id, *args, **kwargs)
+
+    with advertisement_message():
+        if entry.copy_chat_id and entry.copy_message_id:
+            kwargs = {"reply_markup": markup} if markup else {}
+            try:
+                if message is not None:
+                    result = await message.reply_copy(
+                        entry.copy_chat_id, entry.copy_message_id, **kwargs
+                    )
+                    result_chat_id = getattr(message, "chat_id", None)
+                else:
+                    result = await bot.copy_message(
+                        chat_id=chat_id, from_chat_id=entry.copy_chat_id,
+                        message_id=entry.copy_message_id, **kwargs,
+                    )
+                    result_chat_id = chat_id
+                scheduler = getattr(target_bot, "schedule_delete", None)
+                if (
+                    callable(scheduler) and not is_persistent_message()
+                    and result_chat_id is not None and getattr(result, "message_id", None)
+                ):
+                    scheduler(int(result_chat_id), int(result.message_id))
+                return
+            except TelegramError:
+                logging.info("copy_message failed for entry %s; rebuilding", entry.id)
+        text, entities = entry_body(entry)
+        entity_kwargs = {"entities": entities} if entities else {}
+        if not entry.media_file_id:
+            await call(
+                "message", text or entry.title, parse_mode=None,
+                reply_markup=markup, **entity_kwargs,
+            )
+            return
+        kind = ENTRY_MEDIA_METHODS.get(entry.media_type, "document")
+        if kind in {"sticker", "video_note"}:
+            if text:
+                await call("message", text, parse_mode=None, **entity_kwargs)
+            await call(kind, entry.media_file_id, reply_markup=markup)
+            return
+        if text and len(text) > 1024:
+            await call(kind, entry.media_file_id)
+            await call("message", text, parse_mode=None, reply_markup=markup, **entity_kwargs)
+            return
+        caption_kwargs = {"caption_entities": entities} if entities else {}
+        await call(
+            kind, entry.media_file_id, caption=text or None, parse_mode=None,
+            reply_markup=markup, **caption_kwargs,
+        )
+
+
+def entry_keyword_list_text(entries: list[Entry]) -> str:
+    lines = ["🔎 找到以下关键词，发送关键词即可查看内容：", ""]
+    for index, entry in enumerate(entries, start=1):
+        lines.append(f"{index}. <code>{html.escape(entry.title)}</code>")
+    return "\n".join(lines)
+
+
+def is_directory_not_found_query(query: str) -> bool:
+    """Only short 「XX地址」 style messages get the not-found reply."""
+    query = query.strip()
+    return bool(query) and "\n" not in query and len(query) <= DIRECTORY_NOT_FOUND_MAX_QUERY
+
+
+async def directory_search_reply(
+    update: Update, store: DirectoryStore, query: str, source: str,
+) -> None:
+    """Explicit search (/search, 搜索菜单): exact keyword first, else a short list."""
+    message = update.effective_message
+    settings = store.get_settings()
+    trigger = settings.get("group_directory_trigger", "地址")
+    entry = store.find_keyword_entry(query, (trigger,))
+    if entry:
+        record_directory_search(update, store, query, 1, source)
+        await deliver_entry(entry, message=message)
+        return
+    entries = store.search_keyword_titles(query, limit=10)
+    record_directory_search(update, store, query, len(entries), source)
+    if not entries:
+        await message.reply_text(settings.get("not_found_text", "地址没有收录，请联系管理员。"))
+        return
+    await message.reply_text(entry_keyword_list_text(entries), parse_mode=ParseMode.HTML)
+
+
+def format_storage_bytes(value: int) -> str:
+    value = max(0, int(value or 0))
+    if value >= 1024 ** 3:
+        return f"{value / 1024 ** 3:.2f} GB"
+    if value >= 1024 ** 2:
+        return f"{value / 1024 ** 2:.1f} MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value} B"
+
+
+def storage_usage_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    config: Config = context.application.bot_data["config"]
+    store: DirectoryStore = context.application.bot_data["store"]
+    used = store.storage_usage_bytes()
+    quota = int(getattr(config, "storage_quota_bytes", 0) or 0)
+    if not quota:
+        return f"💾 存储用量：{format_storage_bytes(used)}"
+    percent = used * 100 / quota
+    return (
+        f"💾 存储用量：{format_storage_bytes(used)} / {format_storage_bytes(quota)}"
+        f"（{percent:.1f}%）"
+    )
+
+
+def storage_quota_exceeded(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    config = context.application.bot_data.get("config")
+    quota = int(getattr(config, "storage_quota_bytes", 0) or 0)
+    if not quota:
+        return False
+    store: DirectoryStore = context.application.bot_data["store"]
+    return store.storage_usage_bytes() >= quota
+
+
+def storage_full_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return (
+        "❌ 本机器人存储空间已满，暂时无法新增收录。\n"
+        + storage_usage_text(context)
+        + "\n请联系本机器人超级管理员清理。"
+    )
+
+
 def register_user(update: Update, store: DirectoryStore) -> bool:
     user = update.effective_user
     if not user:
@@ -1358,7 +1805,9 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await message.reply_text(
         "请发送：关键词 搜录 内容\n\n"
         "例如：v8 搜录 https://example.com\n"
-        "也可以发送图片、视频或文件，并在说明中写：v8 搜录 文字说明\n\n"
+        "图片、视频或文件：在说明中写 v8 搜录 文字说明\n"
+        "原样收录（含格式、按钮）：回复那条消息，发送 v8 搜录\n\n"
+        "内容会按原格式保存和回复；同一关键词以最新审核通过的一条为准。\n"
         "关键词、搜录、内容之间必须有空格。发送 /cancel 可取消。"
     )
     return URL
@@ -1421,6 +1870,9 @@ async def save_payload(update: Update, context: ContextTypes.DEFAULT_TYPE, paylo
     if not user:
         await message.reply_text("无法识别提交用户，请重新发送。")
         return
+    if storage_quota_exceeded(context):
+        await message.reply_text(storage_full_text(context))
+        return
     try:
         submission = (
             parse_submission_payload(payload, config.categories)
@@ -1441,7 +1893,7 @@ async def save_payload(update: Update, context: ContextTypes.DEFAULT_TYPE, paylo
         return
     store.audit(f"tg:{user.id}", "entry.submit", str(entry_id), submission.url)
     await message.reply_text(
-        f"提交成功，编号 #{entry_id}，正在等待开发者审核。",
+        f"提交成功，编号 #{entry_id}，正在等待超级管理员审核。",
         reply_markup=main_keyboard_for(context, user.id),
     )
     if isinstance(getattr(context, "user_data", None), dict):
@@ -1472,23 +1924,13 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, entry_id: int) -> No
     entry = store.get(entry_id)
     if not entry:
         return
-    for admin_id in all_developer_ids(context):
-        if entry.media_file_id:
-            try:
-                media_kwargs = {"chat_id": admin_id}
-                with persistent_message():
-                    if entry.media_type == "photo":
-                        await context.bot.send_photo(photo=entry.media_file_id, **media_kwargs)
-                    elif entry.media_type == "video":
-                        await context.bot.send_video(video=entry.media_file_id, **media_kwargs)
-                    elif entry.media_type == "animation":
-                        await context.bot.send_animation(animation=entry.media_file_id, **media_kwargs)
-                    elif entry.media_type == "audio":
-                        await context.bot.send_audio(audio=entry.media_file_id, **media_kwargs)
-                    else:
-                        await context.bot.send_document(document=entry.media_file_id, **media_kwargs)
-            except TelegramError:
-                logging.exception("Failed to send submission media to admin %s", admin_id)
+    for admin_id in entry_reviewer_ids(context):
+        try:
+            with persistent_message():
+                # 先发原样内容（与公开回复完全一致），再发审核卡片
+                await deliver_entry(entry, bot=context.bot, chat_id=admin_id)
+        except (TelegramError, ValueError):
+            logging.exception("Failed to send submission content to admin %s", admin_id)
         try:
             with persistent_message():
                 await context.bot.send_message(
@@ -1524,17 +1966,17 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("用法：/search 关键词")
         return
     store: DirectoryStore = context.application.bot_data["store"]
-    entries = store.search(query, limit=10)
-    record_directory_search(update, store, query, len(entries), "search_command")
-    empty_text = store.get_settings().get("not_found_text", "地址没有收录，请联系管理员。")
-    await send_entries(update.effective_message, entries, empty_text)
+    await directory_search_reply(update, store, query, "search_command")
 
 
 async def my_entries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     entries = context.application.bot_data["store"].my_entries(update.effective_user.id)
-    await send_entries(update.effective_message, entries, "你还没有提交记录。")
+    if not entries:
+        await update.effective_message.reply_text("你还没有提交记录。")
+        return
+    await update.effective_message.reply_text(my_entries_text(entries), parse_mode=ParseMode.HTML)
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3659,10 +4101,12 @@ async def private_keyword_reply(
     if history_game:
         await send_lottery_history(update, context, history_game)
         return True
-    exact_entries = store.search_exact_title(text, limit=10)
-    if exact_entries:
-        record_directory_search(update, store, text, len(exact_entries), "private_exact_keyword")
-        await send_entries(message, exact_entries, "")
+    exact_entry = store.find_keyword_entry(
+        text, (settings.get("group_directory_trigger", "地址"),)
+    )
+    if exact_entry:
+        record_directory_search(update, store, text, 1, "private_exact_keyword")
+        await deliver_entry(exact_entry, message=message)
         return True
     trigger = parse_group_trigger(
         text,
@@ -3672,15 +4116,11 @@ async def private_keyword_reply(
     if trigger and trigger[0] == "rate":
         await rate(update, context)
         return True
-    if trigger:
+    if trigger and is_directory_not_found_query(trigger[1]):
         _, search_query = trigger
-        entries = store.search(search_query, limit=10)
-        record_directory_search(
-            update, store, search_query, len(entries), "private_group_keyword"
-        )
-        await send_entries(
-            message, entries,
-            settings.get("not_found_text", "地址没有收录，请联系管理员。"),
+        record_directory_search(update, store, search_query, 0, "private_group_keyword")
+        await message.reply_text(
+            settings.get("not_found_text", "地址没有收录，请联系管理员。")
         )
         return True
     return False
@@ -3914,19 +4354,24 @@ async def group_keyword_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         schedule_group_trigger_cleanup(context, message, text)
         await send_lottery_history(update, context, history_game)
         return
-    exact_entries = store.search_exact_title(text, limit=10)
-    if exact_entries:
+    exact_entry = store.find_keyword_entry(
+        text, (settings.get("group_directory_trigger", "地址"),)
+    )
+    if exact_entry:
         schedule_group_trigger_cleanup(context, message, text)
         if not await guard(update, context):
             return
-        record_directory_search(update, store, text, len(exact_entries), "group_exact_keyword")
-        await send_entries(message, exact_entries, "")
+        record_directory_search(update, store, text, 1, "group_exact_keyword")
+        await deliver_entry(exact_entry, message=message)
         return
     trigger = parse_group_trigger(
         text,
         settings.get("group_directory_trigger", "地址"),
         settings.get("group_rate_trigger", "z0"),
     )
+    if trigger and trigger[0] == "directory" and not is_directory_not_found_query(trigger[1]):
+        # 长句子只是碰巧以“地址”结尾：不当作搜索
+        trigger = None
     rule = None
     if not trigger and settings.get("auto_reply_enabled") == "1":
         rule = store.match_auto_reply(text, scope="group")
@@ -3946,11 +4391,11 @@ async def group_keyword_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         store.audit(f"tg:{update.effective_user.id}", "auto_reply.group_hit", str(rule["id"]), text[:200])
         return
     action, query = trigger
-    entries = store.search(query, limit=10)
-    record_directory_search(update, store, query, len(entries), "group_keyword")
+    # 精确匹配已在上面处理；走到这里说明没有该关键词
+    record_directory_search(update, store, query, 0, "group_keyword")
     empty_text = settings.get("not_found_text", "地址没有收录，请联系管理员。")
     store.audit(f"tg:{update.effective_user.id}", "group_trigger.directory", str(update.effective_chat.id), query)
-    await send_entries(message, entries, empty_text)
+    await message.reply_text(empty_text)
 
 
 async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3981,7 +4426,7 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     viewer_id = update.effective_user.id
     rows = context.application.bot_data["store"].list_bot_admins(
         viewer_id=viewer_id,
-        include_all=has_developer_access(context, viewer_id),
+        include_all=is_developer_user(context, viewer_id),
     )
     if not rows:
         await update.effective_message.reply_text("暂无管理员。")
@@ -4120,43 +4565,111 @@ def publishing_attachment(message) -> tuple[str, str, str]:
     return private_note_attachment(message)
 
 
+RICH_SUBMISSION_PATTERN = re.compile(r"\s*(.{1,120}?)\s+搜录(?:\s+([\s\S]*?))?\s*")
+RICH_SUBMISSION_MARK = re.compile(r"\s+搜录(?:\s+|$)")
+
+
 def parse_rich_submission_command(text: str) -> tuple[str, str] | None:
-    match = re.fullmatch(r"\s*(.{1,120}?)\s+搜录\s+([\s\S]+?)\s*", text or "")
+    """「关键词 搜录 内容」 or 「关键词 搜录」 (then reply to the content message)."""
+    match = RICH_SUBMISSION_PATTERN.fullmatch(text or "")
     if not match:
         return None
     keyword = " ".join(match.group(1).split())
     content = (match.group(2) or "").strip()
-    return (keyword, content) if keyword and content else None
+    return (keyword, content) if keyword else None
+
+
+def slice_submission_content(message) -> tuple[str, str]:
+    """Text after 「搜录」 with its formatting entities (UTF-16 offsets shifted)."""
+    full_text, raw_entities = capture_content(message)
+    match = RICH_SUBMISSION_MARK.search(full_text or "")
+    if not match:
+        return "", "[]"
+    start = match.end()
+    end = len(full_text.rstrip())
+    if end <= start:
+        return "", "[]"
+    content = full_text[start:end]
+    start16 = _utf16_len(full_text[:start])
+    end16 = start16 + _utf16_len(content)
+    entities = []
+    for item in json.loads(raw_entities or "[]"):
+        offset = int(item.get("offset", 0))
+        length = int(item.get("length", 0))
+        left, right = max(offset, start16), min(offset + length, end16)
+        if right <= left:
+            continue
+        shifted = dict(item)
+        shifted["offset"] = left - start16
+        shifted["length"] = right - left
+        entities.append(shifted)
+    return content, json.dumps(entities, ensure_ascii=False)
 
 
 async def save_rich_submission(
     update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str, content: str
 ) -> None:
+    """Store a 收录 exactly as given (same mechanism as ads).
+
+    * 「关键词 搜录 内容」(text, or media caption): content after 搜录 with
+      its entities; attached media kept.
+    * Reply 「关键词 搜录」 to any message (incl. channel forwards with
+      buttons): that message is stored verbatim and later copied back.
+    """
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
     if not message or not user or not chat:
         return
-    file_id, file_type, file_name = private_note_attachment(message)
-    unique_url = f"tgcontent://{chat.id}/{message.message_id}"
-    if content and re.match(r"^(?:https?://|www\.|t\.me/|@)", content, re.I):
+    if storage_quota_exceeded(context):
+        await message.reply_text(storage_full_text(context))
+        return
+    file_id, file_type, file_name = publishing_attachment(message)
+    target = getattr(message, "reply_to_message", None)
+    if target is not None and getattr(target, "forum_topic_created", None):
+        target = None  # 话题群里的普通消息默认“回复”话题首条，不算回复
+    entities_json = "[]"
+    buttons_json = "[]"
+    copy_chat_id = copy_message_id = 0
+    if not content and not file_id and target is not None:
+        content, entities_json = capture_content(target)
+        file_id, file_type, file_name = publishing_attachment(target)
+        scratch = chat.id if chat.type == ChatType.PRIVATE else 0
         try:
-            content = normalize_url(content)
-        except ValueError:
-            pass
+            buttons_json = (
+                await capture_buttons_resolving(context.bot, target, scratch)
+                if scratch else capture_buttons(target)
+            )
+        except Exception:
+            buttons_json = "[]"
+        source = forward_channel_source(target)
+        copy_chat_id, copy_message_id = source or (chat.id, target.message_id)
+    elif content or file_id:
+        if content:
+            content, entities_json = slice_submission_content(message)
+    else:
+        await message.reply_text(
+            "请在“关键词 搜录”后写上内容；\n"
+            "或回复要收录的消息，再发送“关键词 搜录”。"
+        )
+        return
+    unique_url = f"tgcontent://{chat.id}/{message.message_id}"
     store: DirectoryStore = context.application.bot_data["store"]
     try:
         entry_id = store.add_rich_submission(
             keyword, unique_url, content, user.id, user.username or "",
             file_id=file_id, file_type=file_type, file_name=file_name,
             source_chat_id=chat.id, source_message_id=message.message_id,
+            entities_json=entities_json, buttons_json=buttons_json,
+            copy_chat_id=copy_chat_id, copy_message_id=copy_message_id,
         )
     except ValueError as exc:
         await message.reply_text(f"提交失败：{exc}")
         return
     store.audit(f"tg:{user.id}", "entry.rich_submit", str(entry_id), file_type or content[:100])
     await message.reply_text(
-        f"收录提交成功，编号 #{entry_id}，关键词：{keyword}\n等待开发者审核。"
+        f"收录提交成功，编号 #{entry_id}，关键词：{keyword}\n"
+        "等待超级管理员审核；同一关键词审核通过后以最新内容为准。"
     )
     if isinstance(getattr(context, "user_data", None), dict):
         context.user_data["preserve_incoming_message_id"] = message.message_id
@@ -4673,7 +5186,7 @@ async def note_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.effective_message.reply_text("私人笔记只能私聊机器人使用。")
         return
     if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+        await update.effective_message.reply_text(developer_only_text(context))
         return
     keyword = context.args[0] if context.args else ""
     body = " ".join(context.args[1:]) if len(context.args) > 1 else ""
@@ -4685,7 +5198,7 @@ async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("私人笔记只能私聊机器人使用。")
         return
     if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+        await update.effective_message.reply_text(developer_only_text(context))
         return
     await send_private_notes(update, context, context.args[0] if context.args else "")
 
@@ -4703,7 +5216,7 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     config: Config = context.application.bot_data["config"]
     store: DirectoryStore = context.application.bot_data["store"]
     if (
-        not config.is_clone
+        context.application.bot_data.get("clone_manager") is not None
         and re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", text)
     ):
         context.user_data["menu_mode"] = "clone_token"
@@ -4773,10 +5286,10 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if mode_before and context.user_data.get("menu_mode") != mode_before:
             clear_menu_input_failures(context, mode_before)
         return
-    note_command = parse_private_note_command(text)
+    note_command = None if config.is_clone else parse_private_note_command(text)
     if note_command:
         if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
-            await message.reply_text("仅开发者可用。")
+            await message.reply_text(developer_only_text(context))
             return
         action, keyword, body = note_command
         if action == "1":
@@ -4831,7 +5344,7 @@ async def process_menu_input(
     if mode == "private_note_query":
         if not has_developer_access(context, user.id if user else None):
             context.user_data.pop("menu_mode", None)
-            await message.reply_text("仅开发者可用。")
+            await message.reply_text(developer_only_text(context))
             return True
         parsed_note = parse_private_note_command(text)
         if parsed_note and parsed_note[1]:
@@ -4927,20 +5440,27 @@ async def process_menu_input(
             await message.reply_text("当前机器人不支持继续克隆。")
             return True
         try:
-            clone_id, username = await manager.request(user.id, text)
+            clone_id, username = await manager.request(
+                user.id, text, owner_name=user.full_name or ""
+            )
         except ValueError as exc:
             await menu_input_error(context, message, mode, str(exc))
             return True
+        context.user_data.pop("menu_mode", None)
         try:
             await message.delete()
         except TelegramError:
             pass
-        await context.bot.send_message(
-            user.id,
-            f"克隆申请已提交：@{username}\n编号：#{clone_id}\n"
-            "开发者审核通过后才会启动；审核结果会发送给你。",
-        )
+        with persistent_message():
+            await context.bot.send_message(
+                user.id,
+                f"克隆申请已提交：@{username}\n编号：#{clone_id}\n"
+                "审核通过后自动启动，你将是该机器人的超级管理员；审核结果会发送给你。",
+            )
         store.audit(f"tg:{user.id}", "clone.request", str(clone_id), username)
+        if not manager.manage_processes:
+            # 子机器人上的申请：由母机器人推送审核
+            return True
         for developer_id in all_developer_ids(context):
             try:
                 with persistent_message():
@@ -4965,7 +5485,7 @@ async def process_menu_input(
             await message.reply_text("仅超级管理员可管理管理员。")
             return True
         context.user_data["preserve_incoming_message_id"] = message.message_id
-        can_manage_all = has_developer_access(context, user.id)
+        can_manage_all = is_developer_user(context, user.id)
         visible_admin_ids = {
             int(row["user_id"]) for row in store.list_bot_admins(
                 viewer_id=user.id, include_all=can_manage_all
@@ -5076,7 +5596,7 @@ async def process_menu_input(
         return True
     if mode == "tron_monitor_user_query":
         if not has_developer_access(context, user.id if user else None):
-            await message.reply_text("仅开发者可用。")
+            await message.reply_text(developer_only_text(context))
             return True
         owner = store.tron_monitor_owner_by_query(text)
         if not owner:
@@ -5148,13 +5668,7 @@ async def process_menu_input(
         return True
     if mode == "directory_search":
         query = " ".join(text.split())
-        entries = store.search(query, limit=10)
-        record_directory_search(update, store, query, len(entries), "menu_search")
-        await send_entries(
-            message,
-            entries,
-            store.get_settings().get("not_found_text", "地址没有收录，请联系管理员。"),
-        )
+        await directory_search_reply(update, store, query, "menu_search")
         return True
     if mode == "tron_search":
         await send_balance_query(update, context, text)
@@ -6777,16 +7291,16 @@ async def raffle_at_command(
 
 
 async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+    if not has_review_access(context, update.effective_user.id if update.effective_user else None):
+        await update.effective_message.reply_text("仅超级管理员可审核收录。")
         return
     entries = context.application.bot_data["store"].list_entries(status="pending", limit=10)
     await send_entries(update.effective_message, entries, "没有待审核提交。", True)
 
 
 async def set_status_from_command(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str) -> None:
-    if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+    if not has_review_access(context, update.effective_user.id if update.effective_user else None):
+        await update.effective_message.reply_text("仅超级管理员可审核收录。")
         return
     if not context.args or not context.args[0].isdigit():
         await update.effective_message.reply_text("请提供收录编号。")
@@ -6811,8 +7325,8 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def edit_entry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not has_developer_access(context, user.id if user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+    if not has_review_access(context, user.id if user else None):
+        await update.effective_message.reply_text("仅超级管理员可审核收录。")
         return
     if len(context.args) < 3 or not context.args[0].isdigit():
         await update.effective_message.reply_text("用法：/edit 编号 关键词 地址")
@@ -8499,7 +9013,7 @@ async def send_personal_invite_query(
         if not store.invite_config(target_chat_id)["is_enabled"]:
             return False
     is_owner = int(link["user_id"]) == user.id
-    is_admin = has_developer_access(context, user.id)
+    is_admin = is_developer_user(context, user.id)
     if not is_owner and not is_admin:
         is_admin = await is_chat_admin(context, target_chat_id, user.id)
     if not is_owner and not is_admin:
@@ -8874,7 +9388,7 @@ async def search_stats_command(
     user = update.effective_user
     chat = update.effective_chat
     if not has_developer_access(context, user.id if user else None):
-        await update.effective_message.reply_text("仅开发者可用。")
+        await update.effective_message.reply_text(developer_only_text(context))
         return
     if not chat or chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text("搜索统计包含用户信息，请私聊机器人查看。")
@@ -9655,8 +10169,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             settings.get("welcome_text", "欢迎使用。"),
             reply_markup=main_keyboard(
-                is_admin_user, is_super_user,
-                not context.application.bot_data["config"].is_clone,
+                is_admin_user, is_super_user, clone_available(context),
             ),
         )
         return
@@ -9877,8 +10390,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         return
     if data == "clone:start":
-        if context.application.bot_data["config"].is_clone:
-            await query.answer("克隆机器人不能继续克隆。", show_alert=True)
+        if not clone_available(context):
+            await query.answer("当前机器人暂不支持克隆。", show_alert=True)
             return
         if not chat or chat.type != ChatType.PRIVATE:
             await query.answer("请私聊机器人操作。", show_alert=True)
@@ -9887,13 +10400,17 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer()
         await query.edit_message_text(
             "🤖 克隆机器人\n\n请发送从 @BotFather 获得的 Bot Token。\n"
-            "Token 验证后会立即删除这条消息并启动克隆；克隆不包含开发者功能。\n\n"
+            "Token 验证后会立即删除这条消息并提交审核，通过后自动启动。\n"
+            "你将成为新机器人的超级管理员，新机器人拥有独立的搜索收录数据。\n\n"
             "发送 /cancel 取消。"
         )
         return
+    if data.startswith("clonetree:") or data.startswith("clonedel:"):
+        await handle_clone_tree_callback(update, context, data)
+        return
     if data == "admin:clones":
         if not has_developer_access(context, user_id):
-            await query.answer("仅开发者可查看。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         text, keyboard = clone_records_view(store)
         await query.answer()
@@ -9901,7 +10418,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     if data.startswith("clone:approve:") or data.startswith("clone:reject:"):
         if not has_developer_access(context, user_id):
-            await query.answer("仅开发者可审核。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         raw_id = data.rsplit(":", 1)[-1]
         if not raw_id.isdigit():
@@ -9913,28 +10430,29 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("当前实例不能审核克隆。", show_alert=True)
             return
         try:
+            record = store.bot_clone(clone_id)
+            from_child = bool(record and int(record["parent_clone_id"] or 0))
             if data.startswith("clone:approve:"):
                 owner_id, username = await manager.approve(clone_id, user_id)
                 result = f"克隆申请 #{clone_id} 已通过，@{username} 已启动。"
-                owner_notice = (
-                    f"你的克隆申请 #{clone_id} 已通过，@{username} 已启动。\n"
-                    "你的账号是超级管理员；克隆不包含开发者功能。"
-                )
+                owner_notice = clone_result_notice(clone_id, username, True)
                 action = "clone.approve"
             else:
                 owner_id = manager.reject(clone_id, user_id)
                 result = f"克隆申请 #{clone_id} 已拒绝。"
-                owner_notice = f"你的克隆申请 #{clone_id} 未通过开发者审核。"
+                owner_notice = clone_result_notice(clone_id, "", False)
                 action = "clone.reject"
         except ValueError as exc:
             await query.answer(str(exc), show_alert=True)
             return
         store.audit(f"tg:{user_id}", action, str(clone_id))
-        try:
-            with persistent_message():
-                await context.bot.send_message(owner_id, owner_notice)
-        except TelegramError:
-            logging.exception("Failed to send clone review result")
+        if not from_child:
+            # 子机器人上提交的申请由提交所在的机器人通知申请人
+            try:
+                with persistent_message():
+                    await context.bot.send_message(owner_id, owner_notice)
+            except TelegramError:
+                logging.exception("Failed to send clone review result")
         await query.answer(result)
         await query.edit_message_text(result)
         return
@@ -10372,8 +10890,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer()
         await query.edit_message_text(
             HELP_TEXT, reply_markup=main_keyboard(
-                is_admin_user, is_super_user,
-                not context.application.bot_data["config"].is_clone,
+                is_admin_user, is_super_user, clone_available(context),
             )
         )
         return
@@ -10682,7 +11199,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("邀请链接不存在。", show_alert=True)
             return
         is_owner = int(link["user_id"]) == user_id
-        is_admin = has_developer_access(context, user_id)
+        is_admin = is_developer_user(context, user_id)
         if not is_owner and not is_admin:
             is_admin = await is_chat_admin(context, target_group_id, user_id)
         if not is_owner and not is_admin:
@@ -11447,8 +11964,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
     if data == "admin:pending":
-        if not has_developer_access(context, user_id):
-            await query.answer("仅开发者可用。", show_alert=True)
+        if not has_review_access(context, user_id):
+            await query.answer("仅超级管理员可审核收录。", show_alert=True)
             return
         await query.answer()
         await send_entries(
@@ -11516,7 +12033,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         rows = store.list_bot_admins(
             viewer_id=user_id,
-            include_all=has_developer_access(context, user_id),
+            include_all=is_developer_user(context, user_id),
         )
         lines = ["👥 机器人管理员", ""]
         role_labels = {
@@ -11546,7 +12063,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     if data.startswith("privnote:"):
         if not has_developer_access(context, user_id):
-            await query.answer("仅开发者可用。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         parts = data.split(":", 1)
         if len(parts) != 2 or not parts[1].isdigit():
@@ -11574,7 +12091,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     if data == "admin:notes":
         if not has_developer_access(context, user_id):
-            await query.answer("仅开发者可用。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         context.user_data["menu_mode"] = "private_note_query"
         await query.answer()
@@ -11596,7 +12113,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             not has_developer_access(context, user_id)
             or not chat or chat.type != ChatType.PRIVATE
         ):
-            await query.answer("仅开发者可查看。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         text, keyboard = bot_usage_page(store, int(raw_page))
         await query.answer()
@@ -11609,7 +12126,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             not has_developer_access(context, user_id)
             or not chat or chat.type != ChatType.PRIVATE
         ):
-            await query.answer("仅开发者可查看。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         action = data.rsplit(":", 1)[-1]
         if action == "query":
@@ -11640,7 +12157,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             "📊 后台统计\n\n" + "\n".join(
                 f"{key}: {value}" for key, value in stats_data.items()
-            ),
+            ) + "\n\n" + storage_usage_text(context),
             reply_markup=admin_menu_keyboard(
                 True, has_developer_access(context, user_id)
             ),
@@ -11657,7 +12174,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             or not chat
             or chat.type != ChatType.PRIVATE
         ):
-            await query.answer("仅开发者可查看。", show_alert=True)
+            await query.answer(developer_only_text(context), show_alert=True)
             return
         text, keyboard = search_stats_page(
             context.application.bot_data["store"], parts[1], int(parts[2])
@@ -11797,13 +12314,16 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     if data == "menu:my":
         entries = context.application.bot_data["store"].my_entries(query.from_user.id)
-        await send_entries(query.message, entries, "你还没有提交记录。")
+        if not entries:
+            await query.message.reply_text("你还没有提交记录。")
+            return
+        await query.message.reply_text(my_entries_text(entries), parse_mode=ParseMode.HTML)
         return
     action, _, raw_id = data.partition(":")
     if action not in {"approve", "reject"} or not raw_id.isdigit():
         return
-    if not has_developer_access(context, query.from_user.id):
-        await query.edit_message_text("仅开发者可用。")
+    if not has_review_access(context, query.from_user.id):
+        await query.edit_message_text("仅超级管理员可审核收录。")
         return
     entry_id = int(raw_id)
     status = "approved" if action == "approve" else "rejected"
@@ -11812,37 +12332,30 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def send_entries(message, entries: list[Entry], empty_text: str, with_keyboard: bool = False) -> None:
+    """Public: each entry's original content. Review: original content + info card."""
     if not entries:
         await message.reply_text(empty_text)
         return
     for entry in entries:
-        text = entry_text(entry, include_owner=with_keyboard)
-        markup = admin_keyboard(entry.id) if with_keyboard else None
-        if not entry.media_file_id:
+        try:
+            await deliver_entry(entry, message=message)
+        except (TelegramError, ValueError):
+            logging.exception("Failed to send entry %s content", entry.id)
+        if with_keyboard:
             await message.reply_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=markup,
-                disable_web_page_preview=True,
+                entry_text(entry, include_owner=True), parse_mode=ParseMode.HTML,
+                reply_markup=admin_keyboard(entry.id), disable_web_page_preview=True,
             )
-            continue
-        use_caption = len(text) <= 900
-        kwargs = {}
-        if use_caption:
-            kwargs.update(caption=text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        if entry.media_type == "photo":
-            await message.reply_photo(entry.media_file_id, **kwargs)
-        elif entry.media_type == "video":
-            await message.reply_video(entry.media_file_id, **kwargs)
-        elif entry.media_type == "animation":
-            await message.reply_animation(entry.media_file_id, **kwargs)
-        elif entry.media_type == "audio":
-            await message.reply_audio(entry.media_file_id, **kwargs)
-        else:
-            await message.reply_document(entry.media_file_id, **kwargs)
-        if not use_caption:
-            await message.reply_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=markup,
-                disable_web_page_preview=True,
-            )
+
+
+def my_entries_text(entries: list[Entry]) -> str:
+    labels = {"pending": "待审核", "approved": "已通过", "rejected": "已拒绝", "removed": "已下架"}
+    lines = ["📋 我的提交", ""]
+    for entry in entries:
+        lines.append(
+            f"#{entry.id} · {html.escape(entry.title)} · {labels.get(entry.status, entry.status)}"
+        )
+    return "\n".join(lines)
 
 
 async def process_outbox(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -11972,6 +12485,11 @@ def build_application(config: Config) -> Application:
     )
     if not config.is_clone:
         application.bot_data["clone_manager"] = CloneManager(config, store)
+    elif config.mother_db_path and Path(config.mother_db_path).exists():
+        # 子机器人也能继续克隆：申请写入母机器人的登记表，由母机器人审核和启动
+        application.bot_data["clone_manager"] = CloneManager(
+            config, DirectoryStore(Path(config.mother_db_path)), manage_processes=False
+        )
 
     async def ad_decorator(bot_instance, chat_id, position):
         return await group_ad_text(store, chat_id, position)
@@ -12119,4 +12637,9 @@ def build_application(config: Config) -> Application:
     application.job_queue.run_repeating(
         poll_lottery_results, interval=5, first=5, job_kwargs=single_job
     )
+    if "clone_manager" in application.bot_data:
+        application.job_queue.run_repeating(
+            sync_clone_requests if not config.is_clone else notify_clone_results,
+            interval=20, first=15, job_kwargs=single_job,
+        )
     return application

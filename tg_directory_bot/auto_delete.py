@@ -25,6 +25,10 @@ def persistent_message() -> Iterator[None]:
         _PERSISTENT_MESSAGE.reset(token)
 
 
+def is_persistent_message() -> bool:
+    return bool(_PERSISTENT_MESSAGE.get())
+
+
 @contextmanager
 def advertisement_message() -> Iterator[None]:
     token = _AD_MESSAGE.set(True)
