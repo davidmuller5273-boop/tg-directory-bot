@@ -109,6 +109,14 @@ def tron_hex_to_base58(value: str) -> str:
     return "1" * leading_zeroes + (encoded or "1")
 
 
+def tron_address_hex(address: str) -> str:
+    """Base58 TRON address -> 41-prefixed hex (as returned when visible=false)."""
+    value = 0
+    for char in address:
+        value = value * 58 + BASE58_ALPHABET.index(char)
+    return value.to_bytes(25, "big")[:21].hex()
+
+
 def tron_address_abi_parameter(address: str) -> str:
     address = validate_tron_address(address)
     number = 0
@@ -137,6 +145,50 @@ def blocksec_usdt_freeze_status(status_code: int, payload: dict | None) -> bool 
         return None
     value = payload.get("is_frozen")
     return value if isinstance(value, bool) else None
+
+
+def tronscan_usdt_balance(account: dict) -> Decimal:
+    """Real USDT quantity from a TronScan account payload.
+
+    Only the official USDT contract counts (fake airdropped tokens may also be
+    named "USDT"). TronScan's ``amount`` field in ``withPriceTokens`` is the
+    token's value priced in TRX (quantity × tokenPriceInTrx), NOT the token
+    quantity, so it must never be used as the balance. The raw ``balance``
+    divided by ``tokenDecimal`` is authoritative; ``quantity`` is a fallback.
+    """
+    for key in ("withPriceTokens", "trc20token_balances", "tokens"):
+        for token in account.get(key) or []:
+            token_id = str(
+                token.get("tokenId") or token.get("token_id")
+                or token.get("contract_address") or ""
+            )
+            if token_id != USDT_TRC20_CONTRACT:
+                continue
+            raw = token.get("balance")
+            if raw not in {None, ""}:
+                decimals = token.get("tokenDecimal", token.get("decimals"))
+                decimals = 6 if decimals in {None, ""} else max(0, int(decimals))
+                return Decimal(str(raw)) / (Decimal(10) ** decimals)
+            if token.get("quantity") not in {None, ""}:
+                return Decimal(str(token["quantity"]))
+            return Decimal("0")
+    return Decimal("0")
+
+
+def tronscan_row_is_usdt(row: dict) -> bool:
+    """Reject transfer rows of look-alike tokens; accept rows without contract info."""
+    token_info = row.get("tokenInfo") or {}
+    contract = str(
+        row.get("contract_address") or token_info.get("tokenId") or ""
+    )
+    return not contract or contract == USDT_TRC20_CONTRACT
+
+
+def trongrid_v1_usdt_balance(account: dict) -> Decimal:
+    for token in account.get("trc20") or []:
+        if isinstance(token, dict) and USDT_TRC20_CONTRACT in token:
+            return Decimal(str(token[USDT_TRC20_CONTRACT])) / Decimal(1_000_000)
+    return Decimal("0")
 
 
 def tron_account_is_multisig(account: dict, address: str = "") -> bool:
@@ -400,11 +452,6 @@ class ChainService:
             return result
         account = data[0]
         trx = Decimal(str(account.get("balance", 0))) / Decimal(1_000_000)
-        usdt_raw = Decimal("0")
-        for token in account.get("trc20") or []:
-            if USDT_TRC20_CONTRACT in token:
-                usdt_raw = Decimal(str(token[USDT_TRC20_CONTRACT]))
-                break
         transaction_errors: list[str] = []
         resource_payload: dict = {}
         resource_response = query_results[0]
@@ -467,7 +514,7 @@ class ChainService:
             address=address,
             activated=True,
             trx=trx,
-            usdt=usdt_raw / Decimal(1_000_000),
+            usdt=trongrid_v1_usdt_balance(account),
             created_at_ms=int(account["create_time"]) if account.get("create_time") else None,
             transactions=(),
             transactions_error="；".join(transaction_errors)[:500],
@@ -654,20 +701,176 @@ class ChainService:
                 response.raise_for_status()
                 data = response.json().get("data") or []
         except (ChainQueryError, httpx.HTTPError, ValueError, TypeError):
-            return await self._tronscan_monitor_balance(address)
+            try:
+                trx, usdt, activated = await self._node_balance_pair(address)
+            except ChainQueryError:
+                return await self._tronscan_monitor_balance(address)
+            return TronBalance(address, activated, trx, usdt)
         if not data:
             return TronBalance(address, False, Decimal("0"), Decimal("0"))
         account = data[0]
-        usdt_raw = Decimal("0")
-        for token in account.get("trc20") or []:
-            if USDT_TRC20_CONTRACT in token:
-                usdt_raw = Decimal(str(token[USDT_TRC20_CONTRACT]))
-                break
+        if account.get("address") and account.get("address") not in {
+            address, tron_address_hex(address),
+        }:
+            raise ChainQueryError("余额接口返回了其他地址的数据")
         return TronBalance(
             address, True,
             Decimal(str(account.get("balance") or 0)) / Decimal(1_000_000),
-            usdt_raw / Decimal(1_000_000),
+            trongrid_v1_usdt_balance(account),
         )
+
+    # ---- 监控播报专用：权威节点余额（不走任何缓存） ----------------------
+
+    def _trongrid_headers(self) -> dict[str, str]:
+        headers = {
+            "accept": "application/json", "content-type": "application/json",
+            "cache-control": "no-cache",
+        }
+        api_key = getattr(self.config, "trongrid_api_key", "")
+        if api_key:
+            headers["TRON-PRO-API-KEY"] = api_key
+        return headers
+
+    async def _node_post(
+        self, client: httpx.AsyncClient, path: str, body: dict,
+    ) -> dict:
+        """POST to the TronGrid full node with retry on 429 / network errors."""
+        headers = self._trongrid_headers()
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    f"{self.config.trongrid_url}{path}", json=body, headers=headers
+                )
+            except httpx.RequestError as exc:
+                last_error = exc
+            else:
+                status = getattr(response, "status_code", 200)
+                if status in {401, 403} and headers.get("TRON-PRO-API-KEY"):
+                    headers = self._headers_without_api_key(headers)
+                    continue
+                if status != 429:
+                    try:
+                        response.raise_for_status()
+                        payload = response.json()
+                    except (httpx.HTTPError, ValueError, TypeError) as exc:
+                        raise ChainQueryError(f"节点接口异常：{exc}") from exc
+                    if not isinstance(payload, dict):
+                        raise ChainQueryError("节点接口返回格式错误")
+                    return payload
+                last_error = ChainQueryError("节点接口限流")
+            if attempt < 2:
+                await asyncio.sleep(min(3.0, 0.8 * (2 ** attempt)) + random.uniform(0, 0.3))
+        raise ChainQueryError(f"节点接口不可用：{last_error}")
+
+    async def _node_balance_pair(self, address: str) -> tuple[Decimal, Decimal, bool]:
+        """(TRX spendable, USDT, activated) for exactly ``address`` from the full node.
+
+        TRX = getaccount.balance (sun / 1e6, excludes staked/frozen TRX);
+        USDT = balanceOf on the official contract (6 decimals).
+        """
+        address = validate_tron_address(address)
+        async with httpx.AsyncClient(timeout=8) as client:
+            account = await self._node_post(
+                client, "/wallet/getaccount", {"address": address, "visible": True}
+            )
+            if account.get("Error"):
+                raise ChainQueryError(str(account["Error"]))
+            returned = str(account.get("address") or "")
+            if not returned:
+                return Decimal("0"), Decimal("0"), False
+            if returned not in {address, tron_address_hex(address)}:
+                raise ChainQueryError("节点返回了其他地址的数据")
+            contract = await self._node_post(
+                client, "/wallet/triggerconstantcontract", {
+                    "owner_address": address,
+                    "contract_address": USDT_TRC20_CONTRACT,
+                    "function_selector": "balanceOf(address)",
+                    "parameter": tron_address_abi_parameter(address),
+                    "visible": True,
+                },
+            )
+        values = contract.get("constant_result") or []
+        result = contract.get("result") or {}
+        if not values or (isinstance(result, dict) and result.get("result") is False):
+            raise ChainQueryError("USDT 合约余额查询失败")
+        try:
+            usdt = Decimal(int(str(values[0]) or "0", 16)) / Decimal(1_000_000)
+            trx = Decimal(str(account.get("balance") or 0)) / Decimal(1_000_000)
+        except (ValueError, InvalidOperation) as exc:
+            raise ChainQueryError("节点余额格式错误") from exc
+        return trx, usdt, True
+
+    async def _indexer_balance_pair(self, address: str) -> tuple[Decimal, Decimal, bool]:
+        """Second, independent source (TronGrid V1 indexer) for cross-checking."""
+        headers = self._trongrid_headers()
+        headers.pop("content-type", None)
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await self._history_get(
+                client, f"{self.config.trongrid_url}/v1/accounts/{address}",
+                {"only_confirmed": "false"}, headers,
+            )
+            response.raise_for_status()
+            data = response.json().get("data") or []
+        if not data:
+            return Decimal("0"), Decimal("0"), False
+        account = data[0]
+        if account.get("address") and account.get("address") not in {
+            address, tron_address_hex(address),
+        }:
+            raise ChainQueryError("索引接口返回了其他地址的数据")
+        return (
+            Decimal(str(account.get("balance") or 0)) / Decimal(1_000_000),
+            trongrid_v1_usdt_balance(account), True,
+        )
+
+    async def _node_head_block(self) -> int:
+        async with httpx.AsyncClient(timeout=8) as client:
+            payload = await self._node_post(client, "/wallet/getnowblock", {})
+        header = (payload.get("block_header") or {}).get("raw_data") or {}
+        return int(header.get("number") or 0)
+
+    async def tron_verified_balance(
+        self, address: str, *, min_block: int = 0,
+        attempts: int = 3, delay: float = 2.0,
+    ) -> TronBalance:
+        """Fresh, verified balance of exactly ``address`` for alerts.
+
+        * Never cached; never shared between addresses.
+        * Authoritative source: full node getaccount + USDT balanceOf.
+        * Waits (short retries) until the node has reached ``min_block``
+          (the block of the detected transaction).
+        * Cross-checks with the TronGrid indexer when it answers; if they
+          disagree, retries; after retries the node value is accepted only
+          if two consecutive node readings agree.
+        Raises ChainQueryError when the value cannot be verified, so callers
+        can show 「余额获取中/暂不可用」 instead of a wrong number.
+        """
+        address = validate_tron_address(address)
+        last_error: Exception | None = None
+        previous: tuple[Decimal, Decimal, bool] | None = None
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                await asyncio.sleep(delay)
+            try:
+                if min_block:
+                    head = await self._node_head_block()
+                    if head and head < min_block:
+                        last_error = ChainQueryError("节点尚未同步到该交易区块")
+                        continue
+                primary = await self._node_balance_pair(address)
+            except (ChainQueryError, httpx.HTTPError, ValueError, TypeError) as exc:
+                last_error = exc
+                continue
+            try:
+                secondary = await self._indexer_balance_pair(address)
+            except (ChainQueryError, httpx.HTTPError, ValueError, TypeError):
+                secondary = None
+            if secondary is None or secondary[:2] == primary[:2] or previous == primary:
+                return TronBalance(address, primary[2], primary[0], primary[1])
+            previous = primary
+            last_error = ChainQueryError("节点与索引余额不一致，等待确认")
+        raise ChainQueryError(f"余额暂未核实：{last_error}")
 
     async def _tronscan_monitor_balance(self, address: str) -> TronBalance:
         base_url = getattr(
@@ -685,22 +888,13 @@ class ChainService:
                 account = response.json()
         except (ChainQueryError, httpx.HTTPError, ValueError, TypeError) as exc:
             raise ChainQueryError("波场监控余额接口暂时不可用") from exc
+        if account.get("address") and str(account.get("address")) != address:
+            raise ChainQueryError("TronScan返回了其他地址的数据")
         activated = bool(account.get("activated", account.get("address")))
         if not activated:
             return TronBalance(address, False, Decimal("0"), Decimal("0"))
         trx = Decimal(str(account.get("balanceStr") or account.get("balance") or 0)) / Decimal(1_000_000)
-        usdt = Decimal("0")
-        for token in account.get("withPriceTokens") or account.get("tokens") or []:
-            token_id = str(token.get("tokenId") or token.get("token_id") or "")
-            token_name = str(token.get("tokenAbbr") or token.get("tokenName") or "").upper()
-            if token_id != USDT_TRC20_CONTRACT and token_name != "USDT":
-                continue
-            if token.get("amount") not in {None, ""}:
-                usdt = Decimal(str(token.get("amount") or 0))
-            else:
-                decimals = max(0, int(token.get("tokenDecimal") or 6))
-                usdt = Decimal(str(token.get("balance") or 0)) / (Decimal(10) ** decimals)
-            break
+        usdt = tronscan_usdt_balance(account)
         return TronBalance(address, True, trx, usdt)
 
     async def tron_monitor_transactions(
@@ -841,6 +1035,8 @@ class ChainService:
                 )
                 if not tx_id or not since_ms <= timestamp_ms <= end_ms:
                     continue
+                if asset == "USDT" and not tronscan_row_is_usdt(row):
+                    continue
                 decimals = max(0, int(row.get("decimals") or 6))
                 amount = Decimal(str(row.get("amount") or row.get("quant") or 0)) / (
                     Decimal(10) ** decimals
@@ -945,6 +1141,8 @@ class ChainService:
             results: list[TronTransaction] = []
             for row in rows[:1]:
                 token_info = row.get("tokenInfo") or {}
+                if asset == "USDT" and not tronscan_row_is_usdt(row):
+                    continue
                 if asset == "USDT":
                     tx_id = str(row.get("transaction_id") or "")
                     timestamp_ms = int(row.get("block_ts") or 0)
@@ -1015,6 +1213,8 @@ class ChainService:
                 rows = rows or []
                 for row in rows:
                     token_info = row.get("tokenInfo") or {}
+                    if asset == "USDT" and not tronscan_row_is_usdt(row):
+                        continue
                     if asset == "USDT":
                         tx_id = str(row.get("transaction_id") or "")
                         timestamp_ms = int(row.get("block_ts") or 0)
@@ -1091,22 +1291,13 @@ class ChainService:
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise ChainQueryError("TronScan账户接口不可用") from exc
 
+        if account.get("address") and str(account.get("address")) != address:
+            raise ChainQueryError("TronScan返回了其他地址的数据")
         activated = bool(account.get("activated", account.get("address")))
         if not activated:
             return TronBalance(address, False, Decimal("0"), Decimal("0"))
         trx = Decimal(str(account.get("balanceStr") or account.get("balance") or 0)) / Decimal(1_000_000)
-        usdt = Decimal("0")
-        for token in account.get("withPriceTokens") or account.get("tokens") or []:
-            token_id = str(token.get("tokenId") or token.get("token_id") or "")
-            token_name = str(token.get("tokenAbbr") or token.get("tokenName") or "").upper()
-            if token_id != USDT_TRC20_CONTRACT and token_name != "USDT":
-                continue
-            if token.get("amount") not in {None, ""}:
-                usdt = Decimal(str(token.get("amount") or 0))
-            else:
-                decimals = max(0, int(token.get("tokenDecimal") or 6))
-                usdt = Decimal(str(token.get("balance") or 0)) / (Decimal(10) ** decimals)
-            break
+        usdt = tronscan_usdt_balance(account)
         bandwidth = account.get("bandwidth") or {}
         owner_permission = account.get("ownerPermission") or account.get("owner_permission") or {}
         active_permissions = account.get("activePermissions") or account.get("active_permission") or []
@@ -1210,23 +1401,44 @@ class ChainService:
         if transaction.block_number or not transaction.tx_id:
             return transaction
         block_number = self._tron_block_cache.get(transaction.tx_id, 0)
-        headers = {"accept": "application/json"}
-        if self.config.trongrid_api_key:
-            headers["TRON-PRO-API-KEY"] = self.config.trongrid_api_key
         if not block_number:
             try:
                 async with httpx.AsyncClient(timeout=8) as client:
-                    response = await client.post(
-                        f"{self.config.trongrid_url}/wallet/gettransactioninfobyid",
-                        json={"value": transaction.tx_id}, headers=headers,
-                    )
-                    response.raise_for_status()
-                    block_number = int(response.json().get("blockNumber") or 0)
+                    for path in (
+                        "/wallet/gettransactioninfobyid",
+                        "/walletsolidity/gettransactioninfobyid",
+                    ):
+                        try:
+                            payload = await self._node_post(
+                                client, path, {"value": transaction.tx_id}
+                            )
+                        except ChainQueryError:
+                            continue
+                        block_number = int(payload.get("blockNumber") or 0)
+                        if block_number:
+                            break
             except (httpx.HTTPError, ValueError, TypeError):
                 block_number = 0
+            if not block_number:
+                block_number = await self._tronscan_block_number(transaction.tx_id)
             if block_number:
                 self._tron_block_cache[transaction.tx_id] = block_number
         return replace(transaction, block_number=block_number) if block_number else transaction
+
+    async def _tronscan_block_number(self, tx_id: str) -> int:
+        base_url = getattr(
+            self.config, "tronscan_api_url", "https://apilist.tronscanapi.com"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                response = await self._history_get(
+                    client, f"{base_url}/api/transaction-info",
+                    {"hash": tx_id}, self._tronscan_headers(),
+                )
+                response.raise_for_status()
+                return int(response.json().get("block") or 0)
+        except (ChainQueryError, httpx.HTTPError, ValueError, TypeError):
+            return 0
 
     async def tron_transaction_history(
         self, address: str, asset: str, max_records: int = 20_000,
@@ -1468,9 +1680,8 @@ class ChainService:
         for token in account.get("trc20") or []:
             token_info = token.get("tokenInfo") or {}
             contract = str(token.get("hash") or token_info.get("h") or "")
-            symbol = str(token_info.get("s") or "").upper()
-            if contract != USDT_TRC20_CONTRACT and symbol != "USDT":
-                continue
+            if contract != USDT_TRC20_CONTRACT:
+                continue  # 只认官方合约，防止同名假 USDT
             decimals = max(0, int(token_info.get("d") or 6))
             usdt = Decimal(str(token.get("balance") or 0)) / (Decimal(10) ** decimals)
             break

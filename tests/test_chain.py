@@ -469,6 +469,9 @@ class ChainTest(unittest.TestCase):
                 tron_monitor_transactions=AsyncMock(return_value=(inside_tx,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
             )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
+            )
             sent = SimpleNamespace(chat_id=7, message_id=99)
             bot = SimpleNamespace(send_message=AsyncMock(return_value=sent))
             context = SimpleNamespace(
@@ -510,6 +513,9 @@ class ChainTest(unittest.TestCase):
                 tron_monitor_transactions=AsyncMock(return_value=(fresh,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
             )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
+            )
             bot = SimpleNamespace(send_message=AsyncMock())
             context = SimpleNamespace(
                 bot=bot,
@@ -549,6 +555,9 @@ class ChainTest(unittest.TestCase):
                 tron_monitor_transactions=AsyncMock(return_value=(transaction,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
             )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
+            )
             bot = SimpleNamespace(send_message=AsyncMock())
             context = SimpleNamespace(
                 bot=bot,
@@ -577,6 +586,9 @@ class ChainTest(unittest.TestCase):
                 )),
                 tron_monitor_transactions=AsyncMock(return_value=(historical,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
+            )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
             )
             bot = SimpleNamespace(send_message=AsyncMock())
             context = SimpleNamespace(
@@ -607,6 +619,9 @@ class ChainTest(unittest.TestCase):
                 )),
                 tron_monitor_transactions=AsyncMock(return_value=(fresh,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
+            )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
             )
             bot = SimpleNamespace(send_message=AsyncMock())
             context = SimpleNamespace(
@@ -2238,6 +2253,9 @@ class ChainTest(unittest.TestCase):
                 tron_monitor_transactions=AsyncMock(return_value=(delayed,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
             )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
+            )
             bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(
                 chat_id=7, message_id=99
             )))
@@ -2358,6 +2376,9 @@ class ChainTest(unittest.TestCase):
                 )),
                 tron_monitor_transactions=AsyncMock(return_value=(fresh,)),
                 transaction_with_block=AsyncMock(side_effect=lambda item: item),
+            )
+            chain.tron_verified_balance = AsyncMock(
+                side_effect=lambda address, **kw: chain.tron_monitor_balance.return_value
             )
             bot = SimpleNamespace(send_message=AsyncMock(
                 side_effect=TelegramError("blocked")

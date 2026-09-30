@@ -2422,14 +2422,26 @@ def sqlite_utc_timestamp_ms(value: object) -> int:
     return int(parsed.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
+TRON_BALANCE_UNAVAILABLE = "余额获取中/暂不可用"
+
+
 def tron_monitor_alert_view(
-    result: TronBalance,
+    result: TronBalance | None,
     transaction: TronTransaction | None,
     monitor_id: int,
     notice: str,
     emoji_ids: dict[str, str] | None = None,
     direction_emoji_ids: dict[str, str] | None = None,
+    address: str = "",
 ) -> tuple[str, InlineKeyboardMarkup]:
+    """Render a monitor alert.
+
+    ``result`` must be a balance verified for exactly ``address``; pass None
+    when it could not be verified and 「余额获取中/暂不可用」 is shown instead.
+    """
+    address = address or (result.address if result else "")
+    if result is not None and address and result.address != address:
+        result = None  # 永不显示其他地址的余额
     emoji_ids = emoji_ids or {}
     direction_emoji_ids = direction_emoji_ids or {}
 
@@ -2446,9 +2458,19 @@ def tron_monitor_alert_view(
         f"⏰ 波场监控 #{monitor_id}",
         html.escape(notice),
         "",
-        f"{usdt_icon} USDT余额：<b>{result.usdt:,.2f}</b>",
-        f"{trx_icon} TRX余额：<b>{result.trx:,.2f}</b>",
     ]
+    if address:
+        lines.append(f"📍 监控地址：<code>{html.escape(address)}</code>")
+    if result is not None:
+        lines.extend([
+            f"{usdt_icon} USDT余额：<b>{format_tron_amount(result.usdt)}</b>",
+            f"{trx_icon} TRX余额：<b>{format_tron_amount(result.trx)}</b>",
+        ])
+    else:
+        lines.extend([
+            f"{usdt_icon} USDT余额：<b>{TRON_BALANCE_UNAVAILABLE}</b>",
+            f"{trx_icon} TRX余额：<b>{TRON_BALANCE_UNAVAILABLE}</b>",
+        ])
     if transaction:
         incoming = transaction.direction == "转入"
         direction_id = direction_emoji_ids.get("in" if incoming else "out", "")
@@ -2465,16 +2487,16 @@ def tron_monitor_alert_view(
             f"{direction_icon} <b>{sign}{format_tron_amount(transaction.amount)} "
             f"{transaction.asset}</b>",
             f"{relation}：<code>{html.escape(transaction.counterparty or '未知')}</code>",
-            f"{asset_icon} 区块：{transaction.block_number or '数据源未提供'}",
+            f"{asset_icon} 区块：{transaction.block_number or '确认中'}",
             f"🕒 时间：{format_beijing_timestamp_ms(transaction.timestamp_ms)}",
         ])
     keyboard = InlineKeyboardMarkup([[
         custom_emoji_callback_button(
-            "USDT记录", f"tronrecords:USDT:all:7:0:{result.address}",
+            "USDT记录", f"tronrecords:USDT:all:7:0:{address}",
             emoji_ids.get("USDT", ""), "🟢",
         ),
         custom_emoji_callback_button(
-            "TRX记录", f"tronrecords:TRX:all:7:0:{result.address}",
+            "TRX记录", f"tronrecords:TRX:all:7:0:{address}",
             emoji_ids.get("TRX", ""), "🔴",
         ),
     ]])
@@ -3130,7 +3152,6 @@ async def poll_one_tron_monitor(
                 chain.tron_monitor_balance(address),
                 chain.tron_monitor_transactions(address, monitored_assets, scan_from_ms),
             )
-            balances = {"usdt": result.usdt, "trx": result.trx}
             seen = set(previous_seen)
             matching = [
                 transaction for transaction in transaction_rows
@@ -3143,49 +3164,98 @@ async def poll_one_tron_monitor(
             ]
             low = Decimal(str(monitor["low_balance"])) if monitor["low_balance"] else None
             high = Decimal(str(monitor["high_balance"])) if monitor["high_balance"] else None
-            states = {
-                item: (
-                    "low" if low is not None and balances[item] < low else
-                    "high" if high is not None and balances[item] > high else
-                    "normal"
-                )
-                for item in monitored_assets
-            }
-            state = ",".join(f"{item}:{states[item]}" for item in monitored_assets)
             previous_state = str(monitor["alert_state"] or "")
-            notifications: list[tuple[list[str], TronTransaction | None]] = []
+
+            def evaluate(balance: TronBalance) -> tuple[dict, str, list[str]]:
+                values = {"usdt": balance.usdt, "trx": balance.trx}
+                item_states = {
+                    item: (
+                        "low" if low is not None and values[item] < low else
+                        "high" if high is not None and values[item] > high else
+                        "normal"
+                    )
+                    for item in monitored_assets
+                }
+                alerts = []
+                for item in monitored_assets:
+                    item_state = item_states[item]
+                    if (
+                        monitor_state == "live" and item_state != "normal"
+                        and f"{item}:{item_state}" not in previous_state
+                    ):
+                        relation = "低于" if item_state == "low" else "高于"
+                        threshold = low if item_state == "low" else high
+                        alerts.append(
+                            f"余额 {format_tron_amount(values[item])} {item.upper()}，"
+                            f"已{relation} {threshold}"
+                        )
+                return (
+                    values,
+                    ",".join(f"{item}:{item_states[item]}" for item in monitored_assets),
+                    alerts,
+                )
+
+            balances, state, threshold_alerts = evaluate(result)
             minimum_transfer = Decimal(str(monitor["min_transfer_amount"] or "0.1"))
+            transfer_items: list[TronTransaction] = []
             if monitor_state == "live" and fresh and bool(monitor["notify_transfers"]):
-                notifications.extend(
-                    ([
-                        f"检测到新的{transaction.asset}"
-                        f"{'支出' if transaction.direction == '转出' else '收入' if transaction.direction == '转入' else '交易'}"
-                    ], transaction)
+                transfer_items = [
+                    transaction
                     for transaction in sorted(fresh, key=lambda item: item.timestamp_ms)
                     if transaction.amount >= minimum_transfer
+                ]
+            # 播报前：补全区块号，并从权威节点重新核实“本监控地址”的实时余额。
+            # 绝不使用缓存或其他地址的余额；核实失败时显示「余额获取中/暂不可用」。
+            alert_balance: TronBalance | None = None
+            balance_verified = True
+            if transfer_items or threshold_alerts:
+                enriched: list[TronTransaction] = []
+                for transaction in transfer_items:
+                    try:
+                        transaction = await chain.transaction_with_block(transaction)
+                    except ChainQueryError:
+                        pass
+                    enriched.append(transaction)
+                transfer_items = enriched
+                min_block = max(
+                    (transaction.block_number for transaction in transfer_items), default=0
                 )
-            threshold_alerts = []
-            for item in monitored_assets:
-                item_state = states[item]
-                state_marker = f"{item}:{item_state}"
-                if (
-                    monitor_state == "live" and item_state != "normal"
-                    and state_marker not in previous_state
-                ):
-                    relation = "低于" if item_state == "low" else "高于"
-                    threshold = low if item_state == "low" else high
-                    threshold_alerts.append(
-                        f"余额 {balances[item]:,.6f} {item.upper()}，已{relation} {threshold}"
+                try:
+                    verified = await chain.tron_verified_balance(
+                        address, min_block=min_block
                     )
+                except ChainQueryError:
+                    verified = None
+                if verified is not None and verified.address != address:
+                    verified = None
+                if verified is None:
+                    balance_verified = False
+                    # 余额未核实：不发阈值提醒，保留旧状态，下一轮重新判断。
+                    threshold_alerts = []
+                    state = previous_state
+                else:
+                    alert_balance = verified
+                    result = verified
+                    balances, state, threshold_alerts = evaluate(verified)
+            notifications: list[tuple[list[str], TronTransaction | None]] = [
+                ([
+                    f"检测到新的{transaction.asset}"
+                    f"{'支出' if transaction.direction == '转出' else '收入' if transaction.direction == '转入' else '交易'}"
+                ], transaction)
+                for transaction in transfer_items
+            ]
             if threshold_alerts:
                 if notifications:
                     notifications[-1][0].extend(threshold_alerts)
                 else:
                     notifications.append((threshold_alerts, None))
-            last_balance = (
-                f"USDT={result.usdt};TRX={result.trx}"
-                if asset == "both" else str(balances[asset])
-            )
+            if balance_verified:
+                last_balance = (
+                    f"USDT={result.usdt};TRX={result.trx}"
+                    if asset == "both" else str(balances[asset])
+                )
+            else:
+                last_balance = str(monitor["last_balance"] or "")
             cursor_candidates = [
                 transaction for transaction in matching
                 if transaction.tx_id and (
@@ -3211,16 +3281,12 @@ async def poll_one_tron_monitor(
             send_error = ""
             sent_tx_ids: list[str] = []
             for notice_lines, transaction in notifications:
-                if transaction:
-                    try:
-                        transaction = await chain.transaction_with_block(transaction)
-                    except ChainQueryError:
-                        pass
                 notice = "\n".join(notice_lines)
                 alert_text, alert_keyboard = tron_monitor_alert_view(
-                    result, transaction, monitor_id, notice,
+                    alert_balance, transaction, monitor_id, notice,
                     context.application.bot_data.get("kkpay_emoji_ids"),
                     context.application.bot_data.get("tron_direction_emoji_ids"),
+                    address=address,
                 )
                 sent = None
                 with persistent_message():
@@ -3233,7 +3299,8 @@ async def poll_one_tron_monitor(
                             )
                         except TelegramError:
                             fallback_text, fallback_keyboard = tron_monitor_alert_view(
-                                result, transaction, monitor_id, notice,
+                                alert_balance, transaction, monitor_id, notice,
+                                address=address,
                             )
                             sent = await context.bot.send_message(
                                 int(monitor["owner_id"]), fallback_text,
