@@ -91,6 +91,7 @@ FLOWS = {
     "points_drawrate": ("积分抽奖中奖倍率", [number("中奖倍率", "0", "5")]),
     "points_diceodds": ("骰子赔率", [Question("赔率", "例如 2000 表示赔率 2.000。")]),
     "points_dicemin": ("骰子最低参与积分", [number("每次最低积分", "0.01", "1000000")]),
+    "points_dicemax": ("骰子单注上限", [number("单注最高积分", "0", "1000000", hint="发送数字；0 表示不限。")]),
     "points_diceschedule": ("骰子每日定时开关", [
         Question("定时功能", choices=("开启", "关闭")),
         Question("每日开放时间", "请填写24小时制时间，例如 09:00。", "time"),

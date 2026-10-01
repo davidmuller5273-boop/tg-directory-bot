@@ -22,6 +22,13 @@ if [[ "${SKIP_APT:-0}" != "1" ]]; then
   apt-get install -y python3 python3-venv python3-pip sqlite3 openssl
 fi
 
+# 可选：ffmpeg 用于生成视频贴纸预览图（没有也能用，会改用缩略图）
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1; then
+    echo "提示：未能自动安装 ffmpeg（可选）。如需视频贴纸更清晰的预览，可手动执行：sudo apt-get update && sudo apt-get install -y ffmpeg"
+  fi
+fi
+
 if ! id "$APP_USER" >/dev/null 2>&1; then
   useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
 fi

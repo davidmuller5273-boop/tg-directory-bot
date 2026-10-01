@@ -7,3 +7,4 @@ python-multipart==0.0.20
 itsdangerous==2.2.0
 httpx==0.28.1
 Telethon==1.44.0
+Pillow==11.3.0

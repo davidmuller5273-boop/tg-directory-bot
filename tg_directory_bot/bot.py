@@ -166,6 +166,7 @@ HELP_TEXT = """📖 使用帮助
 • z0 或 /rate：OKX 商户报价
 • /userinfo @用户名：查询账户资料
 • /jx：复制贴纸包并改标题
+• 主菜单“表情包复制更改标题”：固定模式保存标题和频道后，发链接即自动生成并发到频道
 
 🛡 权限
 • 超级管理员：管理本机器人、管理员，审核收录
@@ -317,6 +318,9 @@ def main_keyboard(
     ], [InlineKeyboardButton("👥 群组管理", callback_data="nav:group")]]
     if is_admin:
         rows[-1].append(InlineKeyboardButton("🛡 管理员", callback_data="nav:admin"))
+    rows.append([InlineKeyboardButton(
+        sticker_clone.MENU_BUTTON_TEXT, callback_data="stk:menu",
+    )])
     rows.append([
         InlineKeyboardButton("👤 联系开发者", url="https://t.me/xinyuan188"),
         InlineKeyboardButton("📖 帮助教程", callback_data="menu:help"),
@@ -951,6 +955,11 @@ def points_menu_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def dice_max_bet_label(config) -> str:
+    maximum = normalize_points(config["dice_max_bet"] or 0)
+    return f"{format_points(maximum)} 积分" if maximum > 0 else "不限"
+
+
 def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
     enabled = bool(config["dice_enabled"])
     scheduled = bool(config["dice_schedule_enabled"])
@@ -958,6 +967,7 @@ def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
         "🎲 骰子设置\n\n"
         f"游戏状态：{'开启' if enabled else '关闭'}\n"
         f"最低参与积分：{format_points(config['dice_min_bet'])}\n"
+        f"单注上限：{dice_max_bet_label(config)}\n"
         f"每日定时：{'开启' if scheduled else '关闭'}"
     )
     if scheduled:
@@ -971,7 +981,10 @@ def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("⚙️ 骰子赔率", callback_data="points:set:diceodds"),
             InlineKeyboardButton("最低参与积分", callback_data="points:set:dicemin"),
         ],
-        [InlineKeyboardButton("每日定时开关", callback_data="points:set:diceschedule")],
+        [
+            InlineKeyboardButton("单注上限", callback_data="points:set:dicemax"),
+            InlineKeyboardButton("每日定时开关", callback_data="points:set:diceschedule"),
+        ],
         [InlineKeyboardButton("⬅️ 返回积分功能", callback_data="group:points")],
     ])
     return text, keyboard
@@ -1014,6 +1027,7 @@ def points_status_text(
         f"骰子游戏：{dice}\n"
         f"骰子赔率：{odds / 1000:.3f}（{odds}）\n\n"
         f"骰子最低参与：{format_points(config['dice_min_bet'])} 积分\n"
+        f"骰子单注上限：{dice_max_bet_label(config)}\n"
         f"骰子定时：{dice_schedule}\n\n"
         f"积分抽奖：{draw}\n\n"
         "群员可发送：签到、积分、积分排行、积分礼品、兑换 礼品编号、游戏记录；\n也可发送 大3 / 小5 / 单10 / 双2 玩骰子。"
@@ -7137,6 +7151,13 @@ async def commit_group_menu_input(
                 minimum = parse_points_amount(text)
                 store.set_dice_min_bet(chat_id, minimum, user.id)
                 result = f"骰子每次最低参与积分已设为 {format_points(minimum)}。"
+            elif action == "dicemax":
+                maximum = parse_points_amount(text, allow_zero=True)
+                store.set_dice_max_bet(chat_id, maximum, user.id)
+                result = (
+                    f"骰子单注上限已设为 {format_points(maximum)} 积分。"
+                    if maximum > 0 else "骰子单注上限已取消（不限）。"
+                )
             elif action == "diceschedule":
                 if len(parts) != 3:
                     raise ValueError("请完成定时开关、开放时间和关闭时间设置")
@@ -7535,7 +7556,7 @@ def menu_mode_group_permission(mode: str) -> str:
     if mode.startswith("invite_"):
         return "invite"
     if mode.startswith("points_"):
-        if mode in {"points_diceodds", "points_dicemin", "points_diceschedule"}:
+        if mode in {"points_diceodds", "points_dicemin", "points_dicemax", "points_diceschedule"}:
             return "diceodds"
         return "points"
     if mode.startswith("group_join_"):
@@ -8214,6 +8235,10 @@ async def point_dice_bet_reply(
     minimum = normalize_points(config["dice_min_bet"])
     if stake < minimum:
         await message.reply_text(f"每次至少需要 {format_points(minimum)} 积分")
+        return
+    maximum = normalize_points(config["dice_max_bet"] or 0)
+    if maximum > 0 and stake > maximum:
+        await message.reply_text(f"单注最高 {format_points(maximum)} 积分")
         return
     if stake > balance:
         await message.reply_text(f"积分不足，当前积分：{format_points(balance)}")
@@ -10169,6 +10194,10 @@ async def commit_settings_draft(update, context, draft):
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if str(getattr(update.callback_query, "data", "") or "").startswith("stk:"):
+        if await guard(update, context):
+            await sticker_clone.handle_callback(update, context)
+        return
     if await settings_wizard.callback(update, context, commit_settings_draft):
         return
     query = update.callback_query
@@ -11589,7 +11618,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ):
             await query.answer("你没有积分抽奖设置权限。", show_alert=True)
             return
-        if action in {"diceodds", "dicemin", "diceschedule"} and not has_group_permission(
+        if action in {"diceodds", "dicemin", "dicemax", "diceschedule"} and not has_group_permission(
             context, target_group_id, user_id, "diceodds"
         ):
             await query.answer("你没有骰子设置权限。", show_alert=True)
@@ -11607,6 +11636,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "drawrate": "请发送中奖概率倍率，范围0-5。\n0表示不会中奖，1表示自动换算倍率。",
             "diceodds": "请发送骰子赔率（1.7-2.0，也可写 1700-2000；例如 1.95，押1000中奖反1950）",
             "dicemin": "请设置每次玩骰子的最低积分。",
+            "dicemax": "请设置骰子单注最高积分，0 表示不限。",
             "diceschedule": "请设置每日定时开关和开放时段。",
         }
         if action == "drawconfig":

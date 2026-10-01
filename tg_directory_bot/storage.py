@@ -936,6 +936,20 @@ class DirectoryStore:
                 "REAL NOT NULL DEFAULT 1",
             )
             self._ensure_column(
+                conn, "group_points_config", "dice_max_bet",
+                "REAL NOT NULL DEFAULT 0",
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS sticker_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    fixed_title TEXT NOT NULL DEFAULT '',
+                    channel_id INTEGER NOT NULL DEFAULT 0,
+                    channel_title TEXT NOT NULL DEFAULT '',
+                    channel_username TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            self._ensure_column(
                 conn, "group_points_config", "dice_schedule_enabled",
                 "INTEGER NOT NULL DEFAULT 0",
             )
@@ -2216,12 +2230,76 @@ class DirectoryStore:
         minimum = normalize_points(minimum)
         if minimum < Decimal("0.01") or minimum > Decimal("1000000"):
             raise ValueError("骰子最低积分范围为0.01-1000000")
-        self.points_config(chat_id)
+        current_max = normalize_points(self.points_config(chat_id)["dice_max_bet"] or 0)
+        if current_max > 0 and minimum > current_max:
+            raise ValueError(
+                f"最低参与积分不能高于单注上限 {format_points(current_max)}"
+            )
         with self.connect() as conn:
             conn.execute(
                 """UPDATE group_points_config SET dice_min_bet=?, updated_by=?,
                    updated_at=CURRENT_TIMESTAMP WHERE chat_id=?""",
                 (points_to_db(minimum), updated_by, chat_id),
+            )
+
+    # ---- 表情包复制：固定模式设置（每个用户一份） ------------------------
+
+    def sticker_profile(self, user_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM sticker_profiles WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+
+    def set_sticker_fixed_title(self, user_id: int, title: str) -> None:
+        title = " ".join(str(title or "").split())
+        if not title or len(title.encode("utf-16-le")) // 2 > 64:
+            raise ValueError("标题需要 1-64 个字符")
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO sticker_profiles (user_id, fixed_title) VALUES (?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET fixed_title=excluded.fixed_title,
+                   updated_at=CURRENT_TIMESTAMP""",
+                (int(user_id), title),
+            )
+
+    def set_sticker_channel(
+        self, user_id: int, channel_id: int, title: str = "", username: str = "",
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO sticker_profiles
+                   (user_id, channel_id, channel_title, channel_username)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET channel_id=excluded.channel_id,
+                   channel_title=excluded.channel_title,
+                   channel_username=excluded.channel_username,
+                   updated_at=CURRENT_TIMESTAMP""",
+                (int(user_id), int(channel_id or 0), str(title or "")[:128],
+                 str(username or "")[:64]),
+            )
+
+    def clear_sticker_channel(self, user_id: int) -> None:
+        self.set_sticker_channel(user_id, 0, "", "")
+
+    def clear_sticker_profile(self, user_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM sticker_profiles WHERE user_id=?", (int(user_id),))
+
+    def set_dice_max_bet(self, chat_id: int, maximum, updated_by: int) -> None:
+        """单注最高积分；0 表示不限。"""
+        maximum = normalize_points(maximum)
+        if maximum < 0 or maximum > Decimal("1000000"):
+            raise ValueError("单注上限范围为0-1000000（0 表示不限）")
+        current_min = normalize_points(self.points_config(chat_id)["dice_min_bet"] or 0)
+        if maximum > 0 and maximum < current_min:
+            raise ValueError(
+                f"单注上限不能低于最低参与积分 {format_points(current_min)}"
+            )
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE group_points_config SET dice_max_bet=?, updated_by=?,
+                   updated_at=CURRENT_TIMESTAMP WHERE chat_id=?""",
+                (points_to_db(maximum), updated_by, chat_id),
             )
 
     def set_dice_schedule(

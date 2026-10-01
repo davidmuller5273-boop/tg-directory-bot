@@ -19,9 +19,13 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Tele
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 from .auto_delete import persistent_message
+from .sticker_preview import build_sticker_preview
 
 STATE_KEY = "sticker_clone"
 PROMPT_TTL_SECONDS = 600
+FIXED_TTL_SECONDS = 24 * 3600      # 固定模式：一次进入后 24 小时内发链接即可
+MENU_BUTTON_TEXT = "表情包复制更改标题"
+ADD_BUTTON_TEXT = "✨ 免费添加贴纸 ✨"
 MAX_INITIAL_STICKERS = 50          # createNewStickerSet 一次最多 50 张
 SET_LIMITS = {"regular": 120, "mask": 120, "custom_emoji": 200}
 MAX_CONCURRENT_JOBS = 2            # 全局同时封装的任务数
@@ -166,6 +170,8 @@ class CloneResult:
     failed: int
     skipped_over_limit: int
     source_count: int
+    sticker_type: str = "regular"
+    animated: bool = False
 
 
 async def clone_sticker_set(
@@ -297,7 +303,9 @@ async def clone_sticker_set(
         await sleep(ADD_INTERVAL_SECONDS)
     return CloneResult(
         name, share_link(name, sticker_type), added, failed, over_limit,
-        len(all_stickers),
+        len(all_stickers), sticker_type,
+        any(getattr(s, "is_animated", False) or getattr(s, "is_video", False)
+            for s in stickers),
     )
 
 
@@ -314,6 +322,86 @@ def result_text(result: CloneResult) -> str:
     if notes:
         lines.extend(["", *notes])
     return "\n".join(lines)
+
+
+def is_sticker_link(text: str) -> bool:
+    """Full t.me/addstickers or addemoji link (bare names don't count)."""
+    raw = (text or "").strip().lower()
+    return bool(parse_sticker_set_name(text)) and ("addstickers" in raw or "addemoji" in raw)
+
+
+def post_caption(title: str, sticker_type: str = "regular", animated: bool = False) -> str:
+    motion = "#动态" if animated else "#静态"
+    kind = "#表情" if sticker_type == "custom_emoji" else "#贴纸"
+    return (
+        f"👉 {title} 👈\n\n"
+        f"{motion} {kind} #表情包 #斗图\n\n"
+        "⬇️点击下方按钮添加表情⬇️"
+    )
+
+
+def add_button_markup(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(ADD_BUTTON_TEXT, url=link)]])
+
+
+async def send_post(
+    bot: Any, chat_id: int, preview: bytes | None, caption: str,
+    markup: InlineKeyboardMarkup,
+) -> Any:
+    """Photo (grid preview) + caption + add button; text fallback without photo."""
+    with persistent_message():
+        if preview:
+            try:
+                return await call_with_retry(
+                    bot.send_photo, chat_id=chat_id, photo=preview, caption=caption,
+                    reply_markup=markup, attempts=3,
+                )
+            except BadRequest as exc:
+                if _is_user_unreachable(exc) or "rights" in _error_text(exc):
+                    raise
+                logging.info("Preview photo rejected, sending text: %s", exc)
+        return await call_with_retry(
+            bot.send_message, chat_id=chat_id, text=caption, reply_markup=markup,
+            attempts=3,
+        )
+
+
+async def publish_result(
+    bot: Any, user_id: int, result: CloneResult, title: str,
+    channel_id: int = 0, channel_label: str = "",
+) -> str:
+    """Send preview post to the user (and the fixed channel). Never raises."""
+    preview = None
+    try:
+        new_set = await call_with_retry(bot.get_sticker_set, result.name, attempts=3)
+        preview = await build_sticker_preview(bot, list(new_set.stickers or []))
+    except Exception as exc:  # noqa: BLE001 - 预览失败不影响结果
+        logging.info("Sticker preview unavailable for %s: %s", result.name, exc)
+    caption = post_caption(title, result.sticker_type, result.animated)
+    markup = add_button_markup(result.link)
+    try:
+        await send_post(bot, user_id, preview, caption, markup)
+    except Exception as exc:  # noqa: BLE001
+        logging.info("Could not send sticker post to user %s: %s", user_id, exc)
+    if not channel_id:
+        return ""
+    label = channel_label or str(channel_id)
+    try:
+        await send_post(bot, channel_id, preview, caption, markup)
+    except Exception as exc:  # noqa: BLE001 - 频道失败只提示用户
+        reason = str(getattr(exc, "message", "") or exc)
+        notice = (
+            f"⚠️ 发送到频道 {label} 失败：{reason}\n"
+            "请确认机器人仍是该频道管理员并有发布消息权限，可在固定模式设置中重新设置频道。"
+        )
+        try:
+            with persistent_message():
+                await bot.send_message(chat_id=user_id, text=notice)
+        except Exception:  # noqa: BLE001
+            pass
+        return notice
+    return f"已发送到频道 {label}"
+
 
 
 # ---- Telegram handlers --------------------------------------------------
@@ -404,39 +492,52 @@ async def _handle_link(update, context, state: dict, text: str) -> None:
 
 async def _handle_title(update, context, state: dict, text: str) -> None:
     message = update.effective_message
-    user = update.effective_user
     title = " ".join(text.split())
     if not 1 <= title_length(title) <= MAX_TITLE_LENGTH:
         await message.reply_text(
             f"标题需要 1-{MAX_TITLE_LENGTH} 个字符，请重新发送。\n\n发送 /cancel 取消"
         )
         return
+    if await _start_job(update, context, str(state["source"]), int(state.get("count") or 0), title):
+        context.user_data.pop(STATE_KEY, None)
+
+
+async def _start_job(
+    update, context, source: str, count: int, title: str, *,
+    channel_id: int = 0, channel_label: str = "", intro: str = "",
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
     active, semaphore = _jobs(context)
     if user.id in active:
         await message.reply_text("你有一个贴纸包正在封装中，请等待完成后再试。")
-        return
-    context.user_data.pop(STATE_KEY, None)
+        return False
     queued = semaphore.locked()
     with persistent_message():
         progress_message = await message.reply_text(
-            f"开始封装贴纸包（共 {state.get('count')} 张），请稍候…"
-            + ("\n当前排队中，前面的任务完成后自动开始。" if queued else "")
+            intro
+            + f"开始封装贴纸包（共 {count} 张），请稍候…"
+            + ("\n当前排队中，前面的任务完成后自动开始。" if queued else ""),
+            disable_web_page_preview=True,
         )
     active.add(user.id)
     job = run_job(
-        context.bot, context.application.bot_data, user.id, str(state["source"]),
+        context.bot, context.application.bot_data, user.id, source,
         title, _bot_username(context), progress_message,
+        channel_id=channel_id, channel_label=channel_label,
     )
     spawn = getattr(context.application, "create_task", None)
     if callable(spawn):
         spawn(job)
     else:
         asyncio.create_task(job)
+    return True
 
 
 async def run_job(
     bot: Any, bot_data: dict, user_id: int, source: str, title: str,
-    bot_username: str, progress_message: Any,
+    bot_username: str, progress_message: Any, *,
+    channel_id: int = 0, channel_label: str = "", publish: bool = True,
 ) -> CloneResult | None:
     active = bot_data.setdefault("sticker_clone_active", set())
     semaphore = bot_data.get("sticker_clone_semaphore") or asyncio.Semaphore(
@@ -465,6 +566,10 @@ async def run_job(
                 bot, user_id, source, title, bot_username, progress=progress,
             )
         await edit(result_text(result), force=True)
+        if publish:
+            await publish_result(
+                bot, user_id, result, title, channel_id, channel_label,
+            )
         return result
     except StickerCloneError as exc:
         await edit(f"贴纸包封装失败：{exc}", force=True)
@@ -479,8 +584,328 @@ async def run_job(
     return None
 
 
+# ---- 固定模式 -----------------------------------------------------------
+
+CHANNEL_PROMPT = (
+    "请设置固定发送频道：\n"
+    "• 从频道转发一条消息给我，或\n"
+    "• 发送 @频道用户名，或 -100 开头的频道ID\n\n"
+    "要求：你是该频道的管理员；机器人已加入频道并是管理员，且有“发布消息”权限。\n"
+    "不需要频道可点“跳过”。发送 /cancel 取消"
+)
+
+
+def _store(context):
+    return context.application.bot_data.get("store")
+
+
+def channel_label(profile) -> str:
+    if not profile or not int(profile["channel_id"] or 0):
+        return ""
+    title = str(profile["channel_title"] or "")
+    username = str(profile["channel_username"] or "")
+    if title and username:
+        return f"{title}（@{username}）"
+    return title or (f"@{username}" if username else str(profile["channel_id"]))
+
+
+def menu_view() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"🎨 {MENU_BUTTON_TEXT}\n\n"
+        "• 默认模式：发送贴纸包链接后，再发送新标题（联系方式）。\n"
+        "• 固定模式：保存固定标题（和发送频道）后，只需发送链接即可自动生成，"
+        "设置了频道会自动发到频道。"
+    )
+    return text, InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("默认模式", callback_data="stk:default"),
+            InlineKeyboardButton("固定模式", callback_data="stk:fixed"),
+        ],
+        [InlineKeyboardButton("⚙️ 固定模式设置", callback_data="stk:settings")],
+        [InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")],
+    ])
+
+
+def settings_view(profile) -> tuple[str, InlineKeyboardMarkup]:
+    title = str(profile["fixed_title"] or "") if profile else ""
+    channel = channel_label(profile)
+    text = (
+        "⚙️ 固定模式设置\n\n"
+        f"固定更改标题：{title or '未设置'}\n"
+        f"固定发送频道：{channel or '未设置'}"
+    )
+    rows = [[
+        InlineKeyboardButton("✏️ 修改固定标题", callback_data="stk:set:title"),
+        InlineKeyboardButton("📢 设置发送频道", callback_data="stk:set:channel"),
+    ]]
+    extra = []
+    if channel:
+        extra.append(InlineKeyboardButton("🚫 清除频道", callback_data="stk:clear:channel"))
+    if profile:
+        extra.append(InlineKeyboardButton("🗑 清除全部设置", callback_data="stk:clear:all"))
+    if extra:
+        rows.append(extra)
+    rows.append([InlineKeyboardButton("▶️ 使用固定模式", callback_data="stk:fixed")])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="stk:menu")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def fixed_ready_view(profile) -> tuple[str, InlineKeyboardMarkup]:
+    channel = channel_label(profile)
+    text = (
+        "✅ 已进入固定模式\n\n"
+        f"固定更改标题：{profile['fixed_title']}\n"
+        f"固定发送频道：{channel or '未设置（只发给你）'}\n\n"
+        "现在直接发送贴纸包链接即可自动生成，可以连续发送。\n"
+        "例如：https://t.me/addstickers/贴纸地址\n\n"
+        "发送 /cancel 退出固定模式"
+    )
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚙️ 修改设置", callback_data="stk:settings")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data="stk:menu")],
+    ])
+
+
+def _skip_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("跳过", callback_data="stk:skip")]])
+
+
+def _set_state(context, chat_id: int, step: str, ttl: int = PROMPT_TTL_SECONDS, **extra) -> dict:
+    state = {"step": step, "chat_id": chat_id, "expires": time.time() + ttl, **extra}
+    context.user_data[STATE_KEY] = state
+    return state
+
+
+_CHANNEL_USERNAME = re.compile(
+    r"^(?:(?:https?://)?(?:www\.)?(?:t|telegram)\.me/|@)?([A-Za-z][A-Za-z0-9_]{3,31})/?$"
+)
+
+
+def channel_reference(message: Any) -> int | str | None:
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None and str(getattr(origin, "type", "")) == "channel":
+        chat = getattr(origin, "chat", None)
+        if chat is not None:
+            return int(chat.id)
+    text = (getattr(message, "text", None) or "").strip()
+    if re.fullmatch(r"-100\d{5,}", text):
+        return int(text)
+    match = _CHANNEL_USERNAME.match(text)
+    if match:
+        return "@" + match.group(1)
+    return None
+
+
+async def resolve_channel(bot: Any, user_id: int, message: Any) -> Any:
+    """Validate the channel: user is admin/creator, bot is admin with post rights."""
+    reference = channel_reference(message)
+    if reference is None:
+        raise StickerCloneError(
+            "格式不正确：请转发一条频道消息，或发送 @频道用户名 / -100 开头的频道ID。"
+        )
+    try:
+        chat = await bot.get_chat(reference)
+    except TelegramError as exc:
+        raise StickerCloneError(
+            "找不到该频道：请先把机器人加入频道并设为管理员，再重新设置。"
+        ) from exc
+    if str(getattr(chat, "type", "")) != "channel":
+        raise StickerCloneError("这不是频道，只能设置频道（Channel）。")
+    try:
+        member = await bot.get_chat_member(chat.id, user_id)
+    except TelegramError as exc:
+        raise StickerCloneError(
+            "无法确认你在该频道的身份：请确认机器人已是该频道管理员。"
+        ) from exc
+    if str(getattr(member, "status", "")) not in {"creator", "administrator"}:
+        raise StickerCloneError("你不是该频道的管理员，不能设置为发送频道。")
+    try:
+        me = await bot.get_chat_member(chat.id, bot.id)
+    except TelegramError as exc:
+        raise StickerCloneError("机器人不是该频道的管理员，请先把机器人设为频道管理员。") from exc
+    if str(getattr(me, "status", "")) != "administrator":
+        raise StickerCloneError("机器人不是该频道的管理员，请先把机器人设为频道管理员。")
+    if not getattr(me, "can_post_messages", False):
+        raise StickerCloneError("机器人在该频道没有“发布消息”权限，请在频道管理员设置中开启。")
+    return chat
+
+
+async def _send_or_edit(update, text: str, markup=None) -> None:
+    query = getattr(update, "callback_query", None)
+    if query is not None and getattr(query, "message", None) is not None:
+        try:
+            await query.edit_message_text(text, reply_markup=markup, disable_web_page_preview=True)
+            return
+        except TelegramError:
+            pass
+    await update.effective_message.reply_text(
+        text, reply_markup=markup, disable_web_page_preview=True,
+    )
+
+
+async def _enter_fixed(update, context) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    store = _store(context)
+    profile = store.sticker_profile(user.id) if store else None
+    if not profile or not str(profile["fixed_title"] or ""):
+        _set_state(context, chat.id, "fixed_title", setup=True)
+        await _send_or_edit(
+            update,
+            "首次使用固定模式，请先发送固定更改标题（1-64 个字符，例如你的联系方式）：\n\n"
+            "发送 /cancel 取消",
+        )
+        return
+    _set_state(context, chat.id, "fixed_link", FIXED_TTL_SECONDS)
+    text, markup = fixed_ready_view(profile)
+    await _send_or_edit(update, text, markup)
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    data = str(query.data or "")
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return
+    if chat.type != ChatType.PRIVATE:
+        await query.answer("请私聊机器人使用表情包功能。", show_alert=True)
+        return
+    store = _store(context)
+    await query.answer()
+    if data == "stk:menu":
+        if (context.user_data.get(STATE_KEY) or {}).get("step") != "fixed_link":
+            context.user_data.pop(STATE_KEY, None)
+        text, markup = menu_view()
+        await _send_or_edit(update, text, markup)
+    elif data == "stk:default":
+        active, _ = _jobs(context)
+        if user.id in active:
+            await _send_or_edit(update, "你有一个贴纸包正在封装中，请等待完成后再试。")
+            return
+        _set_state(context, chat.id, "link")
+        await _send_or_edit(update, LINK_PROMPT)
+    elif data == "stk:fixed":
+        await _enter_fixed(update, context)
+    elif data == "stk:settings":
+        context.user_data.pop(STATE_KEY, None)
+        text, markup = settings_view(store.sticker_profile(user.id) if store else None)
+        await _send_or_edit(update, text, markup)
+    elif data == "stk:set:title":
+        _set_state(context, chat.id, "fixed_title", setup=False)
+        await _send_or_edit(
+            update, "请发送新的固定更改标题（1-64 个字符）：\n\n发送 /cancel 取消",
+        )
+    elif data == "stk:set:channel":
+        _set_state(context, chat.id, "fixed_channel", setup=False)
+        await _send_or_edit(update, CHANNEL_PROMPT, _skip_markup())
+    elif data == "stk:skip":
+        state = context.user_data.get(STATE_KEY) or {}
+        if state.get("setup"):
+            await _enter_fixed(update, context)
+        else:
+            context.user_data.pop(STATE_KEY, None)
+            text, markup = settings_view(store.sticker_profile(user.id) if store else None)
+            await _send_or_edit(update, text, markup)
+    elif data in {"stk:clear:channel", "stk:clear:all"} and store:
+        if data == "stk:clear:all":
+            store.clear_sticker_profile(user.id)
+            context.user_data.pop(STATE_KEY, None)
+        else:
+            store.clear_sticker_channel(user.id)
+        text, markup = settings_view(store.sticker_profile(user.id))
+        await _send_or_edit(update, ("已清除。\n\n" + text), markup)
+
+
+async def _handle_fixed_title(update, context, state: dict, text: str) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    store = _store(context)
+    title = " ".join(text.split())
+    if not 1 <= title_length(title) <= MAX_TITLE_LENGTH:
+        await message.reply_text(
+            f"标题需要 1-{MAX_TITLE_LENGTH} 个字符，请重新发送。\n\n发送 /cancel 取消"
+        )
+        return
+    store.set_sticker_fixed_title(user.id, title)
+    if state.get("setup"):
+        _set_state(context, update.effective_chat.id, "fixed_channel", setup=True)
+        await message.reply_text(
+            f"已保存固定更改标题：{title}\n\n" + CHANNEL_PROMPT, reply_markup=_skip_markup(),
+        )
+        return
+    context.user_data.pop(STATE_KEY, None)
+    text, markup = settings_view(store.sticker_profile(user.id))
+    await message.reply_text(f"已保存固定更改标题：{title}\n\n" + text, reply_markup=markup)
+
+
+async def _handle_fixed_channel(update, context, state: dict) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    store = _store(context)
+    try:
+        chat = await resolve_channel(context.bot, user.id, message)
+    except StickerCloneError as exc:
+        await message.reply_text(f"{exc}\n\n可重新发送，或点“跳过”。", reply_markup=_skip_markup())
+        return
+    store.set_sticker_channel(
+        user.id, int(chat.id), str(getattr(chat, "title", "") or ""),
+        str(getattr(chat, "username", "") or ""),
+    )
+    profile = store.sticker_profile(user.id)
+    saved = f"已设置固定发送频道：{channel_label(profile)}\n\n"
+    if state.get("setup"):
+        _set_state(context, update.effective_chat.id, "fixed_link", FIXED_TTL_SECONDS)
+        text, markup = fixed_ready_view(profile)
+    else:
+        context.user_data.pop(STATE_KEY, None)
+        text, markup = settings_view(profile)
+    await message.reply_text(saved + text, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def _handle_fixed_link(update, context, state: dict, text: str) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    store = _store(context)
+    profile = store.sticker_profile(user.id) if store else None
+    title = str(profile["fixed_title"] or "") if profile else ""
+    if not title:
+        context.user_data.pop(STATE_KEY, None)
+        await message.reply_text("固定标题未设置，请先在“表情包复制更改标题 → 固定模式”中设置。")
+        return
+    state["expires"] = time.time() + FIXED_TTL_SECONDS
+    name = parse_sticker_set_name(text)
+    try:
+        sticker_set = await call_with_retry(context.bot.get_sticker_set, name, attempts=3)
+    except BadRequest:
+        await message.reply_text("未找到该贴纸包，请检查链接后重新发送。")
+        return
+    except TelegramError:
+        await message.reply_text("贴纸包读取失败，请稍后重新发送链接。")
+        return
+    stickers = list(sticker_set.stickers or [])
+    if not stickers:
+        await message.reply_text("该贴纸包里没有贴图，请换一个链接。")
+        return
+    sticker_type = str(getattr(sticker_set, "sticker_type", "regular") or "regular")
+    limit = SET_LIMITS.get(sticker_type, 120)
+    kind = "表情" if sticker_type == "custom_emoji" else "贴图"
+    channel_id = int(profile["channel_id"] or 0)
+    intro = (
+        f"已解析贴纸包：{sticker_set.title}\n共 {len(stickers)} 张{kind}\n"
+        + (f"（单个贴纸包最多 {limit} 张，将只复制前 {limit} 张）\n" if len(stickers) > limit else "")
+        + f"固定标题：{title}\n"
+        + (f"完成后发送到频道：{channel_label(profile)}\n" if channel_id else "")
+        + "\n"
+    )
+    await _start_job(
+        update, context, sticker_set.name, min(len(stickers), limit), title,
+        channel_id=channel_id, channel_label=channel_label(profile), intro=intro,
+    )
+
+
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """High-priority text handler for the /jx prompts (stops other handlers)."""
+    """High-priority handler for the sticker prompts (stops other handlers)."""
     state = context.user_data.get(STATE_KEY) if context.user_data is not None else None
     message = update.effective_message
     chat = update.effective_chat
@@ -494,11 +919,20 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (message.text or "").strip()
     if text.startswith("/"):
         return  # /cancel 等命令交给命令处理器
+    step = state.get("step")
+    if step == "fixed_link" and not is_sticker_link(text):
+        return  # 固定模式只拦截贴纸包链接，其它消息照常处理
     context.user_data["consumed_private_message"] = message.message_id
-    if not text:
+    if step == "fixed_channel":
+        await _handle_fixed_channel(update, context, state)
+    elif not text:
         await message.reply_text("请发送文字。\n\n发送 /cancel 取消")
-    elif state.get("step") == "link":
+    elif step == "link":
         await _handle_link(update, context, state, text)
-    elif state.get("step") == "title":
+    elif step == "title":
         await _handle_title(update, context, state, text)
+    elif step == "fixed_title":
+        await _handle_fixed_title(update, context, state, text)
+    elif step == "fixed_link":
+        await _handle_fixed_link(update, context, state, text)
     raise ApplicationHandlerStop
