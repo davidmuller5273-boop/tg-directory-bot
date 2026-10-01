@@ -60,7 +60,7 @@ from .lottery import (
 )
 from .storage import DirectoryStore, Entry, format_points, normalize_points
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
-from . import settings_wizard
+from . import settings_wizard, sticker_clone
 from .time_utils import (
     beijing_now, beijing_now_text,
     format_beijing_time,
@@ -165,6 +165,7 @@ HELP_TEXT = """📖 使用帮助
 🧰 其他
 • z0 或 /rate：OKX 商户报价
 • /userinfo @用户名：查询账户资料
+• /jx：复制贴纸包并改标题
 
 🛡 权限
 • 超级管理员：管理本机器人、管理员，审核收录
@@ -1676,6 +1677,13 @@ def register_user(update: Update, store: DirectoryStore) -> bool:
     return not store.is_user_blocked(user.id)
 
 
+async def jx_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/jx：复制贴纸包并改标题（所有用户可用，母/子机器人通用）。"""
+    if not await guard(update, context):
+        return
+    await sticker_clone.begin(update, context)
+
+
 async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     store: DirectoryStore = context.application.bot_data["store"]
     allowed = register_user(update, store)
@@ -1701,6 +1709,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         and context.args
     ):
         payload = context.args[0]
+        if payload == "jx":
+            context.args = []
+            await sticker_clone.begin(update, context)
+            return
         action, separator, raw_address = payload.partition("_")
         if separator and action in {"tr10", "trmon"}:
             try:
@@ -1910,6 +1922,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("menu_mode", None)
     context.user_data.pop("group_poll_question", None)
     context.user_data.pop("pending_private_note", None)
+    context.user_data.pop(sticker_clone.STATE_KEY, None)
     await update.effective_message.reply_text(
         "已取消。",
         reply_markup=main_keyboard_for(
@@ -12459,6 +12472,7 @@ async def post_init(application: Application) -> None:
         BotCommand("link", "生成个人邀请链接"),
         BotCommand("raffle", "群管理员发起抽奖"),
         BotCommand("raffleat", "按时间定时抽奖"),
+        BotCommand("jx", "复制贴纸包并改标题"),
     ]
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username or ""
@@ -12582,6 +12596,11 @@ def build_application(config: Config) -> Application:
     application.add_handler(
         CallbackQueryHandler(refresh_callback_cleanup), group=-2
     )
+    # /jx 贴纸包复制的输入步骤优先处理，避免被当作关键词搜索
+    application.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, sticker_clone.handle_input),
+        group=-3,
+    )
 
     submission = ConversationHandler(
         entry_points=[
@@ -12642,6 +12661,7 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("resetperm", reset_permissions_command))
     application.add_handler(CommandHandler("noteadd", note_add_command))
     application.add_handler(CommandHandler("notes", notes_command))
+    application.add_handler(CommandHandler("jx", jx_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(InlineQueryHandler(quick_post_inline))
     application.add_handler(ChatMemberHandler(track_personal_invite, ChatMemberHandler.CHAT_MEMBER))
