@@ -939,6 +939,14 @@ class DirectoryStore:
                 conn, "group_points_config", "dice_max_bet",
                 "REAL NOT NULL DEFAULT 0",
             )
+            self._ensure_column(
+                conn, "group_points_config", "dice_min_activity",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                conn, "group_points_config", "dice_free_activity",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS sticker_profiles (
                     user_id INTEGER PRIMARY KEY,
@@ -2284,6 +2292,40 @@ class DirectoryStore:
     def clear_sticker_profile(self, user_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM sticker_profiles WHERE user_id=?", (int(user_id),))
+
+    def user_today_messages(self, chat_id: int, user_id: int) -> int:
+        """该成员在本群今日（北京时间）的发言条数，与群统计/活跃奖励同一来源。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT messages FROM group_activity_users
+                   WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row["messages"]) if row else 0
+
+    def set_dice_activity_rule(
+        self, chat_id: int, kind: str, value: int, updated_by: int,
+    ) -> None:
+        """kind: 'min' = 最低当日活跃条数；'free' = 免定时活跃条数。0 表示关闭。"""
+        if kind not in {"min", "free"}:
+            raise ValueError("未知的活跃条件")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000:
+            raise ValueError("条数范围为0-100000（0 表示关闭）")
+        config = self.points_config(chat_id)
+        minimum = value if kind == "min" else int(config["dice_min_activity"] or 0)
+        free = value if kind == "free" else int(config["dice_free_activity"] or 0)
+        if minimum > 0 and free > 0 and free < minimum:
+            raise ValueError(
+                f"免定时活跃条数（{free}）不能低于最低当日活跃条数（{minimum}）："
+                "发言不足最低条数的成员本来就不能玩骰子。"
+            )
+        column = "dice_min_activity" if kind == "min" else "dice_free_activity"
+        with self.connect() as conn:
+            conn.execute(
+                f"""UPDATE group_points_config SET {column}=?, updated_by=?,
+                   updated_at=CURRENT_TIMESTAMP WHERE chat_id=?""",
+                (value, updated_by, chat_id),
+            )
 
     def set_dice_max_bet(self, chat_id: int, maximum, updated_by: int) -> None:
         """单注最高积分；0 表示不限。"""
