@@ -2865,6 +2865,15 @@ DICE_BET_SIDES = ("大", "小", "单", "双")
 DICE_BET_MAX_AMOUNT = 100000
 
 
+def is_dice_command(points_config, message) -> bool:
+    """本群骰子可用（积分+骰子都开启）且消息是骰子口令。"""
+    return bool(
+        points_config is not None
+        and points_config["is_enabled"] and points_config["dice_enabled"]
+        and parse_dice_bet(getattr(message, "text", None) or "")
+    )
+
+
 def parse_dice_bet(text: str) -> tuple[str, Decimal] | None:
     """Parse pure group dice bets like 大3 / 小 5 / 单：10 / 双-2 / 大1.5."""
     raw = (text or "").strip()
@@ -8454,6 +8463,9 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
     leaves = int(message.left_chat_member is not None)
     points_config = store.points_config(chat.id)
     points_tracking = bool(points_config["is_enabled"] and points_config["activity_enabled"])
+    # 骰子口令（大3/小5/单10/双2，含被拒绝的下注）不算发言条数：
+    # 不计入群统计、活跃奖励、骰子活跃门槛和抽奖发言条件。
+    counted_message = 0 if (normal_message and is_dice_command(points_config, message)) else normal_message
     if normal_message or joins or leaves or settings.get("group_monitoring_enabled") == "1" or points_tracking:
         store.record_group_activity(
             chat.id,
@@ -8463,7 +8475,7 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
             user.id if user else 0,
             (user.username or "") if user else "",
             (user.full_name or user.username or "群成员") if user else "",
-            messages=normal_message,
+            messages=counted_message,
             joins=joins,
             leaves=leaves,
         )
@@ -8512,10 +8524,10 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
                         f"🏆 中奖名额：{raffle['winner_count']} 人{count_line}",
                         parse_mode=ParseMode.HTML,
                     )
-        for raffle in store.qualify_activity_raffles(
+        for raffle in (store.qualify_activity_raffles(
             chat.id, user.id, user.username or "",
             user.full_name or user.username or "群成员",
-        ):
+        ) if counted_message else ()):
             mention = telegram_user_link(
                 user.id, user.full_name or user.username or str(user.id)
             )
@@ -8540,7 +8552,7 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
                 + f"🏆 中奖名额：{raffle['winner_count']} 人{count_line}",
                 parse_mode=ParseMode.HTML,
             )
-    if normal_message and points_tracking and user:
+    if counted_message and points_tracking and user:
         reward = store.award_activity_points(
             chat.id, user.id, user.username or "", user.full_name or "群成员"
         )
