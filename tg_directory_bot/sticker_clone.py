@@ -24,7 +24,7 @@ from .sticker_preview import build_sticker_preview
 STATE_KEY = "sticker_clone"
 PROMPT_TTL_SECONDS = 600
 FIXED_TTL_SECONDS = 24 * 3600      # 固定模式：一次进入后 24 小时内发链接即可
-MENU_BUTTON_TEXT = "表情包复制更改标题"
+MENU_BUTTON_TEXT = "😊 表情包复制更改标题"
 ADD_BUTTON_TEXT = "✨ 免费添加贴纸 ✨"
 MAX_INITIAL_STICKERS = 50          # createNewStickerSet 一次最多 50 张
 SET_LIMITS = {"regular": 120, "mask": 120, "custom_emoji": 200}
@@ -611,7 +611,7 @@ def channel_label(profile) -> str:
 
 def menu_view() -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        f"🎨 {MENU_BUTTON_TEXT}\n\n"
+        f"{MENU_BUTTON_TEXT}\n\n"
         "• 默认模式：发送贴纸包链接后，再发送新标题（联系方式）。\n"
         "• 固定模式：保存固定标题（和发送频道）后，只需发送链接即可自动生成，"
         "设置了频道会自动发到频道。"
@@ -871,7 +871,7 @@ async def _handle_fixed_link(update, context, state: dict, text: str) -> None:
     title = str(profile["fixed_title"] or "") if profile else ""
     if not title:
         context.user_data.pop(STATE_KEY, None)
-        await message.reply_text("固定标题未设置，请先在“表情包复制更改标题 → 固定模式”中设置。")
+        await message.reply_text("固定标题未设置，请先在主菜单“😊 表情包复制更改标题 → 固定模式”中设置。")
         return
     state["expires"] = time.time() + FIXED_TTL_SECONDS
     name = parse_sticker_set_name(text)

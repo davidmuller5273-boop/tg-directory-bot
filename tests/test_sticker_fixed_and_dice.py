@@ -277,13 +277,13 @@ class PreviewTest(unittest.TestCase):
 class MenuTest(unittest.TestCase):
     def test_main_menu_button_for_everyone(self):
         for markup in (main_keyboard(False, False), main_keyboard(True, True, False)):
-            match = [b for b in buttons(markup) if b.text == "表情包复制更改标题"]
+            match = [b for b in buttons(markup) if b.text == "😊 表情包复制更改标题"]
             self.assertEqual(len(match), 1)
             self.assertEqual(match[0].callback_data, "stk:menu")
 
     def test_help_mentions_feature(self):
         self.assertIn("• /jx：复制贴纸包并改标题", HELP_TEXT)
-        self.assertIn("表情包复制更改标题", HELP_TEXT)
+        self.assertIn("主菜单“😊 表情包复制更改标题”", HELP_TEXT)
         doc = Path(__file__).resolve().parent.parent / "使用帮助.md"
         self.assertIn(HELP_TEXT, doc.read_text(encoding="utf-8"))
 
@@ -296,7 +296,7 @@ class MenuTest(unittest.TestCase):
             with patch("tg_directory_bot.bot.guard", AsyncMock(return_value=True)):
                 asyncio.run(handle_callback(update, context))
             text, markup = query.edited[-1]
-            self.assertIn("表情包复制更改标题", text)
+            self.assertTrue(text.startswith("😊 表情包复制更改标题\n"))
             labels = [b.text for b in buttons(markup)]
             self.assertIn("默认模式", labels)
             self.assertIn("固定模式", labels)
