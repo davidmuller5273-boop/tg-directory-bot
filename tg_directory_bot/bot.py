@@ -967,17 +967,17 @@ def dice_max_bet_label(config) -> str:
 
 def dice_min_activity_label(config) -> str:
     value = int(config["dice_min_activity"] or 0)
-    return f"今日发言满 {value} 条才能玩" if value > 0 else "不限"
+    return f"今日有效发言满 {value} 条才能玩" if value > 0 else "不限"
 
 
 def redeem_min_activity_label(config) -> str:
     value = int(config["redeem_min_activity"] or 0)
-    return f"今日发言满 {value} 条才能兑换" if value > 0 else "不限"
+    return f"今日有效发言满 {value} 条才能兑换" if value > 0 else "不限"
 
 
 def dice_free_activity_label(config) -> str:
     value = int(config["dice_free_activity"] or 0)
-    return f"今日发言满 {value} 条不受定时限制" if value > 0 else "关闭"
+    return f"今日有效发言满 {value} 条不受定时限制" if value > 0 else "关闭"
 
 
 def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
@@ -990,6 +990,7 @@ def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
         f"单注上限：{dice_max_bet_label(config)}\n"
         f"最低当日活跃：{dice_min_activity_label(config)}\n"
         f"免定时活跃：{dice_free_activity_label(config)}\n"
+        "（有效发言：1 分钟内多条只算 1 条）\n"
         f"每日定时：{'开启' if scheduled else '关闭'}"
     )
     if scheduled:
@@ -1039,7 +1040,7 @@ def points_status_text(
     if config["draw_enabled"]:
         draw = f"开启，每次 {format_points(config['draw_cost'])} 积分"
         if int(config["draw_min_activity"] or 0) > 0:
-            draw += f"，今日发言满 {int(config['draw_min_activity'])} 条可参与"
+            draw += f"，今日有效发言满 {int(config['draw_min_activity'])} 条可参与"
     dice = "开启" if config["dice_enabled"] else "关闭"
     odds = int(config["dice_odds"] or 2000)
     odds = min(2000, max(1700, odds))
@@ -1060,7 +1061,8 @@ def points_status_text(
         f"骰子最低当日活跃：{dice_min_activity_label(config)}\n"
         f"骰子免定时活跃：{dice_free_activity_label(config)}\n\n"
         f"积分抽奖：{draw}\n"
-        f"积分兑换最低当日活跃：{redeem_min_activity_label(config)}\n\n"
+        f"积分兑换最低当日活跃：{redeem_min_activity_label(config)}\n"
+        "（当日活跃按有效发言计：1 分钟内多条只算 1 条）\n\n"
         "群员可发送：签到、积分、积分排行、积分礼品、兑换 礼品编号、游戏记录；\n也可发送 大3 / 小5 / 单10 / 双2 玩骰子。"
     )
 
@@ -7487,7 +7489,7 @@ async def commit_group_menu_input(
                     raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
                 store.set_point_draw_min_activity(chat_id, count, user.id)
                 result = (
-                    f"积分抽奖最低当日活跃已设为 {count} 条。"
+                    f"积分抽奖最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
                     if count else "积分抽奖最低当日活跃已关闭（不限）。"
                 )
             elif action == "redeemmsgmin":
@@ -7497,7 +7499,7 @@ async def commit_group_menu_input(
                     raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
                 store.set_point_redeem_min_activity(chat_id, count, user.id)
                 result = (
-                    f"积分兑换最低当日活跃已设为 {count} 条。"
+                    f"积分兑换最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
                     if count else "积分兑换最低当日活跃已关闭（不限）。"
                 )
             elif action in {"dicemsgmin", "dicemsgfree"}:
@@ -7510,12 +7512,12 @@ async def commit_group_menu_input(
                 )
                 if action == "dicemsgmin":
                     result = (
-                        f"骰子最低当日活跃已设为 {count} 条。"
+                        f"骰子最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
                         if count else "骰子最低当日活跃已关闭（不限）。"
                     )
                 else:
                     result = (
-                        f"今日发言满 {count} 条的成员将不受骰子定时限制。"
+                        f"今日有效发言满 {count} 条的成员将不受骰子定时限制（1 分钟内多条只算 1 条）。"
                         if count else "骰子免定时活跃已关闭。"
                     )
             elif action == "dicemax":
@@ -8415,7 +8417,7 @@ def point_gifts_text(store: DirectoryStore, chat_id: int) -> str:
         lines.append(f"#{row['id']} · {row['name']} · {format_points(row['points_cost'])} 积分 · {stock}")
     min_activity = int(store.points_config(chat_id)["redeem_min_activity"] or 0)
     if min_activity > 0:
-        lines.extend(["", f"兑换条件：今日发言满 {min_activity} 条"])
+        lines.extend(["", f"兑换条件：今日有效发言满 {min_activity} 条（1 分钟内多条只算 1 条）"])
     lines.extend(["", "发送：兑换 礼品编号"])
     return "\n".join(lines)
 
@@ -8440,7 +8442,10 @@ def point_draw_view(
             f"（最低 {format_points(minimum_cost)}）"
         )
         if int(config["draw_min_activity"] or 0) > 0:
-            lines.append(f"参与条件：今日发言满 {int(config['draw_min_activity'])} 条")
+            lines.append(
+                f"参与条件：今日有效发言满 {int(config['draw_min_activity'])} 条"
+                "（1 分钟内多条只算 1 条）"
+            )
         lines.append("")
         for row in rows:
             stock = "不限量" if int(row["stock"]) < 0 else f"剩余{row['stock']}"
@@ -8463,7 +8468,7 @@ def point_draw_view(
 
 def draw_min_activity_label(config) -> str:
     value = int(config["draw_min_activity"] or 0)
-    return f"今日发言满 {value} 条才能参与" if value > 0 else "不限"
+    return f"今日有效发言满 {value} 条才能参与" if value > 0 else "不限"
 
 
 def point_draw_settings_view(
@@ -8477,7 +8482,8 @@ def point_draw_settings_view(
         f"状态：{'✅ 开启' if enabled else '❌ 关闭'}\n"
         f"每次最低消耗：{format_points(config['draw_cost'])} 积分\n"
         f"中奖概率倍率：{multiplier:g}（范围 0-5）\n"
-        f"最低当日活跃：{draw_min_activity_label(config)}\n\n"
+        f"最低当日活跃：{draw_min_activity_label(config)}\n"
+        "（有效发言：1 分钟内多条只算 1 条）\n\n"
         "中奖率按本次消耗积分、礼品所需积分和倍率自动计算；"
         "群员抽奖页面不显示倍率。"
     )
@@ -8607,7 +8613,7 @@ async def point_dice_bet_reply(
     min_activity = int(config["dice_min_activity"] or 0)
     free_activity = int(config["dice_free_activity"] or 0)
     today_messages = (
-        store.user_today_messages(chat_id, user.id)
+        store.user_today_active_messages(chat_id, user.id)
         if min_activity > 0 or free_activity > 0 else 0
     )
     if config["dice_schedule_enabled"]:
@@ -8618,14 +8624,15 @@ async def point_dice_bet_reply(
             notice = f"骰子当前未开放，每日开放时间：{opens}-{closes}"
             if free_activity > 0:
                 notice += (
-                    f"\n今日发言满 {free_activity} 条可不受时间限制"
-                    f"（当前 {today_messages} 条）"
+                    f"\n今日有效发言满 {free_activity} 条可不受时间限制"
+                    f"（1 分钟内多条只算 1 条，当前 {today_messages} 条）"
                 )
             await message.reply_text(notice)
             return
     if min_activity > 0 and today_messages < min_activity:
         await message.reply_text(
-            f"今日发言满 {min_activity} 条才能玩骰子（当前 {today_messages} 条）"
+            f"今日活跃不足：需要当日有效发言 {min_activity} 条才能玩骰子"
+            f"（1 分钟内多条只算 1 条），你今天已有效发言 {today_messages} 条"
         )
         return
     account = store.point_account(chat_id, user.id)
@@ -12016,19 +12023,19 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8",
             "giftadd": "请发送：所需积分 | 礼品名称 | 库存\n库存填 -1 表示不限量，例如：100 | 会员奖励 | 10",
             "giftdel": "请发送要删除的礼品编号，例如：#1。",
-            "redeemmsgmin": "请设置当日发言满多少条才能兑换积分礼品，0 表示不限。",
+            "redeemmsgmin": "请设置当日有效发言满多少条才能兑换积分礼品，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
             "adjust": "请发送：@用户名或数字ID | 增减数量 | 原因\n例如：@alice | +1.5 | 活动奖励",
             "clear": "请发送 @用户名或数字ID；发送 all 清零本群所有成员积分。",
             "memberledger": "请发送要查询账单的 @用户名或数字ID。",
             "membergames": "请发送 @用户名或数字ID（也可回复对方消息）",
             "drawmincost": "请发送每次抽奖最低消耗积分，范围0.01-1000000（最多两位小数）。",
-            "drawmsgmin": "请设置当日发言满多少条才能参与积分抽奖，0 表示不限。",
+            "drawmsgmin": "请设置当日有效发言满多少条才能参与积分抽奖，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
             "drawrate": "请发送中奖概率倍率，范围0-5。\n0表示不会中奖，1表示自动换算倍率。",
             "diceodds": "请发送骰子赔率（1.7-2.0，也可写 1700-2000；例如 1.95，押1000中奖反1950）",
             "dicemin": "请设置每次玩骰子的最低积分。",
             "dicemax": "请设置骰子单注最高积分，0 表示不限。",
-            "dicemsgmin": "请设置当日发言满多少条才能玩骰子，0 表示不限。",
-            "dicemsgfree": "请设置当日发言满多少条可不受骰子定时限制，0 表示关闭。",
+            "dicemsgmin": "请设置当日有效发言满多少条才能玩骰子，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
+            "dicemsgfree": "请设置当日有效发言满多少条可不受骰子定时限制，0 表示关闭。\n有效发言：1 分钟内多条只算 1 条。",
             "diceschedule": "请设置每日定时开关和开放时段。",
         }
         if action == "drawconfig":

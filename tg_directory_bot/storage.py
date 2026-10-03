@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import secrets
+import time
 import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -37,6 +38,14 @@ def entry_keyword_key(value: str, suffix: str = ENTRY_KEYWORD_SUFFIX) -> str:
 
 POINTS_QUANT = Decimal("0.01")
 POINTS_ABS_MAX = Decimal("1000000000")
+
+
+ACTIVE_MESSAGE_WINDOW_SECONDS = 60
+
+
+def activity_now() -> float:
+    """有效发言计时用的时钟（Unix 秒），测试可替换。"""
+    return time.time()
 
 
 def normalize_points(value) -> Decimal:
@@ -899,6 +908,20 @@ class DirectoryStore:
             self._ensure_column(conn, "auto_replies", "scope", "TEXT NOT NULL DEFAULT 'private'")
             self._ensure_column(conn, "group_activity_users", "username", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "group_activity_users", "display_name", "TEXT NOT NULL DEFAULT ''")
+            # 有效发言（活跃门槛专用）：距上一条“计入”的发言满 60 秒才再计 1 条。
+            activity_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(group_activity_users)")
+            }
+            self._ensure_column(
+                conn, "group_activity_users", "active_messages", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(
+                conn, "group_activity_users", "last_counted_ts", "REAL NOT NULL DEFAULT 0"
+            )
+            if "active_messages" not in activity_columns:
+                # 升级当天不清零：已有发言数原样作为有效发言数，之后按新规则累加。
+                conn.execute("UPDATE group_activity_users SET active_messages=messages")
             self._ensure_column(conn, "entries", "content_text", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "entries", "media_file_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "entries", "media_type", "TEXT NOT NULL DEFAULT ''")
@@ -2311,6 +2334,17 @@ class DirectoryStore:
             ).fetchone()
         return int(row["messages"]) if row else 0
 
+    def user_today_active_messages(self, chat_id: int, user_id: int) -> int:
+        """该成员在本群今日（北京时间）的有效发言条数：1 分钟内多条只算 1 条。
+        仅用于骰子/积分抽奖/积分兑换的「最低当日活跃」「免定时活跃」门槛。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT active_messages FROM group_activity_users
+                   WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row["active_messages"]) if row else 0
+
     def set_point_draw_min_activity(self, chat_id: int, value: int, updated_by: int) -> None:
         """积分抽奖最低当日活跃条数；0 表示不限。"""
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000:
@@ -3029,11 +3063,11 @@ class DirectoryStore:
             raise ValueError("本群积分功能尚未开启")
         min_activity = int(config["redeem_min_activity"] or 0)
         if min_activity > 0:
-            current = self.user_today_messages(chat_id, user_id)
+            current = self.user_today_active_messages(chat_id, user_id)
             if current < min_activity:
                 raise ValueError(
-                    f"今日活跃不足：需要当日发言 {min_activity} 条才能兑换，"
-                    f"你今天已发言 {current} 条"
+                    f"今日活跃不足：需要当日有效发言 {min_activity} 条才能兑换"
+                    f"（1 分钟内多条只算 1 条），你今天已有效发言 {current} 条"
                 )
         with self.connect() as conn:
             gift = conn.execute(
@@ -3080,10 +3114,11 @@ class DirectoryStore:
             raise ValueError("本群积分抽奖尚未开启")
         min_activity = int(config["draw_min_activity"] or 0)
         if min_activity > 0:
-            current = self.user_today_messages(chat_id, user_id)
+            current = self.user_today_active_messages(chat_id, user_id)
             if current < min_activity:
                 raise ValueError(
-                    f"今日发言满 {min_activity} 条才能参与积分抽奖（当前 {current} 条）"
+                    f"今日活跃不足：需要当日有效发言 {min_activity} 条才能参与积分抽奖"
+                    f"（1 分钟内多条只算 1 条），你今天已有效发言 {current} 条"
                 )
         with self.connect() as conn:
             gift = conn.execute(
@@ -4767,6 +4802,21 @@ class DirectoryStore:
                          messages=group_activity_users.messages+excluded.messages,
                          last_seen_at=CURRENT_TIMESTAMP""",
                     (chat_id, user_id, user_username[:80], display_name[:160], messages),
+                )
+                now_ts = float(activity_now())
+                conn.execute(
+                    """UPDATE group_activity_users SET
+                         active_messages=active_messages + CASE
+                           WHEN last_counted_ts<=0 OR ?-last_counted_ts>=? THEN 1 ELSE 0 END,
+                         last_counted_ts=CASE
+                           WHEN last_counted_ts<=0 OR ?-last_counted_ts>=? THEN ?
+                           ELSE last_counted_ts END
+                       WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
+                    (
+                        now_ts, ACTIVE_MESSAGE_WINDOW_SECONDS,
+                        now_ts, ACTIVE_MESSAGE_WINDOW_SECONDS, now_ts,
+                        chat_id, user_id,
+                    ),
                 )
                 conn.executemany(
                     """INSERT INTO group_message_events

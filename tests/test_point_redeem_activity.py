@@ -21,7 +21,7 @@ from tg_directory_bot.bot import (
 from tg_directory_bot.storage import DirectoryStore
 
 CHAT, USER = -80808, 66
-REFUSE = "今日活跃不足：需要当日发言 {n} 条才能兑换，你今天已发言 {x} 条"
+REFUSE = "今日活跃不足：需要当日有效发言 {n} 条才能兑换（1 分钟内多条只算 1 条），你今天已有效发言 {x} 条"
 
 
 class PointRedeemActivityTest(unittest.TestCase):
@@ -32,6 +32,16 @@ class PointRedeemActivityTest(unittest.TestCase):
         self.store.set_points_enabled(CHAT, True, 1)
         self.store.adjust_points(CHAT, USER, 100, "seed", 1, "u", "U")
         self.gift = self.store.add_point_gift(CHAT, "礼品", 10, -1, 1)
+        # 有效发言 1 分钟去重：测试里每次发言相隔 61 秒，保证每条都计入
+        self._now = 1_700_000_000.0
+
+        def _tick():
+            self._now += 61
+            return self._now
+
+        clock = patch("tg_directory_bot.storage.activity_now", side_effect=_tick)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -145,9 +155,9 @@ class PointRedeemActivityTest(unittest.TestCase):
         self.assertIn("积分兑换最低当日活跃：不限", points_status_text(self.store, CHAT))
         self.assertNotIn("兑换条件", point_gifts_text(self.store, CHAT))
         self.store.set_point_redeem_min_activity(CHAT, 6, 1)
-        self.assertIn("积分兑换最低当日活跃：今日发言满 6 条才能兑换",
+        self.assertIn("积分兑换最低当日活跃：今日有效发言满 6 条才能兑换",
                       points_status_text(self.store, CHAT))
-        self.assertIn("兑换条件：今日发言满 6 条", point_gifts_text(self.store, CHAT))
+        self.assertIn("兑换条件：今日有效发言满 6 条（1 分钟内多条只算 1 条）", point_gifts_text(self.store, CHAT))
         self.assertIn("points_redeemmsgmin", settings_wizard.FLOWS)
 
     def test_commit_input(self):
@@ -173,8 +183,8 @@ class PointRedeemActivityTest(unittest.TestCase):
             asyncio.run(commit_group_menu_input(update, context))
         self.assertEqual(self.store.points_config(CHAT)["redeem_min_activity"], 12)
         reply = message.reply_text.await_args_list[0].args[0]
-        self.assertIn("积分兑换最低当日活跃已设为 12 条", reply)
-        self.assertIn("积分兑换最低当日活跃：今日发言满 12 条才能兑换", reply)
+        self.assertIn("积分兑换最低当日活跃已设为 12 条有效发言", reply)
+        self.assertIn("积分兑换最低当日活跃：今日有效发言满 12 条才能兑换", reply)
 
 
 if __name__ == "__main__":

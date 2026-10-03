@@ -32,6 +32,16 @@ class PointDrawActivityTest(unittest.TestCase):
         self.store.set_point_draw_config(CHAT, True, 10, 1.0, 1)
         self.store.adjust_points(CHAT, USER, 100, "seed", 1, "u", "U")
         self.gift = self.store.add_point_gift(CHAT, "礼品", 1000, -1, 1)
+        # 有效发言 1 分钟去重：测试里每次发言相隔 61 秒，保证每条都计入
+        self._now = 1_700_000_000.0
+
+        def _tick():
+            self._now += 61
+            return self._now
+
+        clock = patch("tg_directory_bot.storage.activity_now", side_effect=_tick)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -62,7 +72,7 @@ class PointDrawActivityTest(unittest.TestCase):
         self.speak()
         with self.assertRaises(ValueError) as raised:
             self.store.draw_point_gift(CHAT, USER, self.gift, "u", "U")
-        self.assertEqual(str(raised.exception), "今日发言满 2 条才能参与积分抽奖（当前 1 条）")
+        self.assertEqual(str(raised.exception), "今日活跃不足：需要当日有效发言 2 条才能参与积分抽奖（1 分钟内多条只算 1 条），你今天已有效发言 1 条")
         self.assertEqual(self.balance(), before)
         self.speak("大3")   # 骰子口令不算发言
         with self.assertRaises(ValueError):
@@ -104,14 +114,14 @@ class PointDrawActivityTest(unittest.TestCase):
         self.store.set_point_draw_min_activity(CHAT, 1, 1)
         query = self.click(CHAT)                     # 群内按钮
         query.answer.assert_awaited_once_with(
-            "今日发言满 1 条才能参与积分抽奖（当前 0 条）", show_alert=True,
+            "今日活跃不足：需要当日有效发言 1 条才能参与积分抽奖（1 分钟内多条只算 1 条），你今天已有效发言 0 条", show_alert=True,
         )
         query = self.click(USER, override=CHAT)      # 私聊群组管理里选中的群
         self.assertIn("才能参与积分抽奖", query.answer.await_args.args[0])
         self.assertEqual(self.balance(), 100)
         self.speak()
         query = self.click(USER, override=CHAT)
-        self.assertNotIn("才能参与", query.answer.await_args.args[0])
+        self.assertNotIn("今日活跃不足", query.answer.await_args.args[0])
         self.assertEqual(self.balance(), 90)
 
     def test_views_and_settings(self):
@@ -121,10 +131,10 @@ class PointDrawActivityTest(unittest.TestCase):
                       [b.callback_data for row in markup.inline_keyboard for b in row])
         self.assertNotIn("参与条件", point_draw_view(self.store, CHAT)[0])
         self.store.set_point_draw_min_activity(CHAT, 6, 1)
-        self.assertIn("最低当日活跃：今日发言满 6 条才能参与",
+        self.assertIn("最低当日活跃：今日有效发言满 6 条才能参与",
                       point_draw_settings_view(self.store, CHAT)[0])
-        self.assertIn("参与条件：今日发言满 6 条", point_draw_view(self.store, CHAT)[0])
-        self.assertIn("积分抽奖：开启，每次 10 积分，今日发言满 6 条可参与",
+        self.assertIn("参与条件：今日有效发言满 6 条（1 分钟内多条只算 1 条）", point_draw_view(self.store, CHAT)[0])
+        self.assertIn("积分抽奖：开启，每次 10 积分，今日有效发言满 6 条可参与",
                       points_status_text(self.store, CHAT))
         self.assertIn("points_drawmsgmin", settings_wizard.FLOWS)
 
@@ -151,7 +161,7 @@ class PointDrawActivityTest(unittest.TestCase):
             asyncio.run(commit_group_menu_input(update, context))
         self.assertEqual(self.store.points_config(CHAT)["draw_min_activity"], 12)
         reply = message.reply_text.await_args_list[0].args[0]
-        self.assertIn("积分抽奖最低当日活跃已设为 12 条", reply)
+        self.assertIn("积分抽奖最低当日活跃已设为 12 条有效发言", reply)
         self.assertIn("⚙️ 积分抽奖设置", reply)
 
 
