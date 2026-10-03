@@ -86,6 +86,7 @@ FLOWS = {
     "points_adjust": ("增减成员积分", [TARGET, number("增减积分", None, hint="增加发送正数，扣除发送负数，例如 -10。"), Question("调整原因")]),
     "points_clear": ("清零积分", [Question("清零对象", "发送 @用户名、数字ID，或发送“全部”。")]),
     "points_drawcost": ("本次抽奖消耗", [number("本次消耗积分", "0.01", "1000000")]),
+    "points_redeemmsgmin": ("积分兑换最低当日活跃", [number("当日最少发言条数", "0", "100000", True, hint="发送整数；0 表示不限制。")]),
     "points_drawmsgmin": ("积分抽奖最低当日活跃", [number("当日最少发言条数", "0", "100000", True, hint="发送整数；0 表示不限制。")]),
     "points_drawmincost": ("积分抽奖最低消耗", [number("最低消耗积分", "0.01", "1000000")]),
     "points_drawconfig": ("积分抽奖", [number("最低消耗积分", "0.01", "1000000"), Question("抽奖开关", choices=("开启", "关闭"))]),

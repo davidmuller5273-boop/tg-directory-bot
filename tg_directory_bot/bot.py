@@ -941,6 +941,7 @@ def points_menu_keyboard(
                 InlineKeyboardButton("➕ 添加礼品", callback_data="points:set:giftadd"),
                 InlineKeyboardButton("➖ 删除礼品", callback_data="points:set:giftdel"),
             ],
+            [InlineKeyboardButton("📝 兑换最低当日活跃", callback_data="points:set:redeemmsgmin")],
             [InlineKeyboardButton("⛔ 关闭活跃奖励", callback_data="points:activityoff")],
             [
                 InlineKeyboardButton("➕➖ 增减积分", callback_data="points:set:adjust"),
@@ -967,6 +968,11 @@ def dice_max_bet_label(config) -> str:
 def dice_min_activity_label(config) -> str:
     value = int(config["dice_min_activity"] or 0)
     return f"今日发言满 {value} 条才能玩" if value > 0 else "不限"
+
+
+def redeem_min_activity_label(config) -> str:
+    value = int(config["redeem_min_activity"] or 0)
+    return f"今日发言满 {value} 条才能兑换" if value > 0 else "不限"
 
 
 def dice_free_activity_label(config) -> str:
@@ -1053,7 +1059,8 @@ def points_status_text(
         f"骰子定时：{dice_schedule}\n"
         f"骰子最低当日活跃：{dice_min_activity_label(config)}\n"
         f"骰子免定时活跃：{dice_free_activity_label(config)}\n\n"
-        f"积分抽奖：{draw}\n\n"
+        f"积分抽奖：{draw}\n"
+        f"积分兑换最低当日活跃：{redeem_min_activity_label(config)}\n\n"
         "群员可发送：签到、积分、积分排行、积分礼品、兑换 礼品编号、游戏记录；\n也可发送 大3 / 小5 / 单10 / 双2 玩骰子。"
     )
 
@@ -7483,6 +7490,16 @@ async def commit_group_menu_input(
                     f"积分抽奖最低当日活跃已设为 {count} 条。"
                     if count else "积分抽奖最低当日活跃已关闭（不限）。"
                 )
+            elif action == "redeemmsgmin":
+                try:
+                    count = int(text.strip())
+                except ValueError as exc:
+                    raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
+                store.set_point_redeem_min_activity(chat_id, count, user.id)
+                result = (
+                    f"积分兑换最低当日活跃已设为 {count} 条。"
+                    if count else "积分兑换最低当日活跃已关闭（不限）。"
+                )
             elif action in {"dicemsgmin", "dicemsgfree"}:
                 try:
                     count = int(text.strip())
@@ -8396,6 +8413,9 @@ def point_gifts_text(store: DirectoryStore, chat_id: int) -> str:
     for row in rows:
         stock = "不限量" if int(row["stock"]) < 0 else f"剩余 {row['stock']}"
         lines.append(f"#{row['id']} · {row['name']} · {format_points(row['points_cost'])} 积分 · {stock}")
+    min_activity = int(store.points_config(chat_id)["redeem_min_activity"] or 0)
+    if min_activity > 0:
+        lines.extend(["", f"兑换条件：今日发言满 {min_activity} 条"])
     lines.extend(["", "发送：兑换 礼品编号"])
     return "\n".join(lines)
 
@@ -11996,6 +12016,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8",
             "giftadd": "请发送：所需积分 | 礼品名称 | 库存\n库存填 -1 表示不限量，例如：100 | 会员奖励 | 10",
             "giftdel": "请发送要删除的礼品编号，例如：#1。",
+            "redeemmsgmin": "请设置当日发言满多少条才能兑换积分礼品，0 表示不限。",
             "adjust": "请发送：@用户名或数字ID | 增减数量 | 原因\n例如：@alice | +1.5 | 活动奖励",
             "clear": "请发送 @用户名或数字ID；发送 all 清零本群所有成员积分。",
             "memberledger": "请发送要查询账单的 @用户名或数字ID。",
