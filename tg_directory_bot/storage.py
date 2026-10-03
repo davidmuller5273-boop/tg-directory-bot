@@ -3231,6 +3231,12 @@ class DirectoryStore:
                 (max(1, min(limit, 500)),),
             ).fetchall()
 
+    def tron_monitor_by_id(self, monitor_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM tron_monitors WHERE id=?", (int(monitor_id),),
+            ).fetchone()
+
     def expired_tron_monitors(self, limit: int = 100) -> list[sqlite3.Row]:
         return []
 

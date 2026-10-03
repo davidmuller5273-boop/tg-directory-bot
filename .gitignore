@@ -9,3 +9,4 @@ data/*.sqlite3-*
 backups/
 *.tar.gz
 *.tar.gz.sha256
+data/tron-rate-state.json

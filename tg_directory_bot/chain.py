@@ -8,15 +8,22 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Awaitable, Callable
 
+import logging
+
 import httpx
 
 from .config import Config
+from .tron_net import (
+    BUSY_MESSAGE, COOLDOWN_HEADER, GovernedTransport, config_fallback_nodes,
+    fresh_requests, governor_for, is_busy_error, strip_urls,
+)
 
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 MIN_DISPLAY_TRANSFER = Decimal("0.1")
 MIN_HISTORY_TRANSFER = Decimal("0.11")
 TRONSCAN_RANGE_TOTAL_CAP = 10_000
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+logger = logging.getLogger(__name__)
 HistoryProgress = Callable[[dict[str, object]], Awaitable[None]]
 
 
@@ -284,6 +291,28 @@ class ChainService:
         self._tron_balance_provider_preference: tuple[str, float] | None = None
         self._tron_history_provider_preference: dict[str, tuple[str, float]] = {}
         self._tron_authorization_cache: dict[str, tuple[float, bool]] = {}
+        self._governor = governor_for(
+            config, shared=bool(getattr(config, "db_path", None)),
+        )
+        self._known_head = 0
+
+    def _http(self, **kwargs) -> httpx.AsyncClient:
+        """httpx client whose TRON traffic goes through the shared governor
+        (API-key rotation, cross-process rate limit, cooldown, cache)."""
+        return httpx.AsyncClient(transport=GovernedTransport(self._governor), **kwargs)
+
+    @property
+    def governor(self):
+        return self._governor
+
+    def _node_bases(self, prefer_public: bool = False) -> tuple[str, ...]:
+        trongrid = str(getattr(self.config, "trongrid_url", "https://api.trongrid.io"))
+        fallbacks = [node for node in config_fallback_nodes(self.config) if node != trongrid]
+        if (self._governor.keys and not prefer_public) or not fallbacks:
+            return (trongrid, *fallbacks)
+        # without an API key TronGrid allows ~1 QPS (and block scanning would
+        # burn the key's daily quota): prefer the public nodes
+        return (*fallbacks, trongrid)
 
     def _tronscan_headers(self) -> dict[str, str]:
         headers = {"accept": "application/json", "user-agent": "TGDirectoryBot/2.0"}
@@ -315,7 +344,7 @@ class ChainService:
         if cached and time.monotonic() - cached[0] <= 600:
             return cached[1]
         own_client = client is None
-        client = client or httpx.AsyncClient(timeout=8, follow_redirects=True)
+        client = client or self._http(timeout=8, follow_redirects=True)
         endpoint = (
             f"{getattr(self.config, 'tronscan_api_url', 'https://apilist.tronscanapi.com')}"
             "/api/account/approve/list"
@@ -409,7 +438,7 @@ class ChainService:
         if self.config.trongrid_api_key:
             headers["TRON-PRO-API-KEY"] = self.config.trongrid_api_key
         try:
-            async with httpx.AsyncClient(timeout=6) as client:
+            async with self._http(timeout=6) as client:
                 response = await client.get(
                     f"{self.config.trongrid_url}/v1/accounts/{address}",
                     params={"only_confirmed": "true"}, headers=headers,
@@ -575,7 +604,10 @@ class ChainService:
         details = "；".join(
             f"{name}: {self._short_error(error)}" for name, error in errors
         )
-        raise ChainQueryError("波场账户接口均不可用：" + details[:700])
+        logger.warning("TRON balance providers failed for %s: %s", address, details[:700])
+        if any(is_busy_error(self._short_error(error)) for _, error in errors):
+            raise ChainQueryError(BUSY_MESSAGE)
+        raise ChainQueryError("波场账户接口暂时不可用，请稍后重试")
 
     @staticmethod
     def _short_error(error: Exception) -> str:
@@ -584,81 +616,66 @@ class ChainService:
         return text[:160]
 
     async def _trongrid_node_balance(self, address: str) -> TronBalance:
-        """Use java-tron's native account APIs when TronGrid V1 is unavailable."""
-        headers = {"accept": "application/json", "content-type": "application/json"}
-        api_key = getattr(self.config, "trongrid_api_key", "")
-        if api_key:
-            headers["TRON-PRO-API-KEY"] = api_key
-        base_url = self.config.trongrid_url
+        """Use java-tron's native account APIs when TronGrid V1 is unavailable.
+
+        Every call goes through ``_node_post`` (TronGrid first, then the public
+        fallback nodes), so a TronGrid 429 does not break the fallback.
+        """
         body = {"address": address, "visible": True}
+        parameter = tron_address_abi_parameter(address)
+
+        def constant(selector: str) -> dict:
+            return {
+                "owner_address": address, "contract_address": USDT_TRC20_CONTRACT,
+                "function_selector": selector, "parameter": parameter, "visible": True,
+            }
+
         try:
-            async with httpx.AsyncClient(timeout=12) as client:
-                account_response = await client.post(
-                    f"{base_url}/wallet/getaccount", json=body, headers=headers
-                )
-                account_response.raise_for_status()
-                account = account_response.json()
+            async with self._http(timeout=12) as client:
+                account = await self._node_post(client, "/wallet/getaccount", body)
                 if account.get("Error"):
                     raise ValueError(str(account["Error"]))
                 if not account.get("address"):
                     return TronBalance(address, False, Decimal("0"), Decimal("0"))
-                resource_response, usdt_response, blacklist_response, authorization_status = await asyncio.gather(
-                    asyncio.wait_for(client.post(
-                        f"{base_url}/wallet/getaccountresource",
-                        json=body, headers=headers,
-                    ), timeout=2),
-                    asyncio.wait_for(client.post(
-                        f"{base_url}/wallet/triggerconstantcontract",
-                        json={
-                            "owner_address": address,
-                            "contract_address": USDT_TRC20_CONTRACT,
-                            "function_selector": "balanceOf(address)",
-                            "parameter": tron_address_abi_parameter(address),
-                            "visible": True,
-                        },
-                        headers=headers,
-                    ), timeout=2),
-                    asyncio.wait_for(client.post(
-                        f"{base_url}/wallet/triggerconstantcontract",
-                        json={
-                            "owner_address": address,
-                            "contract_address": USDT_TRC20_CONTRACT,
-                            "function_selector": "isBlackListed(address)",
-                            "parameter": tron_address_abi_parameter(address),
-                            "visible": True,
-                        },
-                        headers=headers,
-                    ), timeout=1.5),
+                resource_payload, usdt_payload, blacklist_payload, authorization_status = await asyncio.gather(
+                    asyncio.wait_for(self._node_post(
+                        client, "/wallet/getaccountresource", body,
+                    ), timeout=4),
+                    asyncio.wait_for(self._node_post(
+                        client, "/wallet/triggerconstantcontract",
+                        constant("balanceOf(address)"),
+                    ), timeout=6),
+                    asyncio.wait_for(self._node_post(
+                        client, "/wallet/triggerconstantcontract",
+                        constant("isBlackListed(address)"),
+                    ), timeout=3),
                     asyncio.wait_for(
                         self._tron_authorization_status(address), timeout=5
                     ),
                     return_exceptions=True,
                 )
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
+        except (ChainQueryError, httpx.HTTPError, ValueError, TypeError) as exc:
+            if is_busy_error(exc):
+                raise ChainQueryError(BUSY_MESSAGE) from exc
             raise ChainQueryError("TronGrid节点账户接口不可用") from exc
 
-        resource: dict = {}
-        if not isinstance(resource_response, Exception):
+        resource: dict = resource_payload if isinstance(resource_payload, dict) else {}
+        if isinstance(usdt_payload, dict):
+            values = usdt_payload.get("constant_result") or []
             try:
-                resource_response.raise_for_status()
-                resource = resource_response.json()
-            except (httpx.HTTPError, ValueError, TypeError):
-                resource = {}
-        usdt = Decimal("0")
-        if not isinstance(usdt_response, Exception):
-            try:
-                usdt_response.raise_for_status()
-                values = usdt_response.json().get("constant_result") or []
-                if values:
-                    usdt = Decimal(int(str(values[0]), 16)) / Decimal(1_000_000)
-            except (httpx.HTTPError, ValueError, TypeError, InvalidOperation):
-                usdt = Decimal("0")
+                usdt = Decimal(int(str(values[0]), 16)) / Decimal(1_000_000)
+            except (IndexError, ValueError, TypeError, InvalidOperation) as exc:
+                raise ChainQueryError("USDT 合约余额查询失败") from exc
+        else:
+            # never report a made-up 0 USDT balance
+            raise ChainQueryError("USDT 合约余额查询失败") from (
+                usdt_payload if isinstance(usdt_payload, Exception) else None
+            )
         is_frozen: bool | None = None
-        if not isinstance(blacklist_response, Exception):
+        if isinstance(blacklist_payload, dict):
             try:
-                blacklist_response.raise_for_status()
-                is_frozen = tron_usdt_blacklist_status(blacklist_response.json())
-            except (httpx.HTTPError, ValueError, TypeError):
+                is_frozen = tron_usdt_blacklist_status(blacklist_payload)
+            except (ValueError, TypeError):
                 is_frozen = None
         return TronBalance(
             address=address,
@@ -692,7 +709,7 @@ class ChainService:
         if self.config.trongrid_api_key:
             headers["TRON-PRO-API-KEY"] = self.config.trongrid_api_key
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with self._http(timeout=10) as client:
                 response = await self._history_get(
                     client,
                     f"{self.config.trongrid_url}/v1/accounts/{address}",
@@ -733,35 +750,43 @@ class ChainService:
 
     async def _node_post(
         self, client: httpx.AsyncClient, path: str, body: dict,
+        *, prefer_public: bool = False,
     ) -> dict:
-        """POST to the TronGrid full node with retry on 429 / network errors."""
+        """POST a read-only full-node API.
+
+        TronGrid (with API key) first, then the public fallback nodes
+        (``TRON_FALLBACK_NODES``) on 429 / local cooldown / 5xx / network errors.
+        """
         headers = self._trongrid_headers()
         last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await client.post(
-                    f"{self.config.trongrid_url}{path}", json=body, headers=headers
-                )
-            except httpx.RequestError as exc:
-                last_error = exc
-            else:
-                status = getattr(response, "status_code", 200)
-                if status in {401, 403} and headers.get("TRON-PRO-API-KEY"):
-                    headers = self._headers_without_api_key(headers)
+        busy = False
+        for round_index in range(2):
+            for base in self._node_bases(prefer_public):
+                try:
+                    response = await client.post(f"{base}{path}", json=body, headers=headers)
+                except httpx.RequestError as exc:
+                    last_error = exc
                     continue
-                if status != 429:
-                    try:
-                        response.raise_for_status()
-                        payload = response.json()
-                    except (httpx.HTTPError, ValueError, TypeError) as exc:
-                        raise ChainQueryError(f"节点接口异常：{exc}") from exc
-                    if not isinstance(payload, dict):
-                        raise ChainQueryError("节点接口返回格式错误")
-                    return payload
-                last_error = ChainQueryError("节点接口限流")
-            if attempt < 2:
-                await asyncio.sleep(min(3.0, 0.8 * (2 ** attempt)) + random.uniform(0, 0.3))
-        raise ChainQueryError(f"节点接口不可用：{last_error}")
+                status = getattr(response, "status_code", 200)
+                if status in {401, 403, 429} or status >= 500:
+                    busy = busy or status == 429
+                    last_error = ChainQueryError(
+                        BUSY_MESSAGE if status == 429 else f"节点接口HTTP {status}"
+                    )
+                    continue
+                try:
+                    response.raise_for_status()
+                    payload = response.json()
+                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                    raise ChainQueryError(f"节点接口异常：{strip_urls(str(exc))[:120]}") from exc
+                if not isinstance(payload, dict):
+                    raise ChainQueryError("节点接口返回格式错误")
+                return payload
+            if round_index == 0:
+                await asyncio.sleep(0.8 + random.uniform(0, 0.3))
+        if busy:
+            raise ChainQueryError(BUSY_MESSAGE)
+        raise ChainQueryError(f"节点接口不可用：{strip_urls(str(last_error))[:120]}")
 
     async def _node_balance_pair(self, address: str) -> tuple[Decimal, Decimal, bool]:
         """(TRX spendable, USDT, activated) for exactly ``address`` from the full node.
@@ -770,7 +795,7 @@ class ChainService:
         USDT = balanceOf on the official contract (6 decimals).
         """
         address = validate_tron_address(address)
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with self._http(timeout=8) as client:
             account = await self._node_post(
                 client, "/wallet/getaccount", {"address": address, "visible": True}
             )
@@ -805,7 +830,7 @@ class ChainService:
         """Second, independent source (TronGrid V1 indexer) for cross-checking."""
         headers = self._trongrid_headers()
         headers.pop("content-type", None)
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with self._http(timeout=8) as client:
             response = await self._history_get(
                 client, f"{self.config.trongrid_url}/v1/accounts/{address}",
                 {"only_confirmed": "false"}, headers,
@@ -824,11 +849,143 @@ class ChainService:
             trongrid_v1_usdt_balance(account), True,
         )
 
-    async def _node_head_block(self) -> int:
-        async with httpx.AsyncClient(timeout=8) as client:
-            payload = await self._node_post(client, "/wallet/getnowblock", {})
+    async def tron_head(self) -> tuple[int, int]:
+        """(head block number, head block timestamp ms) via a ~0.5 KB request.
+
+        ``/wallet/getblock {"detail": false}`` returns only the header; older
+        nodes fall back to ``getnowblock`` (full block, much larger).
+        """
+        with fresh_requests():
+            async with self._http(timeout=8) as client:
+                try:
+                    payload = await self._node_post(
+                        client, "/wallet/getblock", {"detail": False}, prefer_public=True,
+                    )
+                    if not (payload.get("block_header") or {}).get("raw_data"):
+                        raise ChainQueryError("getblock 未返回区块头")
+                except ChainQueryError as exc:
+                    if BUSY_MESSAGE in str(exc):
+                        raise
+                    payload = await self._node_post(
+                        client, "/wallet/getnowblock", {}, prefer_public=True,
+                    )
         header = (payload.get("block_header") or {}).get("raw_data") or {}
-        return int(header.get("number") or 0)
+        number = int(header.get("number") or 0)
+        if number > self._known_head:
+            self._known_head = number
+        return number, int(header.get("timestamp") or 0)
+
+    async def _node_head_block(self) -> int:
+        number, _ = await self.tron_head()
+        return number
+
+    async def tron_block(self, number: int) -> dict:
+        """Full block ``number`` (visible=false: hex addresses, ~18% smaller).
+
+        Returns {} when the block does not exist yet. Processed in memory only.
+        """
+        last_error: Exception | None = None
+        with fresh_requests():
+            async with self._http(timeout=15) as client:
+                for base in self._node_bases(prefer_public=True):
+                    try:
+                        response = await client.post(
+                            f"{base}/wallet/getblockbynum",
+                            json={"num": int(number), "visible": False},
+                        )
+                        if response.status_code in {401, 403, 429} or response.status_code >= 500:
+                            last_error = ChainQueryError(
+                                BUSY_MESSAGE if response.status_code == 429
+                                else f"HTTP {response.status_code}"
+                            )
+                            continue
+                        response.raise_for_status()
+                        payload = response.json()
+                    except (httpx.HTTPError, ValueError, TypeError) as exc:
+                        last_error = exc
+                        continue
+                    if isinstance(payload, dict) and payload.get("block_header"):
+                        return payload
+                    last_error = ChainQueryError(f"节点尚无区块 {number}")
+        if is_busy_error(last_error):
+            raise ChainQueryError(BUSY_MESSAGE)
+        return {}
+
+    async def tron_block_txinfo(self, number: int) -> list[dict]:
+        """All transaction receipts/logs of block ``number`` (USDT Transfer logs).
+
+        Nodes answer ``[]`` both for a block without transactions and for a
+        block they do not have yet, so an empty answer is only accepted after
+        the same node confirms the block header exists (never miss a block
+        because one fallback node lags behind).
+        """
+        last_error: Exception | None = None
+        with fresh_requests():
+            async with self._http(timeout=15) as client:
+                for base in self._node_bases(prefer_public=True):
+                    try:
+                        response = await client.post(
+                            f"{base}/wallet/gettransactioninfobyblocknum",
+                            json={"num": int(number)},
+                        )
+                        if response.status_code in {401, 403, 429} or response.status_code >= 500:
+                            last_error = ChainQueryError(
+                                BUSY_MESSAGE if response.status_code == 429
+                                else f"HTTP {response.status_code}"
+                            )
+                            continue
+                        response.raise_for_status()
+                        payload = response.json()
+                        if isinstance(payload, dict) and payload.get("Error"):
+                            last_error = ChainQueryError("区块回执接口返回错误")
+                            continue
+                        rows = payload if isinstance(payload, list) else []
+                        if rows:
+                            return [item for item in rows if isinstance(item, dict)]
+                        header = await client.post(
+                            f"{base}/wallet/getblock",
+                            json={"id_or_num": str(int(number)), "detail": False},
+                        )
+                        header.raise_for_status()
+                        if (header.json() or {}).get("block_header"):
+                            return []
+                        last_error = ChainQueryError(f"节点尚无区块 {number}")
+                    except (httpx.HTTPError, ValueError, TypeError) as exc:
+                        last_error = exc
+        if is_busy_error(last_error):
+            raise ChainQueryError(BUSY_MESSAGE)
+        raise ChainQueryError(f"区块回执接口不可用：{strip_urls(str(last_error))[:120]}")
+
+    async def tron_usdt_events(self, block_number: int) -> list[dict]:
+        """USDT Transfer events of one block from TronGrid's event server.
+
+        ~4 KB gzip per block vs ~12 KB for gettransactioninfobyblocknum.
+        Pages via ``meta.fingerprint``. An empty list may also mean "not
+        indexed yet" — the scanner then falls back to the node receipts.
+        """
+        url = (
+            f"{self.config.trongrid_url}/v1/contracts/{USDT_TRC20_CONTRACT}/events"
+        )
+        params = {
+            "event_name": "Transfer", "block_number": str(int(block_number)),
+            "limit": "200",
+        }
+        rows: list[dict] = []
+        with fresh_requests():
+            async with self._http(timeout=12) as client:
+                for _page in range(20):
+                    response = await self._history_get(
+                        client, url, params, self._trongrid_headers(),
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    data = payload.get("data") or []
+                    rows.extend(item for item in data if isinstance(item, dict))
+                    fingerprint = (payload.get("meta") or {}).get("fingerprint")
+                    if not fingerprint or len(data) < 200:
+                        return rows
+                    params = dict(params, fingerprint=str(fingerprint))
+        raise ChainQueryError("USDT 事件分页过多")
 
     async def tron_verified_balance(
         self, address: str, *, min_block: int = 0,
@@ -847,13 +1004,19 @@ class ChainService:
         can show 「余额获取中/暂不可用」 instead of a wrong number.
         """
         address = validate_tron_address(address)
+        with fresh_requests():
+            return await self._tron_verified_balance(address, min_block, attempts, delay)
+
+    async def _tron_verified_balance(
+        self, address: str, min_block: int, attempts: int, delay: float,
+    ) -> TronBalance:
         last_error: Exception | None = None
         previous: tuple[Decimal, Decimal, bool] | None = None
         for attempt in range(max(1, attempts)):
             if attempt:
                 await asyncio.sleep(delay)
             try:
-                if min_block:
+                if min_block and min_block > self._known_head:
                     head = await self._node_head_block()
                     if head and head < min_block:
                         last_error = ChainQueryError("节点尚未同步到该交易区块")
@@ -870,7 +1033,9 @@ class ChainService:
                 return TronBalance(address, primary[2], primary[0], primary[1])
             previous = primary
             last_error = ChainQueryError("节点与索引余额不一致，等待确认")
-        raise ChainQueryError(f"余额暂未核实：{last_error}")
+        if is_busy_error(last_error):
+            raise ChainQueryError(f"余额暂未核实：{BUSY_MESSAGE}")
+        raise ChainQueryError(f"余额暂未核实：{strip_urls(str(last_error))[:120]}")
 
     async def _tronscan_monitor_balance(self, address: str) -> TronBalance:
         base_url = getattr(
@@ -878,7 +1043,7 @@ class ChainService:
         )
         headers = self._tronscan_headers()
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 response = await self._history_get(
                     client,
                     f"{base_url}/api/accountv2",
@@ -933,7 +1098,7 @@ class ChainService:
             )
 
         async def fetch_trongrid() -> tuple[TronTransaction, ...]:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with self._http(timeout=10) as client:
                 batches = await asyncio.gather(
                     *(fetch_one(client, asset) for asset in selected)
                 )
@@ -986,7 +1151,10 @@ class ChainService:
                 break
         if not successful:
             errors = "；".join(str(value) for value in provider_values)
-            raise ChainQueryError("波场监控增量交易接口暂时不可用：" + errors)
+            logger.warning("TRON monitor transaction providers failed: %s", errors[:700])
+            if any(is_busy_error(value) for value in provider_values):
+                raise ChainQueryError(BUSY_MESSAGE)
+            raise ChainQueryError("波场监控交易接口暂时不可用，稍后自动重试")
         merged: dict[str, TronTransaction] = {}
         for values in successful:
             for item in values:
@@ -1055,7 +1223,7 @@ class ChainService:
             return tuple(results)
 
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 batches = await asyncio.gather(*(
                     fetch_one(client, asset) for asset in assets
                 ))
@@ -1097,7 +1265,7 @@ class ChainService:
             )
 
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with self._http(timeout=10) as client:
                 batches = await asyncio.gather(
                     *(fetch_one(client, asset) for asset in selected)
                 )
@@ -1166,7 +1334,7 @@ class ChainService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 batches = await asyncio.gather(
                     *(fetch_one(client, asset) for asset in assets)
                 )
@@ -1240,7 +1408,7 @@ class ChainService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 batches = await asyncio.gather(
                     *(fetch_one(client, asset) for asset in assets)
                 )
@@ -1256,7 +1424,7 @@ class ChainService:
         account: dict | None = None
         last_error: Exception | None = None
         try:
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with self._http(timeout=12, follow_redirects=True) as client:
                 for endpoint in ("accountv2", "account"):
                     try:
                         response = await self._history_get(
@@ -1359,7 +1527,7 @@ class ChainService:
                 "count": "false", "start": "0", "limit": "50", "confirm": "0",
             }
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 response = await self._history_get(
                     client, f"{base_url}/api/{endpoint}", params, headers
                 )
@@ -1403,7 +1571,7 @@ class ChainService:
         block_number = self._tron_block_cache.get(transaction.tx_id, 0)
         if not block_number:
             try:
-                async with httpx.AsyncClient(timeout=8) as client:
+                async with self._http(timeout=8) as client:
                     for path in (
                         "/wallet/gettransactioninfobyid",
                         "/walletsolidity/gettransactioninfobyid",
@@ -1430,7 +1598,7 @@ class ChainService:
             self.config, "tronscan_api_url", "https://apilist.tronscanapi.com"
         )
         try:
-            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            async with self._http(timeout=8, follow_redirects=True) as client:
                 response = await self._history_get(
                     client, f"{base_url}/api/transaction-info",
                     {"hash": tx_id}, self._tronscan_headers(),
@@ -1549,6 +1717,9 @@ class ChainService:
                 await asyncio.sleep(min(4.0, 2 ** attempt + random.uniform(0, 0.5)))
                 continue
             status_code = getattr(response, "status_code", 200)
+            response_headers = getattr(response, "headers", {}) or {}
+            if status_code == 429 and response_headers.get(COOLDOWN_HEADER):
+                raise ChainQueryError(BUSY_MESSAGE)
             if status_code in {401, 403} and headers.get("TRON-PRO-API-KEY"):
                 headers = ChainService._headers_without_api_key(headers)
                 continue
@@ -1569,7 +1740,7 @@ class ChainService:
             await asyncio.sleep(delay)
         if last_error:
             raise ChainQueryError(f"网络连接失败：{last_error}") from last_error
-        raise ChainQueryError("交易记录接口限流，请稍后重试")
+        raise ChainQueryError(BUSY_MESSAGE)
 
     async def _oklink_transaction_history(
         self, address: str, asset: str, max_records: int, days: int,
@@ -1585,7 +1756,7 @@ class ChainService:
         }
         results: list[TronTransaction] = []
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with self._http(timeout=15, follow_redirects=True) as client:
                 for page in range(1, min(100, (max_records + 49) // 50) + 1):
                     params = {
                         "chainShortName": "TRON", "address": address,
@@ -1658,7 +1829,7 @@ class ChainService:
         if not api_key:
             raise ChainQueryError("Tokenview API Key 未配置")
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with self._http(timeout=15, follow_redirects=True) as client:
                 response = await client.post(
                     "https://services.tokenview.io/vipapi/trx/accounts/getaccount",
                     params={"apikey": api_key},
@@ -1706,7 +1877,7 @@ class ChainService:
         cutoff_ms = int(time.time() * 1000) - days * 86400 * 1000 if days else 0
         results: list[TronTransaction] = []
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with self._http(timeout=15, follow_redirects=True) as client:
                 for page in range(1, min(50, (max_records + 49) // 50) + 1):
                     endpoint = (
                         f"usdt/addresstxlist/{address}/{page}/50"
@@ -1797,7 +1968,7 @@ class ChainService:
             params["min_timestamp"] = str(cutoff_ms)
             params["max_timestamp"] = str(end_ms)
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with self._http(timeout=15) as client:
                 while True:
                     if fingerprint:
                         params["fingerprint"] = fingerprint
@@ -1872,7 +2043,7 @@ class ChainService:
         scanned_records = 0
         started_at = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with self._http(timeout=15, follow_redirects=True) as client:
                 for start in range(0, max_records, 50):
                     params: dict[str, str] = {
                         "address": address, "start": str(start), "limit": "50",
@@ -1962,7 +2133,7 @@ class ChainService:
         transactions: list[TronTransaction] = []
         seen_ids: set[str] = set()
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with self._http(timeout=15, follow_redirects=True) as client:
                 while True:
                     params: dict[str, str] = {
                         "start": str(offset), "limit": "50",
@@ -2125,7 +2296,7 @@ class ChainService:
                     "direction": "all", "confirm": "0",
                     "start_timestamp": str(start_ms), "end_timestamp": str(now_ms),
                 }
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 response = await self._tronscan_get(
                     client, f"{base_url}/api/{endpoint}", params, headers,
                 )
@@ -2158,7 +2329,7 @@ class ChainService:
             }
             if selected == "USDT":
                 params["trc20Id"] = USDT_TRC20_CONTRACT
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with self._http(timeout=10, follow_redirects=True) as client:
                 response = await self._tronscan_get(
                     client, f"{base_url}/api/{endpoint}", params, headers,
                 )
@@ -2192,7 +2363,7 @@ class ChainService:
                 params["contract_address"] = USDT_TRC20_CONTRACT
             count = 0
             fingerprint = ""
-            async with httpx.AsyncClient(timeout=12) as client:
+            async with self._http(timeout=12) as client:
                 while count <= remaining:
                     if fingerprint:
                         params["fingerprint"] = fingerprint
@@ -2289,7 +2460,7 @@ class ChainService:
         if self.config.coingecko_api_key:
             headers["x-cg-demo-api-key"] = self.config.coingecko_api_key
         try:
-            async with httpx.AsyncClient(timeout=12) as client:
+            async with self._http(timeout=12) as client:
                 response = await client.get(
                     f"{self.config.coingecko_url}/simple/price",
                     params={
@@ -2340,7 +2511,7 @@ class ChainService:
         if payment:
             params["paymentMethod"] = payment_codes[payment]
         try:
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with self._http(timeout=12, follow_redirects=True) as client:
                 response = await client.get(
                     self.config.okx_p2p_url,
                     params=params,

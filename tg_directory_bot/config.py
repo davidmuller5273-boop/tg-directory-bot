@@ -31,6 +31,16 @@ class Config:
     backups_dir: Path = Path("backups")
     trongrid_url: str = "https://api.trongrid.io"
     trongrid_api_key: str = ""
+    trongrid_api_keys: tuple[str, ...] = ()
+    tron_max_qps: float = 0.0
+    tronscan_max_qps: float = 3.0
+    tron_cache_seconds: float = 5.0
+    tron_fallback_nodes: tuple[str, ...] | None = None
+    tron_block_scan: bool = True
+    tron_scan_lag_blocks: int = 1
+    tron_scan_max_catchup_blocks: int = 1200
+    tron_reconcile_seconds: int = 300
+    tron_fallback_poll_seconds: int = 30
     tronscan_api_url: str = "https://apilist.tronscanapi.com"
     tronscan_api_key: str = ""
     oklink_api_key: str = ""
@@ -81,6 +91,16 @@ def _first_admin_id(value: str | None) -> int | None:
     return None
 
 
+def _float_env(name: str, default: float, minimum: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return max(float(minimum), float(raw))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
 def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = True) -> Config:
     if load_dotenv and env_file:
         load_dotenv(env_file)
@@ -103,6 +123,12 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         telegram_api_id = int(os.getenv("TELEGRAM_API_ID", "0") or "0")
     except ValueError as exc:
         raise ValueError("TELEGRAM_API_ID must be a number") from exc
+    tron_keys = tuple(dict.fromkeys(
+        item for item in (
+            *_csv((os.getenv("TRONGRID_API_KEYS") or "").replace(";", ",")),
+            os.getenv("TRONGRID_API_KEY", "").strip(),
+        ) if item
+    ))
     categories = _csv(os.getenv("CATEGORIES"), DEFAULT_CATEGORIES)
     blocked = _csv(os.getenv("BLOCKED_KEYWORDS"), DEFAULT_BLOCKED_KEYWORDS)
     raw_admin_ids = os.getenv("ADMIN_IDS")
@@ -138,7 +164,24 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         session_secret=os.getenv("SESSION_SECRET", "").strip(),
         backups_dir=Path(os.getenv("BACKUPS_DIR", "backups")),
         trongrid_url=os.getenv("TRONGRID_URL", "https://api.trongrid.io").strip().rstrip("/"),
-        trongrid_api_key=os.getenv("TRONGRID_API_KEY", "").strip(),
+        trongrid_api_key=(tron_keys[0] if tron_keys else ""),
+        trongrid_api_keys=tron_keys,
+        tron_max_qps=_float_env("TRON_MAX_QPS", 0.0, 0.0),
+        tronscan_max_qps=_float_env("TRONSCAN_MAX_QPS", 3.0, 0.2),
+        tron_cache_seconds=_float_env("TRON_CACHE_SECONDS", 5.0, 0.0),
+        tron_fallback_nodes=(
+            None if not (os.getenv("TRON_FALLBACK_NODES") or "").strip()
+            else tuple(
+                item.rstrip("/") for item in _csv(os.getenv("TRON_FALLBACK_NODES"))
+                if item.casefold() not in {"0", "off", "none", "false"}
+            )
+        ),
+        tron_block_scan=os.getenv("TRON_BLOCK_SCAN", "1").strip().casefold()
+        not in {"0", "false", "no", "off"},
+        tron_scan_lag_blocks=int(_float_env("TRON_SCAN_LAG_BLOCKS", 1, 0)),
+        tron_scan_max_catchup_blocks=int(_float_env("TRON_SCAN_MAX_CATCHUP_BLOCKS", 1200, 20)),
+        tron_reconcile_seconds=int(_float_env("TRON_RECONCILE_SECONDS", 300, 30)),
+        tron_fallback_poll_seconds=int(_float_env("TRON_FALLBACK_POLL_SECONDS", 30, 3)),
         tronscan_api_url=os.getenv(
             "TRONSCAN_API_URL", "https://apilist.tronscanapi.com"
         ).strip().rstrip("/"),

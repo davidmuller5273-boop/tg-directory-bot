@@ -489,6 +489,7 @@ class ChainTest(unittest.TestCase):
                 address, True, Decimal("1"), Decimal("1200")
             )
             chain.tron_monitor_transactions.return_value = (outside_tx, inside_tx)
+            context.application.bot_data.pop("tron_poll_schedule", None)  # next reconciliation pass due
             asyncio.run(poll_tron_monitors(context))
             bot.send_message.assert_awaited_once()
             self.assertIn("高于 1000", bot.send_message.await_args.args[1])
@@ -531,6 +532,7 @@ class ChainTest(unittest.TestCase):
             )
             sent = SimpleNamespace(chat_id=7, message_id=99)
             bot.send_message.return_value = sent
+            context.application.bot_data.pop("tron_poll_schedule", None)  # next reconciliation pass due
             asyncio.run(poll_tron_monitors(context))
             bot.send_message.assert_awaited_once()
             self.assertIn("TRX，已低于 10", bot.send_message.await_args.args[1])

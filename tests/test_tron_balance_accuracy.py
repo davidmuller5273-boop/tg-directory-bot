@@ -325,7 +325,8 @@ class BlockNumberTest(unittest.TestCase):
         self.assertEqual(result.block_number, 76543210)
         wallet_calls = [c for c in client.calls
                         if c[1].endswith("/wallet/gettransactioninfobyid")]
-        self.assertEqual(len(wallet_calls), 3)
+        # 2 rounds over TronGrid + every public fallback node
+        self.assertEqual(len(wallet_calls), 2 * len(chain._node_bases()))
 
     def test_block_number_from_full_node(self):
         tx = TronTransaction("abc", 1, "转出", "USDT", Decimal("1"), ADDR_B)

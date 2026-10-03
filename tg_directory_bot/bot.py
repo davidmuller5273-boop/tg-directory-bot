@@ -7,7 +7,9 @@ import json
 import logging
 import math
 import re
+import random
 import secrets
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -61,6 +63,8 @@ from .lottery import (
 from .storage import DirectoryStore, Entry, format_points, normalize_points
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
 from . import settings_wizard, sticker_clone
+from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
+from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
     beijing_now, beijing_now_text,
     format_beijing_time,
@@ -3176,12 +3180,47 @@ def group_poll_delete_view(
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
+def _tron_monitor_lock(context: ContextTypes.DEFAULT_TYPE, monitor_id: int) -> asyncio.Lock:
+    locks = context.application.bot_data.setdefault("tron_monitor_locks", {})
+    lock = locks.get(monitor_id)
+    if lock is None:
+        lock = locks[monitor_id] = asyncio.Lock()
+    return lock
+
+
 async def poll_one_tron_monitor(
     context: ContextTypes.DEFAULT_TYPE, monitor, semaphore: asyncio.Semaphore,
+    scanned: list[TronTransaction] | None = None, scanned_block: int = 0,
+) -> None:
+    """Process one monitor.
+
+    ``scanned`` = transactions delivered by the block scanner (instant path):
+    no transaction-history request, one fresh verified balance. Without it
+    this is the slow reconciliation pass (balance + incremental history).
+    """
+    store: DirectoryStore = context.application.bot_data["store"]
+    monitor_id = int(monitor["id"])
+    async with semaphore, _tron_monitor_lock(context, monitor_id):
+        reloaded = getattr(store, "tron_monitor_by_id", None)
+        if callable(reloaded):
+            try:
+                latest_row = reloaded(monitor_id)
+            except Exception:
+                latest_row = None
+            if latest_row is not None and not isinstance(latest_row, (bool, int, str)):
+                if not int(latest_row["is_enabled"] or 0):
+                    return
+                monitor = latest_row
+        await _poll_one_tron_monitor_locked(context, monitor, scanned, scanned_block)
+
+
+async def _poll_one_tron_monitor_locked(
+    context: ContextTypes.DEFAULT_TYPE, monitor,
+    scanned: list[TronTransaction] | None, scanned_block: int,
 ) -> None:
     store: DirectoryStore = context.application.bot_data["store"]
     chain: ChainService = context.application.bot_data["chain"]
-    async with semaphore:
+    if True:
         monitor_id = int(monitor["id"])
         poll_started = datetime.now(timezone.utc)
         checked_at = poll_started.strftime("%Y-%m-%d %H:%M:%S")
@@ -3204,10 +3243,27 @@ async def poll_one_tron_monitor(
             scan_from_ms = max(started_ms, watermark_ms - 5 * 60 * 1000)
             cursor_block = int(monitor["cursor_block"] or 0)
             monitor_state = str(monitor["monitor_state"] or "bootstrapping")
-            result, transaction_rows = await asyncio.gather(
-                chain.tron_monitor_balance(address),
-                chain.tron_monitor_transactions(address, monitored_assets, scan_from_ms),
-            )
+            pre_verified: TronBalance | None = None
+            if scanned is not None:
+                transaction_rows = tuple(scanned)
+                try:
+                    result = await chain.tron_verified_balance(
+                        address, min_block=scanned_block,
+                    )
+                    if result.address == address:
+                        pre_verified = result
+                except ChainQueryError:
+                    result = None
+                if pre_verified is None:
+                    try:
+                        result = await chain.tron_monitor_balance(address)
+                    except ChainQueryError:
+                        result = None
+            else:
+                result, transaction_rows = await asyncio.gather(
+                    chain.tron_monitor_balance(address),
+                    chain.tron_monitor_transactions(address, monitored_assets, scan_from_ms),
+                )
             seen = set(previous_seen)
             matching = [
                 transaction for transaction in transaction_rows
@@ -3222,7 +3278,9 @@ async def poll_one_tron_monitor(
             high = Decimal(str(monitor["high_balance"])) if monitor["high_balance"] else None
             previous_state = str(monitor["alert_state"] or "")
 
-            def evaluate(balance: TronBalance) -> tuple[dict, str, list[str]]:
+            def evaluate(balance: TronBalance | None) -> tuple[dict, str, list[str]]:
+                if balance is None:
+                    return {}, previous_state, []
                 values = {"usdt": balance.usdt, "trx": balance.trx}
                 item_states = {
                     item: (
@@ -3263,8 +3321,16 @@ async def poll_one_tron_monitor(
             # 播报前：补全区块号，并从权威节点重新核实“本监控地址”的实时余额。
             # 绝不使用缓存或其他地址的余额；核实失败时显示「余额获取中/暂不可用」。
             alert_balance: TronBalance | None = None
-            balance_verified = True
-            if transfer_items or threshold_alerts:
+            balance_verified = result is not None
+            if scanned is not None:
+                # 扫块即时路径：余额已在本轮从节点新鲜核实（不再重复请求）
+                if pre_verified is not None:
+                    alert_balance = pre_verified
+                elif transfer_items or threshold_alerts:
+                    balance_verified = False
+                    threshold_alerts = []
+                    state = previous_state
+            elif transfer_items or threshold_alerts:
                 enriched: list[TronTransaction] = []
                 for transaction in transfer_items:
                     try:
@@ -3392,24 +3458,186 @@ async def poll_one_tron_monitor(
                 ),
             )
         except (ValueError, ChainQueryError, InvalidOperation, json.JSONDecodeError, TelegramError) as exc:
+            # 监控游标不前进：限流结束后从旧水位补扫，不会漏单
+            error_text = BUSY_MESSAGE if is_busy_error(exc) else strip_urls(str(exc))
             store.update_tron_monitor_snapshot(
                 monitor_id, str(monitor["last_balance"] or ""), previous_seen,
-                str(monitor["alert_state"] or ""), str(exc), mark_checked=False,
+                str(monitor["alert_state"] or ""), error_text, mark_checked=False,
             )
 
 
+def _tron_scan_db(context: ContextTypes.DEFAULT_TYPE) -> ScanDB | None:
+    return context.application.bot_data.get("tron_scan_db")
+
+
+def _tron_poll_interval(context: ContextTypes.DEFAULT_TYPE) -> float:
+    """Per-monitor interval of the per-address pass.
+
+    Block scanner healthy -> slow reconciliation (TRON_RECONCILE_SECONDS);
+    scanner disabled/stale -> fallback polling (TRON_FALLBACK_POLL_SECONDS).
+    """
+    config = context.application.bot_data.get("config")
+    reconcile = float(getattr(config, "tron_reconcile_seconds", 300) or 300)
+    fallback = float(getattr(config, "tron_fallback_poll_seconds", 30) or 30)
+    db = _tron_scan_db(context)
+    if db is None or not getattr(config, "tron_block_scan", True):
+        return fallback
+    try:
+        return reconcile if db.scanner_healthy() else fallback
+    except Exception:
+        return fallback
+
+
 async def poll_tron_monitors(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Per-address pass: bootstrap new monitors + slow reconciliation.
+
+    Instant alerts come from the block scanner (``sync_tron_scan``); this pass
+    only catches up anything the scanner could not see (outage, skipped
+    blocks), with exponential backoff while the API is busy.
+    """
     store: DirectoryStore = context.application.bot_data["store"]
     monitors = store.active_tron_monitors()
     if not monitors:
         return
-    # Keep address checks queued at moderate concurrency so one busy polling cycle
-    # cannot exhaust the shared provider quota for interactive queries.
+    bot_data = context.application.bot_data
+    schedule: dict[int, float] = bot_data.setdefault("tron_poll_schedule", {})
+    failures: dict[int, int] = bot_data.setdefault("tron_poll_failures", {})
+    interval = _tron_poll_interval(context)
+    config = bot_data.get("config")
+    scanner_mode = interval >= float(getattr(config, "tron_reconcile_seconds", 300) or 300)
+    now = time.monotonic()
+    db = _tron_scan_db(context)
+    if db is not None:
+        try:
+            requested = float(db.get("reconcile_requested", "0") or 0)
+        except (ValueError, sqlite3.Error):
+            requested = 0.0
+        if requested and requested > bot_data.get("tron_reconcile_seen", 0.0):
+            bot_data["tron_reconcile_seen"] = requested
+            schedule.clear()
+    due = []
+    for monitor in monitors:
+        monitor_id = int(monitor["id"])
+        live = str(monitor["monitor_state"] or "") == "live"
+        if monitor_id not in schedule:
+            # spread the first reconciliation of live monitors over the interval
+            schedule[monitor_id] = (
+                now + random.uniform(0, interval) if live and scanner_mode else now
+            )
+        if now >= schedule[monitor_id]:
+            due.append(monitor)
+    if not due:
+        return
     semaphore = asyncio.Semaphore(5)
-    await asyncio.gather(*(
-        poll_one_tron_monitor(context, monitor, semaphore)
-        for monitor in monitors
+    results = await asyncio.gather(*(
+        poll_one_tron_monitor(context, monitor, semaphore) for monitor in due
     ), return_exceptions=True)
+    for monitor, _result in zip(due, results):
+        monitor_id = int(monitor["id"])
+        row = None
+        try:
+            row = store.tron_monitor_by_id(monitor_id)
+        except Exception:
+            row = None
+        error = str(row["last_error"] or "") if row is not None and "last_error" in row.keys() else ""
+        if error and is_busy_error(error):
+            failures[monitor_id] = failures.get(monitor_id, 0) + 1
+            delay = min(600.0, max(interval, 15.0 * (2 ** failures[monitor_id])))
+        else:
+            failures.pop(monitor_id, None)
+            delay = interval
+        schedule[monitor_id] = time.monotonic() + delay * random.uniform(0.9, 1.1)
+
+
+async def scan_tron_blocks(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mother process only: follow the chain head and record matches."""
+    scanner: TronBlockScanner | None = context.application.bot_data.get("tron_scanner")
+    if scanner is None:
+        return
+    try:
+        await scanner.step()
+    except ChainQueryError as exc:
+        logging.info("TRON block scanner waiting: %s", exc)
+    except Exception:
+        logging.exception("TRON block scanner step failed")
+
+
+async def sync_tron_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every process: publish monitored addresses, consume scanner matches."""
+    db = _tron_scan_db(context)
+    if db is None:
+        return
+    bot_data = context.application.bot_data
+    store: DirectoryStore = bot_data["store"]
+    config = bot_data.get("config")
+    process_key = (
+        f"clone-{int(getattr(config, 'clone_id', 0) or 0)}"
+        if getattr(config, "is_clone", False) else "mother"
+    )
+    monitors = store.active_tron_monitors(500)
+    now = time.monotonic()
+    watch: dict[str, str] = {}
+    for monitor in monitors:
+        address = str(monitor["address"])
+        asset = str(monitor["asset"] or "both")
+        previous = watch.get(address)
+        watch[address] = asset if previous in (None, asset) else "both"
+    if watch != bot_data.get("tron_watch_published") or now - bot_data.get(
+        "tron_watch_published_at", 0.0
+    ) >= 30:
+        try:
+            db.publish_watch(process_key, watch)
+            bot_data["tron_watch_published"] = dict(watch)
+            bot_data["tron_watch_published_at"] = now
+        except Exception:
+            logging.exception("Could not publish TRON watch list")
+    cursor = bot_data.get("tron_match_cursor")
+    try:
+        if cursor is None:
+            saved = store.get_settings().get("tron_scan_match_cursor", "")
+            cursor = int(saved) if saved.isdigit() else db.max_match_id()
+            if cursor > db.max_match_id():
+                cursor = db.max_match_id()
+        rows = db.matches_after(cursor, 1000)
+    except Exception:
+        logging.exception("Could not read TRON scanner matches")
+        return
+    if not rows:
+        bot_data["tron_match_cursor"] = cursor
+        return
+    by_address: dict[str, list] = {}
+    for row in rows:
+        by_address.setdefault(str(row["address"]), []).append(row)
+    monitors_by_address: dict[str, list] = {}
+    for monitor in monitors:
+        monitors_by_address.setdefault(str(monitor["address"]), []).append(monitor)
+    semaphore = asyncio.Semaphore(5)
+    jobs = []
+    activity_seen: dict[str, float] = bot_data.setdefault("tron_activity_dispatch", {})
+    for address, matched in by_address.items():
+        transactions = [row_transaction(row) for row in matched]
+        block = max(item.block_number for item in transactions)
+        if all(item.asset == "ACTIVITY" for item in transactions):
+            # 仅手续费类活动（无转账）：最多每 60 秒复核一次余额阈值
+            if now - activity_seen.get(address, 0.0) < 60:
+                continue
+            activity_seen[address] = now
+        for monitor in monitors_by_address.get(address, []):
+            if str(monitor["monitor_state"] or "") != "live":
+                continue  # the reconciliation pass bootstraps it first
+            jobs.append(poll_one_tron_monitor(
+                context, monitor, semaphore, scanned=transactions, scanned_block=block,
+            ))
+    if jobs:
+        await asyncio.gather(*jobs, return_exceptions=True)
+    cursor = max(int(row["id"]) for row in rows)
+    bot_data["tron_match_cursor"] = cursor
+    store.set_setting("tron_scan_match_cursor", str(cursor))
+    if random.random() < 0.01:
+        try:
+            db.prune()
+        except Exception:
+            pass
 
 
 async def process_scheduled_deletions(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12674,6 +12902,42 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logging.exception("Unhandled Telegram update", exc_info=context.error)
 
 
+def setup_tron_monitoring(application: Application, config: Config, chain: ChainService) -> None:
+    """Block scanner in the mother process only; every process (mother and
+    clones) shares the matches file and the cross-process rate limiter."""
+    role = f"clone-{getattr(config, 'clone_id', 0)}" if config.is_clone else "mother"
+    logging.info("TRON network [%s]: %s", role, chain.governor.describe())
+    if not chain.governor.keys:
+        logging.warning(
+            "TRONGRID_API_KEY/TRONGRID_API_KEYS 未配置：TronGrid 无 key 仅约 1 QPS，"
+            "将优先使用公共备用节点"
+        )
+    if not getattr(config, "tron_block_scan", True):
+        logging.info("TRON block scanner disabled (TRON_BLOCK_SCAN=0); per-address polling")
+        return
+    path = shared_scan_db_path(config)
+    if path is None:
+        return
+    try:
+        db = ScanDB(path)
+    except Exception:
+        logging.exception("TRON scan database unavailable: %s", path)
+        return
+    application.bot_data["tron_scan_db"] = db
+    if not config.is_clone:
+        application.bot_data["tron_scanner"] = TronBlockScanner(
+            chain, db, lag=getattr(config, "tron_scan_lag_blocks", 1),
+            max_catchup=getattr(config, "tron_scan_max_catchup_blocks", 1200),
+            use_events=bool(chain.governor.keys),
+        )
+        logging.info(
+            "TRON block scanner enabled (lag=%s blocks, max catch-up=%s blocks, "
+            "USDT source=%s, db=%s)", getattr(config, "tron_scan_lag_blocks", 1),
+            getattr(config, "tron_scan_max_catchup_blocks", 1200),
+            "TronGrid events" if chain.governor.keys else "node receipts", path,
+        )
+
+
 def build_application(config: Config) -> Application:
     store = DirectoryStore(config.db_path)
     store.init()
@@ -12688,9 +12952,11 @@ def build_application(config: Config) -> Application:
         ApplicationBuilder().bot(bot).post_init(post_init)
         .post_shutdown(post_shutdown).build()
     )
+    chain = ChainService(config)
     application.bot_data.update(
-        config=config, store=store, chain=ChainService(config), lottery=LotteryService(config)
+        config=config, store=store, chain=chain, lottery=LotteryService(config)
     )
+    setup_tron_monitoring(application, config, chain)
     if not config.is_clone:
         application.bot_data["clone_manager"] = CloneManager(config, store)
     elif config.mother_db_path and Path(config.mother_db_path).exists():
@@ -12842,6 +13108,14 @@ def build_application(config: Config) -> Application:
     application.job_queue.run_repeating(
         poll_tron_monitors, interval=3, first=3, job_kwargs=single_job
     )
+    if application.bot_data.get("tron_scan_db") is not None:
+        application.job_queue.run_repeating(
+            sync_tron_scan, interval=1, first=2, job_kwargs=single_job
+        )
+    if application.bot_data.get("tron_scanner") is not None:
+        application.job_queue.run_repeating(
+            scan_tron_blocks, interval=1, first=4, job_kwargs=single_job
+        )
     application.job_queue.run_repeating(
         process_scheduled_deletions, interval=60, first=25, job_kwargs=single_job
     )
