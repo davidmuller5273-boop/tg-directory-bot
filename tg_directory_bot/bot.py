@@ -1028,6 +1028,8 @@ def points_status_text(
     draw = "关闭"
     if config["draw_enabled"]:
         draw = f"开启，每次 {format_points(config['draw_cost'])} 积分"
+        if int(config["draw_min_activity"] or 0) > 0:
+            draw += f"，今日发言满 {int(config['draw_min_activity'])} 条可参与"
     dice = "开启" if config["dice_enabled"] else "关闭"
     odds = int(config["dice_odds"] or 2000)
     odds = min(2000, max(1700, odds))
@@ -7178,6 +7180,16 @@ async def commit_group_menu_input(
                 minimum = parse_points_amount(text)
                 store.set_dice_min_bet(chat_id, minimum, user.id)
                 result = f"骰子每次最低参与积分已设为 {format_points(minimum)}。"
+            elif action == "drawmsgmin":
+                try:
+                    count = int(text.strip())
+                except ValueError as exc:
+                    raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
+                store.set_point_draw_min_activity(chat_id, count, user.id)
+                result = (
+                    f"积分抽奖最低当日活跃已设为 {count} 条。"
+                    if count else "积分抽奖最低当日活跃已关闭（不限）。"
+                )
             elif action in {"dicemsgmin", "dicemsgfree"}:
                 try:
                     count = int(text.strip())
@@ -7215,7 +7227,7 @@ async def commit_group_menu_input(
                 )
             else:
                 raise ValueError("未知积分设置")
-            if action in {"drawconfig", "drawmincost", "drawrate"}:
+            if action in {"drawconfig", "drawmincost", "drawrate", "drawmsgmin"}:
                 settings_text, markup = point_draw_settings_view(store, chat_id)
                 result += "\n\n" + settings_text
             elif action not in {"drawcost", "memberledger", "membergames"}:
@@ -8114,6 +8126,8 @@ def point_draw_view(
             f"本次消耗：{format_points(draw_cost)} 积分"
             f"（最低 {format_points(minimum_cost)}）"
         )
+        if int(config["draw_min_activity"] or 0) > 0:
+            lines.append(f"参与条件：今日发言满 {int(config['draw_min_activity'])} 条")
         lines.append("")
         for row in rows:
             stock = "不限量" if int(row["stock"]) < 0 else f"剩余{row['stock']}"
@@ -8134,6 +8148,11 @@ def point_draw_view(
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
+def draw_min_activity_label(config) -> str:
+    value = int(config["draw_min_activity"] or 0)
+    return f"今日发言满 {value} 条才能参与" if value > 0 else "不限"
+
+
 def point_draw_settings_view(
     store: DirectoryStore, chat_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -8144,7 +8163,8 @@ def point_draw_settings_view(
         "⚙️ 积分抽奖设置\n\n"
         f"状态：{'✅ 开启' if enabled else '❌ 关闭'}\n"
         f"每次最低消耗：{format_points(config['draw_cost'])} 积分\n"
-        f"中奖概率倍率：{multiplier:g}（范围 0-5）\n\n"
+        f"中奖概率倍率：{multiplier:g}（范围 0-5）\n"
+        f"最低当日活跃：{draw_min_activity_label(config)}\n\n"
         "中奖率按本次消耗积分、礼品所需积分和倍率自动计算；"
         "群员抽奖页面不显示倍率。"
     )
@@ -8158,6 +8178,9 @@ def point_draw_settings_view(
         )],
         [InlineKeyboardButton(
             f"⚙️ 设置中奖倍率 {multiplier:g}", callback_data="points:set:drawrate"
+        )],
+        [InlineKeyboardButton(
+            "📝 设置最低当日活跃", callback_data="points:set:drawmsgmin"
         )],
         [InlineKeyboardButton("⬅️ 返回积分中心", callback_data="group:points")],
     ]
@@ -11682,7 +11705,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("只有群管理员可以设置积分。", show_alert=True)
             return
         action = data.rsplit(":", 1)[-1]
-        if action in {"drawconfig", "drawtoggle", "drawmincost", "drawrate"} and not has_group_permission(
+        if action in {"drawconfig", "drawtoggle", "drawmincost", "drawrate", "drawmsgmin"} and not has_group_permission(
             context, target_group_id, user_id, "points"
         ):
             await query.answer("你没有积分抽奖设置权限。", show_alert=True)
@@ -11704,6 +11727,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "memberledger": "请发送要查询账单的 @用户名或数字ID。",
             "membergames": "请发送 @用户名或数字ID（也可回复对方消息）",
             "drawmincost": "请发送每次抽奖最低消耗积分，范围0.01-1000000（最多两位小数）。",
+            "drawmsgmin": "请设置当日发言满多少条才能参与积分抽奖，0 表示不限。",
             "drawrate": "请发送中奖概率倍率，范围0-5。\n0表示不会中奖，1表示自动换算倍率。",
             "diceodds": "请发送骰子赔率（1.7-2.0，也可写 1700-2000；例如 1.95，押1000中奖反1950）",
             "dicemin": "请设置每次玩骰子的最低积分。",

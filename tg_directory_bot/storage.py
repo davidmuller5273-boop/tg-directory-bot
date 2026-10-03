@@ -940,6 +940,10 @@ class DirectoryStore:
                 "REAL NOT NULL DEFAULT 0",
             )
             self._ensure_column(
+                conn, "group_points_config", "draw_min_activity",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
                 conn, "group_points_config", "dice_min_activity",
                 "INTEGER NOT NULL DEFAULT 0",
             )
@@ -2303,6 +2307,18 @@ class DirectoryStore:
             ).fetchone()
         return int(row["messages"]) if row else 0
 
+    def set_point_draw_min_activity(self, chat_id: int, value: int, updated_by: int) -> None:
+        """积分抽奖最低当日活跃条数；0 表示不限。"""
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000:
+            raise ValueError("条数范围为0-100000（0 表示不限）")
+        self.points_config(chat_id)
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE group_points_config SET draw_min_activity=?, updated_by=?,
+                   updated_at=CURRENT_TIMESTAMP WHERE chat_id=?""",
+                (value, updated_by, chat_id),
+            )
+
     def set_dice_activity_rule(
         self, chat_id: int, kind: str, value: int, updated_by: int,
     ) -> None:
@@ -3038,6 +3054,13 @@ class DirectoryStore:
             raise ValueError("本群积分功能尚未开启")
         if not config["draw_enabled"]:
             raise ValueError("本群积分抽奖尚未开启")
+        min_activity = int(config["draw_min_activity"] or 0)
+        if min_activity > 0:
+            current = self.user_today_messages(chat_id, user_id)
+            if current < min_activity:
+                raise ValueError(
+                    f"今日发言满 {min_activity} 条才能参与积分抽奖（当前 {current} 条）"
+                )
         with self.connect() as conn:
             gift = conn.execute(
                 """SELECT * FROM point_gifts WHERE chat_id=? AND id=?
