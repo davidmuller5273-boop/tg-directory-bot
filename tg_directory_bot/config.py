@@ -41,6 +41,8 @@ class Config:
     tron_scan_max_catchup_blocks: int = 1200
     tron_reconcile_seconds: int = 300
     tron_fallback_poll_seconds: int = 30
+    tron_reconcile_qps: float = 0.5
+    tron_fallback_qps: float = 2.0
     tronscan_api_url: str = "https://apilist.tronscanapi.com"
     tronscan_api_key: str = ""
     oklink_api_key: str = ""
@@ -182,6 +184,8 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         tron_scan_max_catchup_blocks=int(_float_env("TRON_SCAN_MAX_CATCHUP_BLOCKS", 1200, 20)),
         tron_reconcile_seconds=int(_float_env("TRON_RECONCILE_SECONDS", 300, 30)),
         tron_fallback_poll_seconds=int(_float_env("TRON_FALLBACK_POLL_SECONDS", 30, 3)),
+        tron_reconcile_qps=_float_env("TRON_RECONCILE_QPS", 0.5, 0.01),
+        tron_fallback_qps=_float_env("TRON_FALLBACK_QPS", 2.0, 0.01),
         tronscan_api_url=os.getenv(
             "TRONSCAN_API_URL", "https://apilist.tronscanapi.com"
         ).strip().rstrip("/"),

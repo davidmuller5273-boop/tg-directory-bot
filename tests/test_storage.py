@@ -51,9 +51,8 @@ class StorageTest(unittest.TestCase):
                 store.upsert_tron_monitor(
                     88, f"Tsecond{index}", "usdt", seen_tx_ids=[]
                 )
-            with self.assertRaisesRegex(ValueError, "最多只能监控5个地址"):
-                store.upsert_tron_monitor(77, "Tsixth", "trx", seen_tx_ids=[])
-            self.assertFalse(store.can_add_tron_monitor(77, "Tsixth"))
+            # 监控地址数量不再限制
+            self.assertTrue(store.can_add_tron_monitor(77, "Tsixth"))
             self.assertTrue(store.can_add_tron_monitor(77, "Taddress0"))
             self.assertEqual(
                 store.tron_monitor_stats(), {"addresses": 7, "users": 2}

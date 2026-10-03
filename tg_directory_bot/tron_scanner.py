@@ -289,6 +289,18 @@ class ScanDB:
             for address, parts in merged.items()
         }
 
+    def watch_count(self, exclude: str = "", max_age: float = 180.0) -> int:
+        """Addresses watched by the other live bot processes."""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM watch WHERE updated_at >= ? AND process_key <> ?",
+                (time.time() - max_age, exclude),
+            ).fetchone()
+            return int(row["n"])
+        finally:
+            conn.close()
+
     def add_matches(self, rows: list[tuple[str, TronTransaction]]) -> int:
         if not rows:
             return 0

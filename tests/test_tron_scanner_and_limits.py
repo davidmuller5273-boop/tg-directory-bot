@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from tg_directory_bot.bot import poll_tron_monitors, sync_tron_scan
+from tg_directory_bot.bot import (
+    _tron_poll_interval, poll_tron_monitors, sync_tron_scan, tron_adaptive_interval,
+)
 from tg_directory_bot.chain import (
     ChainQueryError, ChainService, TronBalance, tron_hex_to_base58,
 )
@@ -534,6 +536,91 @@ class ScannerDispatchTest(unittest.TestCase):
             self.assertLessEqual(chain.tron_monitor_transactions.await_count, 1)
             schedule = context.application.bot_data["tron_poll_schedule"]
             self.assertTrue(all(v > time.monotonic() - 1 for v in schedule.values()))
+
+
+class UnlimitedMonitorsTest(unittest.TestCase):
+    def test_no_per_user_or_global_cap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = DirectoryStore(Path(temp) / "db.sqlite3")
+            store.init()
+            for index in range(620):
+                store.upsert_tron_monitor(7 if index < 20 else 1000 + index,
+                                          f"Taddr{index}", "usdt", seen_tx_ids=[])
+            self.assertEqual(len(store.active_tron_monitors()), 620)
+            self.assertEqual(len([r for r in store.active_tron_monitors() if r["owner_id"] == 7]), 20)
+            self.assertTrue(store.can_add_tron_monitor(7, "Tanother"))
+            self.assertEqual(len(store.active_tron_monitors(10)), 10)
+
+    def test_adaptive_interval_formula(self):
+        self.assertEqual(tron_adaptive_interval(5, 300, 0.5), 300)
+        self.assertEqual(tron_adaptive_interval(100, 300, 0.5), 1400)
+        self.assertEqual(tron_adaptive_interval(1000, 300, 0.5), 14000)
+        self.assertEqual(tron_adaptive_interval(100, 30, 2.0), 350)
+        # total request rate never exceeds the budget
+        for count in (1, 50, 500, 5000):
+            interval = tron_adaptive_interval(count, 300, 0.5)
+            self.assertLessEqual(count * 7 / interval, 0.5 + 1e-9)
+
+    def test_interval_counts_monitors_of_all_processes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = ScanDB(Path(temp) / "tron-scan.sqlite3")
+            db.set("heartbeat", time.time())
+            db.publish_watch("clone-1", {f"T{i}": "usdt" for i in range(80)})
+            db.publish_watch("mother", {"Tm": "usdt"})
+            context = SimpleNamespace(application=SimpleNamespace(bot_data={
+                "tron_scan_db": db,
+                "config": SimpleNamespace(is_clone=False, tron_block_scan=True,
+                                          tron_reconcile_seconds=300, tron_reconcile_qps=0.5,
+                                          tron_fallback_poll_seconds=30, tron_fallback_qps=2.0),
+            }))
+            interval, healthy = _tron_poll_interval(context, 20)
+            self.assertTrue(healthy)
+            self.assertEqual(interval, (20 + 80) * 7 / 0.5)
+            db.set("heartbeat", 0)
+            interval, healthy = _tron_poll_interval(context, 20)
+            self.assertFalse(healthy)
+            self.assertEqual(interval, (20 + 80) * 7 / 2.0)
+
+
+class HotAddressBatchTest(unittest.TestCase):
+    def test_hot_address_transfers_batched_with_one_verification(self):
+        from tg_directory_bot.chain import TronTransaction
+        with tempfile.TemporaryDirectory() as temp:
+            store = DirectoryStore(Path(temp) / "db.sqlite3")
+            store.init()
+            store.upsert_tron_monitor(7, USDT_TO, "usdt", "", "", "", ["old"], 7, True)
+            db = ScanDB(Path(temp) / "tron-scan.sqlite3")
+            chain = SimpleNamespace(
+                tron_monitor_balance=AsyncMock(), tron_monitor_transactions=AsyncMock(),
+                transaction_with_block=AsyncMock(side_effect=lambda t: t),
+                tron_verified_balance=AsyncMock(return_value=TronBalance(
+                    USDT_TO, True, Decimal("5"), Decimal("100"))),
+            )
+            bot = SimpleNamespace(send_message=AsyncMock(
+                return_value=SimpleNamespace(chat_id=7, message_id=1)))
+            bot_data = {"store": store, "chain": chain, "tron_scan_db": db,
+                        "config": SimpleNamespace(is_clone=False, tron_block_scan=True),
+                        "bot_username": "example_bot"}
+            context = SimpleNamespace(bot=bot, application=SimpleNamespace(bot_data=bot_data))
+            asyncio.run(sync_tron_scan(context))
+            now_ms = int(time.time() * 1000)
+
+            def tx(n):
+                return TronTransaction(f"hot{n}", now_ms + n, "转入", "USDT",
+                                       Decimal("1"), USDT_FROM, 100 + n)
+            db.add_matches([(USDT_TO, tx(1))])
+            asyncio.run(sync_tron_scan(context))
+            self.assertEqual(chain.tron_verified_balance.await_count, 1)
+            db.add_matches([(USDT_TO, tx(2)), (USDT_TO, tx(3))])
+            asyncio.run(sync_tron_scan(context))  # within 6 s: deferred, not lost
+            self.assertEqual(chain.tron_verified_balance.await_count, 1)
+            self.assertEqual(len(bot_data["tron_pending_matches"][USDT_TO]), 2)
+            bot_data["tron_address_dispatch"][USDT_TO] -= 10
+            asyncio.run(sync_tron_scan(context))
+            self.assertEqual(chain.tron_verified_balance.await_count, 2)
+            self.assertEqual(chain.tron_verified_balance.await_args.kwargs["min_block"], 103)
+            self.assertEqual(bot.send_message.await_count, 3)
+            self.assertNotIn(USDT_TO, bot_data["tron_pending_matches"])
 
 
 if __name__ == "__main__":

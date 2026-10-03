@@ -3174,14 +3174,8 @@ class DirectoryStore:
         if monitor_state not in {"bootstrapping", "live"}:
             raise ValueError("监控状态无效")
         seen = json.dumps((seen_tx_ids or [])[:1000], ensure_ascii=True)
+        # 不限制每个用户的监控地址数量（扫块监控的请求量与地址数量无关）
         with self.connect() as conn:
-            active_other_addresses = int(conn.execute(
-                """SELECT COUNT(DISTINCT address) FROM tron_monitors
-                   WHERE owner_id=? AND is_enabled=1 AND address<>?""",
-                (owner_id, address[:128]),
-            ).fetchone()[0])
-            if active_other_addresses >= 5:
-                raise ValueError("每个用户最多只能监控5个地址")
             conn.execute(
                 """INSERT INTO tron_monitors
                    (owner_id, address, asset, low_balance, high_balance,
@@ -3223,13 +3217,14 @@ class DirectoryStore:
             ).fetchone()
             return int(row["id"])
 
-    def active_tron_monitors(self, limit: int = 200) -> list[sqlite3.Row]:
+    def active_tron_monitors(self, limit: int | None = None) -> list[sqlite3.Row]:
+        """All enabled monitors (no global cap; ``limit`` only for paging)."""
+        sql = """SELECT * FROM tron_monitors WHERE is_enabled=1
+                 ORDER BY last_checked_at ASC, id ASC"""
         with self.connect() as conn:
-            return conn.execute(
-                """SELECT * FROM tron_monitors WHERE is_enabled=1
-                   ORDER BY last_checked_at ASC, id ASC LIMIT ?""",
-                (max(1, min(limit, 500)),),
-            ).fetchall()
+            if limit is None or int(limit) <= 0:
+                return conn.execute(sql).fetchall()
+            return conn.execute(sql + " LIMIT ?", (int(limit),)).fetchall()
 
     def tron_monitor_by_id(self, monitor_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
@@ -3316,13 +3311,8 @@ class DirectoryStore:
     def can_add_tron_monitor(
         self, owner_id: int, address: str,
     ) -> bool:
-        with self.connect() as conn:
-            active_other_addresses = int(conn.execute(
-                """SELECT COUNT(DISTINCT address) FROM tron_monitors
-                   WHERE owner_id=? AND is_enabled=1 AND address<>?""",
-                (owner_id, address[:128]),
-            ).fetchone()[0])
-        return active_other_addresses < 5
+        """Kept for compatibility: monitor count is no longer limited."""
+        return True
 
     def tron_monitor_stats(self) -> dict[str, int]:
         with self.connect() as conn:

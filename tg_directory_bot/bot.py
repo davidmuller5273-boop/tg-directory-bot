@@ -2583,22 +2583,20 @@ async def tron_monitor_asset_prompt(
             ),
             timeout=25,
         )
-        blocked = count > 10_000
-        count_text = "超过 10,000" if blocked else f"{count:,}"
+        high_volume = count > 10_000
+        count_text = "超过 10,000" if high_volume else f"{count:,}"
+        context.user_data["tron_monitor_recent_count"] = count
     except (TimeoutError, ValueError, ChainQueryError):
-        blocked = False
+        high_volume = False
         count_text = "暂时无法统计"
-    context.user_data["tron_monitor_volume_blocked"] = blocked
-    if blocked:
-        return (
-            "📡 <b>无法启动监控</b>\n\n"
-            f"地址：<code>{html.escape(address)}</code>\n"
-            f"近一年交易次数：<b>{count_text}</b>\n\n"
-            "该地址疑似为交易所钱包或热钱包，转账数据过大无法监控。"
-        )
+        context.user_data.pop("tron_monitor_recent_count", None)
+    # 扫块监控：交易量大的地址（交易所/热钱包）也可以监控，不再拦截
+    context.user_data["tron_monitor_volume_blocked"] = False
     extra = (
         "交易次数暂时无法统计，仍可开启监控。\n\n"
-        if count_text == "暂时无法统计" else ""
+        if count_text == "暂时无法统计" else
+        "该地址交易频繁（疑似交易所或热钱包），播报会比较密集。\n\n"
+        if high_volume else ""
     )
     return (
         "📡 <b>选择监控币种</b>\n\n"
@@ -3191,6 +3189,7 @@ def _tron_monitor_lock(context: ContextTypes.DEFAULT_TYPE, monitor_id: int) -> a
 async def poll_one_tron_monitor(
     context: ContextTypes.DEFAULT_TYPE, monitor, semaphore: asyncio.Semaphore,
     scanned: list[TronTransaction] | None = None, scanned_block: int = 0,
+    scanner_active: bool = False,
 ) -> None:
     """Process one monitor.
 
@@ -3211,12 +3210,15 @@ async def poll_one_tron_monitor(
                 if not int(latest_row["is_enabled"] or 0):
                     return
                 monitor = latest_row
-        await _poll_one_tron_monitor_locked(context, monitor, scanned, scanned_block)
+        await _poll_one_tron_monitor_locked(
+            context, monitor, scanned, scanned_block, scanner_active,
+        )
 
 
 async def _poll_one_tron_monitor_locked(
     context: ContextTypes.DEFAULT_TYPE, monitor,
     scanned: list[TronTransaction] | None, scanned_block: int,
+    scanner_active: bool = False,
 ) -> None:
     store: DirectoryStore = context.application.bot_data["store"]
     chain: ChainService = context.application.bot_data["chain"]
@@ -3312,6 +3314,9 @@ async def _poll_one_tron_monitor_locked(
             balances, state, threshold_alerts = evaluate(result)
             minimum_transfer = Decimal(str(monitor["min_transfer_amount"] or "0.1"))
             transfer_items: list[TronTransaction] = []
+            if scanned is None and scanner_active and len(matching) >= 150:
+                # 高频地址：实时播报由扫块负责；对账页数据不完整，只确认不重复播报
+                fresh = []
             if monitor_state == "live" and fresh and bool(monitor["notify_transfers"]):
                 transfer_items = [
                     transaction
@@ -3466,26 +3471,64 @@ async def _poll_one_tron_monitor_locked(
             )
 
 
+TRON_HOT_ADDRESS_SECONDS = 6.0
+
+
 def _tron_scan_db(context: ContextTypes.DEFAULT_TYPE) -> ScanDB | None:
     return context.application.bot_data.get("tron_scan_db")
 
 
-def _tron_poll_interval(context: ContextTypes.DEFAULT_TYPE) -> float:
-    """Per-monitor interval of the per-address pass.
+TRON_RECONCILE_REQUESTS_PER_MONITOR = 7  # 1 balance + 2 TronGrid history + 4 TronScan
 
-    Block scanner healthy -> slow reconciliation (TRON_RECONCILE_SECONDS);
-    scanner disabled/stale -> fallback polling (TRON_FALLBACK_POLL_SECONDS).
+
+def tron_adaptive_interval(
+    monitor_count: int, base_seconds: float, budget_qps: float,
+) -> float:
+    """Per-monitor interval so the whole per-address pass stays within budget.
+
+    interval = max(base_seconds, monitors × 7 requests / budget_qps)
+    e.g. budget 0.5 QPS: 20 monitors -> 300 s, 100 -> 1400 s, 1000 -> 14000 s.
+    """
+    budget = max(0.01, float(budget_qps or 0.5))
+    return max(
+        float(base_seconds),
+        max(0, int(monitor_count)) * TRON_RECONCILE_REQUESTS_PER_MONITOR / budget,
+    )
+
+
+def _tron_poll_interval(
+    context: ContextTypes.DEFAULT_TYPE, monitor_count: int = 0,
+) -> tuple[float, bool]:
+    """(per-monitor interval, scanner healthy) of the per-address pass.
+
+    Scanner healthy -> reconciliation: max(TRON_RECONCILE_SECONDS, N×7/TRON_RECONCILE_QPS)
+    Scanner stale/disabled -> fallback: max(TRON_FALLBACK_POLL_SECONDS, N×7/TRON_FALLBACK_QPS)
+    N = monitors of this process + addresses watched by the other bot
+    processes (the rate budget is shared by mother + clones).
     """
     config = context.application.bot_data.get("config")
     reconcile = float(getattr(config, "tron_reconcile_seconds", 300) or 300)
     fallback = float(getattr(config, "tron_fallback_poll_seconds", 30) or 30)
+    reconcile_qps = float(getattr(config, "tron_reconcile_qps", 0.5) or 0.5)
+    fallback_qps = float(getattr(config, "tron_fallback_qps", 2.0) or 2.0)
     db = _tron_scan_db(context)
-    if db is None or not getattr(config, "tron_block_scan", True):
-        return fallback
-    try:
-        return reconcile if db.scanner_healthy() else fallback
-    except Exception:
-        return fallback
+    total = int(monitor_count)
+    healthy = False
+    if db is not None and getattr(config, "tron_block_scan", True):
+        try:
+            healthy = db.scanner_healthy()
+            total += db.watch_count(exclude=_tron_process_key(config))
+        except Exception:
+            healthy = False
+    if healthy:
+        return tron_adaptive_interval(total, reconcile, reconcile_qps), True
+    return tron_adaptive_interval(total, fallback, fallback_qps), False
+
+
+def _tron_process_key(config) -> str:
+    if getattr(config, "is_clone", False):
+        return f"clone-{int(getattr(config, 'clone_id', 0) or 0)}"
+    return "mother"
 
 
 async def poll_tron_monitors(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3502,9 +3545,8 @@ async def poll_tron_monitors(context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = context.application.bot_data
     schedule: dict[int, float] = bot_data.setdefault("tron_poll_schedule", {})
     failures: dict[int, int] = bot_data.setdefault("tron_poll_failures", {})
-    interval = _tron_poll_interval(context)
-    config = bot_data.get("config")
-    scanner_mode = interval >= float(getattr(config, "tron_reconcile_seconds", 300) or 300)
+    interval, scanner_mode = _tron_poll_interval(context, len(monitors))
+    bot_data["tron_poll_interval"] = interval
     now = time.monotonic()
     db = _tron_scan_db(context)
     if db is not None:
@@ -3530,7 +3572,8 @@ async def poll_tron_monitors(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     semaphore = asyncio.Semaphore(5)
     results = await asyncio.gather(*(
-        poll_one_tron_monitor(context, monitor, semaphore) for monitor in due
+        poll_one_tron_monitor(context, monitor, semaphore, scanner_active=scanner_mode)
+        for monitor in due
     ), return_exceptions=True)
     for monitor, _result in zip(due, results):
         monitor_id = int(monitor["id"])
@@ -3570,11 +3613,8 @@ async def sync_tron_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = context.application.bot_data
     store: DirectoryStore = bot_data["store"]
     config = bot_data.get("config")
-    process_key = (
-        f"clone-{int(getattr(config, 'clone_id', 0) or 0)}"
-        if getattr(config, "is_clone", False) else "mother"
-    )
-    monitors = store.active_tron_monitors(500)
+    process_key = _tron_process_key(config)
+    monitors = store.active_tron_monitors()
     now = time.monotonic()
     watch: dict[str, str] = {}
     for monitor in monitors:
@@ -3602,37 +3642,62 @@ async def sync_tron_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logging.exception("Could not read TRON scanner matches")
         return
-    if not rows:
-        bot_data["tron_match_cursor"] = cursor
-        return
-    by_address: dict[str, list] = {}
+    pending: dict[str, list[TronTransaction]] = bot_data.setdefault("tron_pending_matches", {})
+    pending_activity: dict[str, int] = bot_data.setdefault("tron_pending_activity", {})
     for row in rows:
-        by_address.setdefault(str(row["address"]), []).append(row)
+        transaction = row_transaction(row)
+        address = str(row["address"])
+        if transaction.asset == "ACTIVITY":
+            pending_activity[address] = max(
+                pending_activity.get(address, 0), transaction.block_number,
+            )
+        else:
+            pending.setdefault(address, []).append(transaction)
+    if rows:
+        cursor = max(int(row["id"]) for row in rows)
+        store.set_setting("tron_scan_match_cursor", str(cursor))
+    bot_data["tron_match_cursor"] = cursor
+    if not pending and not pending_activity:
+        return
     monitors_by_address: dict[str, list] = {}
     for monitor in monitors:
         monitors_by_address.setdefault(str(monitor["address"]), []).append(monitor)
+    last_dispatch: dict[str, float] = bot_data.setdefault("tron_address_dispatch", {})
+    activity_seen: dict[str, float] = bot_data.setdefault("tron_activity_dispatch", {})
     semaphore = asyncio.Semaphore(5)
     jobs = []
-    activity_seen: dict[str, float] = bot_data.setdefault("tron_activity_dispatch", {})
-    for address, matched in by_address.items():
-        transactions = [row_transaction(row) for row in matched]
-        block = max(item.block_number for item in transactions)
-        if all(item.asset == "ACTIVITY" for item in transactions):
-            # 仅手续费类活动（无转账）：最多每 60 秒复核一次余额阈值
-            if now - activity_seen.get(address, 0.0) < 60:
+    for address in set(pending) | set(pending_activity):
+        if address not in monitors_by_address:
+            pending.pop(address, None)
+            pending_activity.pop(address, None)
+            continue
+        transfers = pending.get(address) or []
+        if transfers:
+            # 同一地址最多每 TRON_HOT_ADDRESS_SECONDS 秒核实一次余额：高频地址的
+            # 多笔转账合并为一批播报，避免为每个区块都请求余额
+            if now - last_dispatch.get(address, -1e9) < TRON_HOT_ADDRESS_SECONDS:
                 continue
+            transactions = pending.pop(address)
+            pending_activity.pop(address, None)
+            last_dispatch[address] = now
+        else:
+            # 仅手续费类活动（无转账）：最多每 60 秒复核一次余额阈值
+            if now - activity_seen.get(address, -1e9) < 60:
+                continue
+            transactions = []
             activity_seen[address] = now
-        for monitor in monitors_by_address.get(address, []):
+        block = max(
+            [item.block_number for item in transactions]
+            + [pending_activity.pop(address, 0)]
+        )
+        for monitor in monitors_by_address[address]:
             if str(monitor["monitor_state"] or "") != "live":
                 continue  # the reconciliation pass bootstraps it first
             jobs.append(poll_one_tron_monitor(
-                context, monitor, semaphore, scanned=transactions, scanned_block=block,
+                context, monitor, semaphore, scanned=list(transactions), scanned_block=block,
             ))
     if jobs:
         await asyncio.gather(*jobs, return_exceptions=True)
-    cursor = max(int(row["id"]) for row in rows)
-    bot_data["tron_match_cursor"] = cursor
-    store.set_setting("tron_scan_match_cursor", str(cursor))
     if random.random() < 0.01:
         try:
             db.prune()
@@ -11171,12 +11236,6 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if asset not in {"trx", "usdt", "both"} or not context.user_data.get("tron_monitor_address"):
             await query.answer("监控设置已过期，请重新添加。", show_alert=True)
             return
-        if context.user_data.get("tron_monitor_volume_blocked"):
-            await query.answer(
-                "该地址近一年交易超过10,000笔或暂时无法校验，无法启动监控。",
-                show_alert=True,
-            )
-            return
         context.user_data["tron_monitor_asset"] = asset
         context.user_data["tron_monitor_low"] = ""
         context.user_data["tron_monitor_high"] = ""
@@ -11221,28 +11280,12 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not notify and not low and not high:
             await query.answer("至少开启一种播报条件。", show_alert=True)
             return
-        if not store.can_add_tron_monitor(user_id, address):
-            await query.answer("每个用户最多只能监控5个地址。", show_alert=True)
-            return
         await query.answer("正在保存监控…")
         try:
             chain = context.application.bot_data["chain"]
-            try:
-                recent_count = await asyncio.wait_for(
-                    chain.tron_transaction_count(address, "both", 365, 10_000),
-                    timeout=25,
-                )
-            except (TimeoutError, ChainQueryError):
-                recent_count = None
-            if recent_count is not None and recent_count > 10_000:
-                await query.edit_message_text(
-                    "📡 无法启动监控\n\n"
-                    f"地址：<code>{html.escape(address)}</code>\n"
-                    "近一年交易次数：<b>超过 10,000</b>\n\n"
-                    "该地址疑似为交易所钱包或热钱包，转账数据过大无法监控。",
-                    parse_mode=ParseMode.HTML,
-                )
-                return
+            # 交易次数只用于展示（选择币种时已统计过，不再重复请求，也不拦截）
+            cached_count = context.user_data.get("tron_monitor_recent_count")
+            recent_count = int(cached_count) if isinstance(cached_count, int) else None
             monitored_assets = ("usdt", "trx") if asset == "both" else (asset,)
             snapshot, latest_rows = await asyncio.gather(
                 chain.tron_monitor_balance(address),
@@ -11289,7 +11332,10 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 exc = ChainQueryError("近一年交易量校验超时，请稍后重试")
             await query.edit_message_text(f"地址初始化失败：{exc}")
             return
-        recent_count_text = "暂时无法统计" if recent_count is None else f"{recent_count:,}"
+        recent_count_text = (
+            "暂时无法统计" if recent_count is None
+            else "超过 10,000" if recent_count > 10_000 else f"{recent_count:,}"
+        )
         for key in list(context.user_data):
             if key.startswith("tron_monitor_"):
                 context.user_data.pop(key, None)

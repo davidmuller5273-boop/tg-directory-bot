@@ -652,7 +652,7 @@ class ChainTest(unittest.TestCase):
             address, "both", 365, 10_000
         )
 
-    def test_high_volume_address_cannot_open_monitor_buttons(self):
+    def test_high_volume_address_can_still_be_monitored(self):
         address = "TLKamg9Ph2s2E9ZRJyj4bpRZr9VjDwe6mR"
         chain = SimpleNamespace(
             tron_transaction_count=AsyncMock(return_value=10001)
@@ -661,8 +661,11 @@ class ChainTest(unittest.TestCase):
             application=SimpleNamespace(bot_data={"chain": chain}), user_data={}
         )
         text = asyncio.run(tron_monitor_asset_prompt(context, address))
-        self.assertIn("疑似为交易所钱包或热钱包", text)
-        self.assertIsNone(tron_monitor_prompt_keyboard(context))
+        self.assertIn("超过 10,000", text)
+        self.assertIn("疑似交易所或热钱包", text)
+        self.assertNotIn("无法启动监控", text)
+        self.assertIsNotNone(tron_monitor_prompt_keyboard(context))
+        self.assertFalse(context.user_data["tron_monitor_volume_blocked"])
 
     def test_monitor_prompt_allows_setup_when_count_unavailable(self):
         address = "TLKamg9Ph2s2E9ZRJyj4bpRZr9VjDwe6mR"
