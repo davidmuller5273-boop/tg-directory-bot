@@ -80,7 +80,7 @@ FLOWS = {
     "clone_token": ("申请机器人克隆", [Question("机器人Token", "请发送你自己机器人的Token；不会在确认页面显示。", "secret")]),
     "tron_monitor_address": ("添加地址监控", [Question("波场地址", "请输入以 T 开头的完整地址。")]),
     "points_checkin": ("签到积分", [number("最少奖励积分"), number("最多奖励积分"), number("连续3天额外积分")]),
-    "points_activity": ("随机活跃积分", [number("最少发言条数", "1", integer=True), number("最多发言条数", "1", integer=True), number("最少奖励积分"), number("最多奖励积分")]),
+    "points_activity": ("随机活跃积分", [number("最少有效发言条数", "1", integer=True, hint="请发送整数；按有效发言计，1 分钟内多条只算 1 条。"), number("最多有效发言条数", "1", integer=True, hint="请发送整数；按有效发言计，1 分钟内多条只算 1 条。"), number("最少奖励积分"), number("最多奖励积分")]),
     "points_giftadd": ("添加积分礼品", [number("兑换所需积分", "0.01"), Question("礼品名称"), number("库存", "-1", integer=True, hint="发送库存数量；-1 表示不限量。")]),
     "points_giftdel": ("删除积分礼品", [Question("礼品编号", "发送要删除的编号，例如 #1。", "id")]),
     "points_adjust": ("增减成员积分", [TARGET, number("增减积分", None, hint="增加发送正数，扣除发送负数，例如 -10。"), Question("调整原因")]),

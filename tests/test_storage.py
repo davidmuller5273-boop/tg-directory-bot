@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 
 from tg_directory_bot.storage import DirectoryStore
@@ -654,6 +655,11 @@ class StorageTest(unittest.TestCase):
             )
 
             store.set_activity_points(chat_id, 2, 2, 3, 3, 1)
+            # 活跃奖励按有效发言计（1 分钟内多条只算 1 条）：每条相隔 61 秒
+            ticks = iter(range(1_700_000_000, 1_700_100_000, 61))
+            clock = patch("tg_directory_bot.storage.activity_now", side_effect=lambda: next(ticks))
+            clock.start()
+            self.addCleanup(clock.stop)
             store.record_group_activity(
                 chat_id, "Points", "points", "supergroup",
                 user_id, "alice", "Alice", messages=1,
@@ -672,10 +678,11 @@ class StorageTest(unittest.TestCase):
             self.assertIsNone(
                 store.award_activity_points(chat_id, user_id, "alice", "Alice")
             )
-            store.record_group_activity(
-                chat_id, "Points", "points", "supergroup",
-                user_id, "alice", "Alice", messages=2,
-            )
+            for _ in range(2):
+                store.record_group_activity(
+                    chat_id, "Points", "points", "supergroup",
+                    user_id, "alice", "Alice", messages=1,
+                )
             self.assertEqual(
                 store.award_activity_points(chat_id, user_id, "alice", "Alice"),
                 (3, 23, 2, 4),

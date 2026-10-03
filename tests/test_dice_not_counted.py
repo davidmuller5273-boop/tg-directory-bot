@@ -81,7 +81,7 @@ class DiceNotCountedTest(unittest.TestCase):
         self.assertEqual(self.store.user_today_messages(CHAT, USER), 0)
         message = self.send("你好")
         message.reply_text.assert_awaited_once()
-        self.assertIn("今日已发言 1 条", message.reply_text.await_args.args[0])
+        self.assertIn("今日已有效发言 1 条（1 分钟内多条只算 1 条）", message.reply_text.await_args.args[0])
 
     def test_dice_threshold_uses_count_without_dice_commands(self):
         self.store.set_dice_activity_rule(CHAT, "min", 2, 1)

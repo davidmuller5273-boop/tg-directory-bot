@@ -144,11 +144,91 @@ class ActiveMessageDedupeTest(unittest.TestCase):
         self.assertEqual(store.user_today_active_messages(CHAT, USER), 6)
         self.assertEqual(store.user_today_messages(CHAT, USER), 7)
 
-    def test_activity_reward_still_uses_raw_message_count(self):
+    # ---- 活跃奖励也按有效发言 --------------------------------------------
+
+    def reward_replies(self, seconds):
+        texts = []
+        for second in seconds:
+            reply = self.send(at=second).reply_text
+            texts.extend(str(c.args[0]) for c in reply.await_args_list)
+        return texts
+
+    def test_activity_reward_quick_messages_count_once(self):
         self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
-        replies = [self.send(at=second).reply_text for second in (0, 1, 2)]
+        self.assertEqual(self.reward_replies((0, 10, 20)), [])   # 3 条只算 1 条
         self.assertEqual(self.active(), 1)
-        self.assertTrue(any(r.await_count for r in replies))   # 3 条原始发言即达标
+        self.assertEqual(self.store.user_today_messages(CHAT, USER), 3)  # 原始计数照旧
+        self.assertEqual(self.balance(), 500)
+
+    def test_activity_reward_messages_61s_apart_count(self):
+        self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
+        self.assertEqual(self.reward_replies((0, 61)), [])
+        texts = self.reward_replies((122,))
+        self.assertEqual(len(texts), 1)
+        self.assertIn("🔥 今日已有效发言 3 条（1 分钟内多条只算 1 条），随机奖励 +5 积分", texts[0])
+        self.assertEqual(self.balance(), 505)
+        # 发奖后重新累计：快速连发不算，满 3 条有效发言再奖
+        self.assertEqual(self.reward_replies((130, 140, 183, 244)), [])
+        self.assertEqual(len(self.reward_replies((305,))), 1)
+        self.assertEqual(self.balance(), 510)
+
+    def legacy_row(self, raw, active, baseline, target=3):
+        """模拟升级前已结算过的今日数据：基线是原始发言数（effective_basis=0）。"""
+        with self.store.connect() as conn:
+            conn.execute(
+                """INSERT INTO group_activity_users
+                   (chat_id, user_id, day, messages, active_messages, last_counted_ts)
+                   VALUES (?, ?, DATE('now','+8 hours'), ?, ?, 0)""",
+                (CHAT, USER, raw, active),
+            )
+            conn.execute(
+                """INSERT INTO point_activity_rewards
+                   (chat_id, user_id, day, message_target, points, message_baseline,
+                    reward_count, effective_basis)
+                   VALUES (?, ?, DATE('now','+8 hours'), ?, 5, ?, 1, 0)""",
+                (CHAT, USER, target, baseline),
+            )
+
+    def reward_row(self):
+        with self.store.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM point_activity_rewards WHERE chat_id=? AND user_id=?",
+                (CHAT, USER),
+            ).fetchone()
+
+    def test_no_double_award_at_transition_just_paid(self):
+        # 今天按原始口径在第 10 条时刚发过奖；升级迁移把有效计数设为 10。
+        self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
+        self.legacy_row(raw=10, active=10, baseline=10)
+        self.assertEqual(self.reward_replies((0,)), [])     # 新口径第 1 条进度
+        row = self.reward_row()
+        self.assertEqual((row["effective_basis"], row["message_baseline"]), (1, 10))
+        self.assertEqual(self.balance(), 500)
+        self.assertEqual(self.reward_replies((61,)), [])
+        self.assertEqual(len(self.reward_replies((122,))), 1)   # 满 3 条新有效发言才发
+        self.assertEqual(self.balance(), 505)
+        self.assertEqual(self.reward_row()["points"], 10)       # 已发奖励保留并累加
+
+    def test_no_double_award_when_effective_lags_raw(self):
+        # 升级后旧进程已按新规则累计一段时间：有效 6 < 原始 12，原始基线 12。
+        self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
+        self.legacy_row(raw=12, active=6, baseline=12)
+        self.assertEqual(self.reward_replies((0,)), [])
+        row = self.reward_row()
+        # 进度 = min(原始进度 1, 有效 7) = 1 → 基线换算为 6，不会卡住也不会补发
+        self.assertEqual((row["effective_basis"], row["message_baseline"]), (1, 6))
+        self.assertEqual(self.reward_replies((61,)), [])
+        self.assertEqual(len(self.reward_replies((122,))), 1)
+        self.assertEqual(self.balance(), 505)
+
+    def test_transition_keeps_partial_progress_without_overpaying(self):
+        # 原始口径上次发奖后又发了 2 条（基线 8，原始 10），目标 3。
+        self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
+        self.legacy_row(raw=10, active=10, baseline=8)
+        texts = self.reward_replies((0,))     # 原始进度 3 → 达标发奖一次（原规则下本来也该发）
+        self.assertEqual(len(texts), 1)
+        self.assertEqual(self.balance(), 505)
+        self.assertEqual(self.reward_replies((10, 20, 30)), [])   # 不重复
 
     # ---- 三处门槛都使用有效发言 --------------------------------------------
 

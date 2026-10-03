@@ -1111,6 +1111,12 @@ class DirectoryStore:
                 conn, "point_activity_rewards", "reward_count",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            # message_baseline 的计数口径：0=旧的原始发言数，1=有效发言数（1 分钟内多条只算 1 条）。
+            # 旧行在下次结算时按 award_activity_points 中的规则换算，不重复发奖。
+            self._ensure_column(
+                conn, "point_activity_rewards", "effective_basis",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             self._ensure_column(conn, "group_invite_joins", "left_at", "TEXT")
             self._ensure_column(
                 conn, "group_invite_joins", "points_awarded",
@@ -2325,7 +2331,7 @@ class DirectoryStore:
             conn.execute("DELETE FROM sticker_profiles WHERE user_id=?", (int(user_id),))
 
     def user_today_messages(self, chat_id: int, user_id: int) -> int:
-        """该成员在本群今日（北京时间）的发言条数，与群统计/活跃奖励同一来源。"""
+        """该成员在本群今日（北京时间）的原始发言条数，与群统计同一来源。"""
         with self.connect() as conn:
             row = conn.execute(
                 """SELECT messages FROM group_activity_users
@@ -2336,7 +2342,7 @@ class DirectoryStore:
 
     def user_today_active_messages(self, chat_id: int, user_id: int) -> int:
         """该成员在本群今日（北京时间）的有效发言条数：1 分钟内多条只算 1 条。
-        仅用于骰子/积分抽奖/积分兑换的「最低当日活跃」「免定时活跃」门槛。"""
+        用于活跃奖励，以及骰子/积分抽奖/积分兑换的「最低当日活跃」「免定时活跃」门槛。"""
         with self.connect() as conn:
             row = conn.execute(
                 """SELECT active_messages FROM group_activity_users
@@ -2974,8 +2980,8 @@ class DirectoryStore:
                 )
                 conn.execute(
                     """INSERT INTO point_activity_rewards
-                       (chat_id, user_id, day, message_target)
-                       VALUES (?, ?, DATE('now','+8 hours'), ?)""",
+                       (chat_id, user_id, day, message_target, effective_basis)
+                       VALUES (?, ?, DATE('now','+8 hours'), ?, 1)""",
                     (chat_id, user_id, target),
                 )
                 reward = conn.execute(
@@ -2984,15 +2990,27 @@ class DirectoryStore:
                     (chat_id, user_id),
                 ).fetchone()
             messages = conn.execute(
-                """SELECT messages FROM group_activity_users
+                """SELECT messages, active_messages FROM group_activity_users
                    WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
                 (chat_id, user_id),
             ).fetchone()
-            current_messages = int(messages["messages"]) if messages else 0
-            if (
-                current_messages - int(reward["message_baseline"])
-                < int(reward["message_target"])
-            ):
+            raw_messages = int(messages["messages"]) if messages else 0
+            # 活跃奖励按有效发言计：1 分钟内多条只算 1 条。
+            current_messages = int(messages["active_messages"]) if messages else 0
+            baseline = int(reward["message_baseline"])
+            if not int(reward["effective_basis"]):
+                # 升级过渡：旧行的基线是原始发言数。把“上次发奖后的进度”按
+                # min(原始进度, 当前有效发言) 带到有效口径，基线随之换算；
+                # 已发过的奖励保留；换算后的进度不超过上次发奖后的原始进度，
+                # 已经结算过的那部分发言不会再算一次，因此不会重复发奖。
+                progress = min(max(0, raw_messages - baseline), current_messages)
+                baseline = current_messages - progress
+                conn.execute(
+                    """UPDATE point_activity_rewards SET message_baseline=?, effective_basis=1
+                       WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
+                    (baseline, chat_id, user_id),
+                )
+            if current_messages - baseline < int(reward["message_target"]):
                 return None
             points = self._random_points_between(
                 config["activity_points_min"],

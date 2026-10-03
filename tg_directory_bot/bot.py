@@ -1032,7 +1032,7 @@ def points_status_text(
     if config["activity_enabled"]:
         activity = (
             f"每日随机目标 {config['activity_messages_min']}-"
-            f"{config['activity_messages_max']} 条，奖励 "
+            f"{config['activity_messages_max']} 条有效发言，奖励 "
             f"{format_points(config['activity_points_min'])}-"
             f"{format_points(config['activity_points_max'])} 积分"
         )
@@ -7352,7 +7352,7 @@ async def commit_group_menu_input(
                 store.set_activity_points(
                     chat_id, int(parts[0]), int(parts[1]), pmin, pmax, user.id
                 )
-                result = "每日活跃积分设置成功。"
+                result = "每日活跃积分设置成功（按有效发言计：1 分钟内多条只算 1 条）。"
             elif action == "giftadd":
                 if len(parts) not in {2, 3}:
                     raise ValueError("格式：所需积分 | 礼品名称 | 库存")
@@ -8902,7 +8902,8 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
         if reward:
             points, balance, _, today_messages = reward
             await message.reply_text(
-                f"🔥 今日已发言 {today_messages} 条，随机奖励 +{format_points(points)} 积分\n"
+                f"🔥 今日已有效发言 {today_messages} 条（1 分钟内多条只算 1 条），"
+                f"随机奖励 +{format_points(points)} 积分\n"
                 f"⭐ 当前积分：{format_points(balance)}"
             )
     content = message.text or message.caption or ""
@@ -12020,7 +12021,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         prompts = {
             "checkin": "请发送：签到最小积分 | 签到最大积分 | 连续3天额外积分\n例如：5 | 10 | 3",
-            "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8",
+            "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8\n消息目标按有效发言计：1 分钟内多条只算 1 条。",
             "giftadd": "请发送：所需积分 | 礼品名称 | 库存\n库存填 -1 表示不限量，例如：100 | 会员奖励 | 10",
             "giftdel": "请发送要删除的礼品编号，例如：#1。",
             "redeemmsgmin": "请设置当日有效发言满多少条才能兑换积分礼品，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
