@@ -6,7 +6,8 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telegram.constants import ChatType
 from telegram.error import BadRequest, TelegramError
 
 
@@ -262,7 +263,24 @@ class MessageInput:
         return getattr(self.original_message, name)
 
     async def reply_text(self, *args, **kwargs):
-        kwargs.setdefault("allow_sending_without_reply", True)
+        # PTB auto-quotes replies outside private chats (reply_parameters), and
+        # Bot.send_message rejects allow_sending_without_reply together with
+        # reply_parameters. Passing the flag directly therefore made every
+        # wizard commit in a group fail *after* the setting was already written
+        # ("保存未完成：`allow_sending_without_reply` and `reply_parameters` are
+        # mutually exclusive"). Fold the flag into ReplyParameters instead.
+        allow = kwargs.pop("allow_sending_without_reply", True)
+        if not any(key in kwargs for key in ("reply_parameters", "reply_to_message_id", "do_quote")):
+            original = self.original_message
+            chat = getattr(original, "chat", None)
+            message_id = getattr(original, "message_id", None)
+            if (chat is not None and getattr(chat, "type", None) != ChatType.PRIVATE
+                    and isinstance(message_id, int)):
+                kwargs["reply_parameters"] = ReplyParameters(
+                    message_id=message_id, allow_sending_without_reply=allow,
+                )
+            else:
+                kwargs["do_quote"] = False
         return await self.original_message.reply_text(*args, **kwargs)
 
 
