@@ -72,8 +72,33 @@ class FeatureStoreMixin:
             );
             CREATE INDEX IF NOT EXISTS idx_invite_boost_user
                 ON invite_boost_rewards(chat_id, user_id, removed_at);
+            CREATE TABLE IF NOT EXISTS raffle_win_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                raffle_id INTEGER NOT NULL DEFAULT 0,
+                won_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_raffle_win_log
+                ON raffle_win_log(chat_id, user_id, won_at);
             """
         )
+        if not conn.execute("SELECT 1 FROM raffle_win_log LIMIT 1").fetchone():
+            conn.execute(
+                """INSERT INTO raffle_win_log (chat_id, user_id, raffle_id, won_at)
+                   SELECT r.chat_id, w.user_id, r.id, COALESCE(r.drawn_at, r.ends_at)
+                   FROM raffle_winners w JOIN raffles r ON r.id=w.raffle_id"""
+            )
+
+    def log_raffle_wins(self, conn: sqlite3.Connection, raffle_id: int, user_ids) -> None:
+        row = conn.execute("SELECT chat_id FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        if not row:
+            return
+        conn.executemany(
+            "INSERT INTO raffle_win_log (chat_id, user_id, raffle_id) VALUES (?, ?, ?)",
+            ((int(row["chat_id"]), int(uid), raffle_id) for uid in user_ids),
+        )
+        conn.execute("DELETE FROM raffle_win_log WHERE won_at<DATETIME('now','-400 days')")
 
     # ---- 活跃阶梯奖励 ------------------------------------------------------
 
@@ -359,12 +384,12 @@ class FeatureStoreMixin:
             return result
         with self.connect() as conn:  # type: ignore[attr-defined]
             rows = conn.execute(
-                f"""SELECT w.user_id,
-                          SUM(CASE WHEN r.drawn_at>=DATETIME('now', ?) THEN 1 ELSE 0 END) AS recent,
+                f"""SELECT user_id,
+                          SUM(CASE WHEN won_at>=DATETIME('now', ?) THEN 1 ELSE 0 END) AS recent,
                           COUNT(*) AS total
-                   FROM raffle_winners w JOIN raffles r ON r.id=w.raffle_id
-                   WHERE r.chat_id=? AND w.user_id IN ({','.join('?' * len(user_ids))})
-                   GROUP BY w.user_id""",
+                   FROM raffle_win_log
+                   WHERE chat_id=? AND user_id IN ({','.join('?' * len(user_ids))})
+                   GROUP BY user_id""",
                 (f"-{int(days)} days", chat_id, *[int(uid) for uid in user_ids]),
             ).fetchall()
         for row in rows:

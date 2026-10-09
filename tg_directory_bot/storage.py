@@ -5657,6 +5657,7 @@ class DirectoryStore(FeatureStoreMixin):
                     for position, user_id in enumerate(winner_ids, 1)
                 ),
             )
+            self.log_raffle_wins(conn, raffle_id, winner_ids)
             return True
 
     def cancel_raffle(self, raffle_id: int) -> bool:

@@ -66,7 +66,7 @@ from .storage import (
     normalize_points,
 )
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
-from . import settings_wizard, sticker_clone
+from . import raffle_fair, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
@@ -10310,7 +10310,10 @@ async def draw_raffle(context: ContextTypes.DEFAULT_TYPE, raffle_id: int, reques
             entries, key=lambda row: candidate_order.get(int(row["user_id"]), 10**9)
         )[:winner_total]
     else:
-        winners = secrets.SystemRandom().sample(entries, winner_total) if winner_total else []
+        winners = (
+            raffle_fair.pick_winners(entries, winner_total, store=store, chat_id=int(raffle["chat_id"]))
+            if winner_total else []
+        )
     winner_notes: dict[int, str] = {}
     if winners:
         chat_id = int(raffle["chat_id"])
