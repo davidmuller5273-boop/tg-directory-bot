@@ -655,7 +655,7 @@ class StorageTest(unittest.TestCase):
             )
 
             store.set_activity_points(chat_id, 2, 2, 3, 3, 1)
-            # 活跃奖励按有效发言计（1 分钟内多条只算 1 条）：每条相隔 61 秒
+            # 活跃奖励按有效发言计（1 分钟内最多算 2 条，少于 3 个字不算）：每条相隔 61 秒
             ticks = iter(range(1_700_000_000, 1_700_100_000, 61))
             clock = patch("tg_directory_bot.storage.activity_now", side_effect=lambda: next(ticks))
             clock.start()

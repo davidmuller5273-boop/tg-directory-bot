@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from tg_directory_bot.bot import build_application
+from tg_directory_bot.bot import ALLOWED_UPDATES, build_application
 from tg_directory_bot.config import load_config
 from tg_directory_bot.time_utils import configure_beijing_timezone
 
@@ -23,7 +23,7 @@ def main() -> None:
     config = load_config()
     app = build_application(config)
     app.run_polling(
-        allowed_updates=["message", "callback_query", "inline_query", "chat_member"]
+        allowed_updates=ALLOWED_UPDATES
     )
 
 

@@ -1,5 +1,5 @@
 """最低当日活跃按“有效发言”计：同一成员在同一群、同一天，
-距上一条计入的发言满 60 秒才再计 1 条；骰子口令不算。"""
+滚动 60 秒内最多计 2 条；去掉空白后少于 3 个字不算；骰子口令不算。"""
 import asyncio
 import sqlite3
 import tempfile
@@ -32,7 +32,7 @@ class ActiveMessageDedupeTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def send(self, text="聊天", at=None, chat_id=CHAT):
+    def send(self, text="聊天啦", at=None, chat_id=CHAT):
         if at is not None:
             self.now = 1_700_000_000.0 + at
         message = SimpleNamespace(
@@ -58,10 +58,10 @@ class ActiveMessageDedupeTest(unittest.TestCase):
 
     # ---- 计数规则 --------------------------------------------------------
 
-    def test_messages_within_a_minute_count_once(self):
+    def test_messages_within_a_minute_count_at_most_twice(self):
         for second in (0, 5, 20, 59):
             self.send(at=second)
-        self.assertEqual(self.active(), 1)
+        self.assertEqual(self.active(), 2)
         # 群统计/原始发言数不受影响
         self.assertEqual(self.store.user_today_messages(CHAT, USER), 4)
         with self.store.connect() as conn:
@@ -70,25 +70,31 @@ class ActiveMessageDedupeTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(daily, 4)
 
-    def test_message_at_or_after_sixty_seconds_counts(self):
-        self.send(at=0)
-        self.send(at=59.9)
-        self.assertEqual(self.active(), 1)
-        self.send(at=60)          # 恰好 60 秒
-        self.assertEqual(self.active(), 2)
-        self.send(at=200)         # 超过 60 秒
-        self.assertEqual(self.active(), 3)
-
-    def test_window_starts_from_last_counted_message(self):
+    def test_rolling_window_two_per_minute(self):
         self.send(at=0)           # 计入
-        self.send(at=50)          # 忽略
-        self.send(at=100)         # 距上条消息仅 50 秒，但距上条计入 100 秒 → 计入
+        self.send(at=10)          # 计入（窗口内第 2 条）
+        self.send(at=59)          # 窗口内已有 2 条 → 忽略
         self.assertEqual(self.active(), 2)
-        self.send(at=130)         # 距计入的 100 仅 30 秒 → 忽略
-        self.send(at=159)         # 59 秒 → 忽略
-        self.assertEqual(self.active(), 2)
-        self.send(at=160)         # 60 秒 → 计入
+        self.send(at=60)          # 0 秒那条已滑出窗口 → 计入
         self.assertEqual(self.active(), 3)
+        self.send(at=65)          # 窗口内有 10、60 → 忽略
+        self.assertEqual(self.active(), 3)
+        self.send(at=70)          # 10 秒那条刚好滑出 → 计入
+        self.assertEqual(self.active(), 4)
+
+    def test_short_messages_not_counted(self):
+        for index, text in enumerate(("好", "ok", " a  b ", "👍👍")):
+            self.send(text, at=index * 100)
+        self.assertEqual(self.active(), 0)
+        self.assertEqual(self.store.user_today_messages(CHAT, USER), 4)   # 原始统计照旧
+        self.send("哈哈哈", at=1000)
+        self.send("a b c", at=1100)
+        self.assertEqual(self.active(), 2)
+
+    def test_sticker_or_media_without_caption_not_counted(self):
+        self.send(None, at=0)
+        self.assertEqual(self.active(), 0)
+        self.assertEqual(self.store.user_today_messages(CHAT, USER), 1)
 
     def test_per_group_isolation(self):
         self.send(at=0)
@@ -105,16 +111,17 @@ class ActiveMessageDedupeTest(unittest.TestCase):
                 "UPDATE group_activity_users SET day=DATE('now','+8 hours','-1 day')"
             )
         self.assertEqual(self.active(), 0)
-        self.send(at=110)          # 新的一天第一条立即计入（不受昨天 60 秒窗口影响）
+        self.send(at=110)          # 新的一天第一条立即计入（不受昨天窗口影响）
         self.assertEqual(self.active(), 1)
         self.send(at=120)
-        self.assertEqual(self.active(), 1)
+        self.send(at=125)
+        self.assertEqual(self.active(), 2)
 
     def test_dice_commands_excluded_and_do_not_consume_window(self):
         self.send("大3", at=0)
         self.send("小5", at=70)
         self.assertEqual(self.active(), 0)
-        self.send("你好", at=80)   # 骰子口令不占用窗口，这条立即计入
+        self.send("你好呀", at=80)   # 骰子口令不占用窗口，这条立即计入
         self.assertEqual(self.active(), 1)
         self.send("大3", at=200)
         self.assertEqual(self.active(), 1)
@@ -141,8 +148,9 @@ class ActiveMessageDedupeTest(unittest.TestCase):
         store.init()   # 再次启动不会重复覆盖
         store.record_group_activity(CHAT, "群", "", "supergroup", USER, "u", "U", messages=1)
         store.record_group_activity(CHAT, "群", "", "supergroup", USER, "u", "U", messages=1)
-        self.assertEqual(store.user_today_active_messages(CHAT, USER), 6)
-        self.assertEqual(store.user_today_messages(CHAT, USER), 7)
+        store.record_group_activity(CHAT, "群", "", "supergroup", USER, "u", "U", messages=1)
+        self.assertEqual(store.user_today_active_messages(CHAT, USER), 7)
+        self.assertEqual(store.user_today_messages(CHAT, USER), 8)
 
     # ---- 活跃奖励也按有效发言 --------------------------------------------
 
@@ -153,10 +161,10 @@ class ActiveMessageDedupeTest(unittest.TestCase):
             texts.extend(str(c.args[0]) for c in reply.await_args_list)
         return texts
 
-    def test_activity_reward_quick_messages_count_once(self):
+    def test_activity_reward_quick_messages_count_at_most_twice(self):
         self.store.set_activity_points(CHAT, 3, 3, 5, 5, 1)
-        self.assertEqual(self.reward_replies((0, 10, 20)), [])   # 3 条只算 1 条
-        self.assertEqual(self.active(), 1)
+        self.assertEqual(self.reward_replies((0, 10, 20)), [])   # 3 条只算 2 条
+        self.assertEqual(self.active(), 2)
         self.assertEqual(self.store.user_today_messages(CHAT, USER), 3)  # 原始计数照旧
         self.assertEqual(self.balance(), 500)
 
@@ -165,11 +173,11 @@ class ActiveMessageDedupeTest(unittest.TestCase):
         self.assertEqual(self.reward_replies((0, 61)), [])
         texts = self.reward_replies((122,))
         self.assertEqual(len(texts), 1)
-        self.assertIn("🔥 今日已有效发言 3 条（1 分钟内多条只算 1 条），随机奖励 +5 积分", texts[0])
+        self.assertIn("🔥 今日已有效发言 3 条（1 分钟内最多算 2 条，少于 3 个字不算），随机奖励 +5 积分", texts[0])
         self.assertEqual(self.balance(), 505)
         # 发奖后重新累计：快速连发不算，满 3 条有效发言再奖
-        self.assertEqual(self.reward_replies((130, 140, 183, 244)), [])
-        self.assertEqual(len(self.reward_replies((305,))), 1)
+        self.assertEqual(self.reward_replies((130, 135, 140, 200)), [])
+        self.assertEqual(len(self.reward_replies((260,))), 1)
         self.assertEqual(self.balance(), 510)
 
     def legacy_row(self, raw, active, baseline, target=3):
@@ -233,7 +241,7 @@ class ActiveMessageDedupeTest(unittest.TestCase):
     # ---- 三处门槛都使用有效发言 --------------------------------------------
 
     def test_dice_threshold_uses_active_count(self):
-        self.store.set_dice_activity_rule(CHAT, "min", 2, 1)
+        self.store.set_dice_activity_rule(CHAT, "min", 3, 1)
         for second in (0, 10, 20):
             self.send(at=second)
 
@@ -256,7 +264,7 @@ class ActiveMessageDedupeTest(unittest.TestCase):
         message.reply_dice.assert_not_awaited()
         self.assertEqual(
             message.reply_text.await_args.args[0],
-            "今日活跃不足：需要当日有效发言 2 条才能玩骰子（1 分钟内多条只算 1 条），你今天已有效发言 1 条",
+            "今日活跃不足：需要当日有效发言 3 条才能玩骰子（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 2 条",
         )
         self.assertEqual(self.balance(), 500)
         self.send(at=60)
@@ -264,7 +272,7 @@ class ActiveMessageDedupeTest(unittest.TestCase):
 
     def test_dice_free_activity_uses_active_count(self):
         self.store.set_dice_schedule(CHAT, True, "09:00", "10:00", 1)
-        self.store.set_dice_activity_rule(CHAT, "free", 2, 1)
+        self.store.set_dice_activity_rule(CHAT, "free", 3, 1)
         for second in (0, 30):
             self.send(at=second)
         message = SimpleNamespace(reply_dice=AsyncMock(), reply_text=AsyncMock(), message_id=9)
@@ -279,21 +287,21 @@ class ActiveMessageDedupeTest(unittest.TestCase):
             asyncio.run(point_dice_bet_reply(update, context, "大", 10))
         message.reply_dice.assert_not_awaited()
         self.assertIn(
-            "今日有效发言满 2 条可不受时间限制（1 分钟内多条只算 1 条，当前 1 条）",
+            "今日有效发言满 3 条可不受时间限制（1 分钟内最多算 2 条，少于 3 个字不算，当前 2 条）",
             message.reply_text.await_args.args[0],
         )
 
     def test_raffle_threshold_uses_active_count(self):
         self.store.set_point_draw_config(CHAT, True, 10, 1.0, 1)
         gift = self.store.add_point_gift(CHAT, "礼品", 1000, -1, 1)
-        self.store.set_point_draw_min_activity(CHAT, 2, 1)
+        self.store.set_point_draw_min_activity(CHAT, 3, 1)
         for second in (0, 15, 45):
             self.send(at=second)
         with self.assertRaises(ValueError) as raised:
             self.store.draw_point_gift(CHAT, USER, gift, "u", "U")
         self.assertEqual(
             str(raised.exception),
-            "今日活跃不足：需要当日有效发言 2 条才能参与积分抽奖（1 分钟内多条只算 1 条），你今天已有效发言 1 条",
+            "今日活跃不足：需要当日有效发言 3 条才能参与积分抽奖（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 2 条",
         )
         self.assertEqual(self.balance(), 500)
         self.send(at=61)
@@ -302,14 +310,14 @@ class ActiveMessageDedupeTest(unittest.TestCase):
 
     def test_redeem_threshold_uses_active_count(self):
         gift = self.store.add_point_gift(CHAT, "礼品", 10, -1, 1)
-        self.store.set_point_redeem_min_activity(CHAT, 2, 1)
+        self.store.set_point_redeem_min_activity(CHAT, 3, 1)
         for second in (0, 15, 45):
             self.send(at=second)
         with self.assertRaises(ValueError) as raised:
             self.store.redeem_point_gift(CHAT, USER, gift, "u", "U")
         self.assertEqual(
             str(raised.exception),
-            "今日活跃不足：需要当日有效发言 2 条才能兑换（1 分钟内多条只算 1 条），你今天已有效发言 1 条",
+            "今日活跃不足：需要当日有效发言 3 条才能兑换（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 2 条",
         )
         self.assertEqual(self.balance(), 500)
         self.send(at=75)

@@ -21,7 +21,7 @@ from tg_directory_bot.bot import (
 from tg_directory_bot.storage import DirectoryStore
 
 CHAT, USER = -80808, 66
-REFUSE = "今日活跃不足：需要当日有效发言 {n} 条才能兑换（1 分钟内多条只算 1 条），你今天已有效发言 {x} 条"
+REFUSE = "今日活跃不足：需要当日有效发言 {n} 条才能兑换（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 {x} 条"
 
 
 class PointRedeemActivityTest(unittest.TestCase):
@@ -56,7 +56,7 @@ class PointRedeemActivityTest(unittest.TestCase):
                 (CHAT, USER),
             ).fetchone()["n"]
 
-    def speak(self, text="聊天", chat_id=CHAT):
+    def speak(self, text="大家好啊", chat_id=CHAT):
         message = SimpleNamespace(
             text=text, caption=None, new_chat_members=[], left_chat_member=None,
             entities=[], caption_entities=[], chat_id=chat_id, message_id=1,
@@ -157,7 +157,7 @@ class PointRedeemActivityTest(unittest.TestCase):
         self.store.set_point_redeem_min_activity(CHAT, 6, 1)
         self.assertIn("积分兑换最低当日活跃：今日有效发言满 6 条才能兑换",
                       points_status_text(self.store, CHAT))
-        self.assertIn("兑换条件：今日有效发言满 6 条（1 分钟内多条只算 1 条）", point_gifts_text(self.store, CHAT))
+        self.assertIn("兑换条件：今日有效发言满 6 条（1 分钟内最多算 2 条，少于 3 个字不算）", point_gifts_text(self.store, CHAT))
         self.assertIn("points_redeemmsgmin", settings_wizard.FLOWS)
 
     def test_commit_input(self):

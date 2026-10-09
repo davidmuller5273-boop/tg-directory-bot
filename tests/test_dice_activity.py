@@ -117,7 +117,7 @@ class DiceActivityTest(unittest.TestCase):
         message = self.bet()
         message.reply_dice.assert_not_awaited()
         self.assertEqual(message.reply_text.await_args.args[0],
-                         "今日活跃不足：需要当日有效发言 3 条才能玩骰子（1 分钟内多条只算 1 条），你今天已有效发言 2 条")
+                         "今日活跃不足：需要当日有效发言 3 条才能玩骰子（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 2 条")
         self.assertEqual(self.balance(), 500)
         self.speak(1)
         message = self.bet()
@@ -141,7 +141,7 @@ class DiceActivityTest(unittest.TestCase):
         message.reply_dice.assert_not_awaited()
         self.assertEqual(
             message.reply_text.await_args.args[0],
-            "骰子当前未开放，每日开放时间：09:00-10:00\n今日有效发言满 4 条可不受时间限制（1 分钟内多条只算 1 条，当前 3 条）",
+            "骰子当前未开放，每日开放时间：09:00-10:00\n今日有效发言满 4 条可不受时间限制（1 分钟内最多算 2 条，少于 3 个字不算，当前 3 条）",
         )
         self.assertEqual(self.balance(), 500)
         self.speak(1)
@@ -219,12 +219,12 @@ class DiceActivityTest(unittest.TestCase):
 
     def test_commit_inputs(self):
         reply = self.commit("points_dicemsgmin", "8")
-        self.assertIn("骰子最低当日活跃已设为 8 条有效发言（1 分钟内多条只算 1 条）", reply)
+        self.assertIn("骰子最低当日活跃已设为 8 条有效发言（1 分钟内最多算 2 条，少于 3 个字不算）", reply)
         reply = self.commit("points_dicemsgfree", "5")
         self.assertIn("不能低于最低当日活跃条数", reply)
         self.assertEqual(self.store.points_config(CHAT)["dice_free_activity"], 0)
         reply = self.commit("points_dicemsgfree", "30")
-        self.assertIn("今日有效发言满 30 条的成员将不受骰子定时限制（1 分钟内多条只算 1 条）", reply)
+        self.assertIn("今日有效发言满 30 条的成员将不受骰子定时限制（1 分钟内最多算 2 条，少于 3 个字不算）", reply)
         config = self.store.points_config(CHAT)
         self.assertEqual((config["dice_min_activity"], config["dice_free_activity"]), (8, 30))
 

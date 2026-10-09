@@ -31,6 +31,7 @@ from telegram.ext import (
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
+    ChatBoostHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -60,7 +61,10 @@ from .lottery import (
     resolve_lottery_code,
     resolve_lottery_history_keyword,
 )
-from .storage import DirectoryStore, Entry, format_points, normalize_points
+from .storage import (
+    EFFECTIVE_RULE_TEXT, DirectoryStore, Entry, format_points, is_effective_text,
+    normalize_points,
+)
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
 from . import settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
@@ -81,6 +85,12 @@ from .validation import (
 )
 
 URL, TITLE, CATEGORY, DESCRIPTION = range(4)
+
+# run.py 用于母机器人和所有子机器人：成员变动、助推/取消助推都需要显式订阅。
+ALLOWED_UPDATES = [
+    "message", "callback_query", "inline_query", "chat_member",
+    "chat_boost", "removed_chat_boost",
+]
 
 GROUP_PERMISSIONS = {
     "stats", "raffles", "lottery", "polls", "ads", "points", "welcome",
@@ -936,7 +946,7 @@ def points_menu_keyboard(
                 ),
                 InlineKeyboardButton("⚙️ 签到设置", callback_data="points:set:checkin"),
             ],
-            [InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activity")],
+            [InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activitymenu")],
             [
                 InlineKeyboardButton("➕ 添加礼品", callback_data="points:set:giftadd"),
                 InlineKeyboardButton("➖ 删除礼品", callback_data="points:set:giftdel"),
@@ -958,6 +968,41 @@ def points_menu_keyboard(
         rows.append([InlineKeyboardButton("🎲 骰子设置", callback_data="points:dice:menu")])
     rows.append([InlineKeyboardButton("⬅️ 返回群组管理", callback_data="nav:group")])
     return InlineKeyboardMarkup(rows)
+
+
+def activity_settings_view(store: DirectoryStore, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    config = store.points_config(chat_id)
+    lines = ["🔥 活跃设置", ""]
+    if config["activity_enabled"]:
+        lines.append(
+            f"随机活跃奖励：开启，每日随机目标 {config['activity_messages_min']}-"
+            f"{config['activity_messages_max']} 条有效发言，奖励 "
+            f"{format_points(config['activity_points_min'])}-"
+            f"{format_points(config['activity_points_max'])} 积分"
+        )
+    else:
+        lines.append("随机活跃奖励：关闭")
+    tiers = store.activity_tiers(chat_id)
+    lines.append("")
+    lines.append("🏅 阶梯奖励（每档每天一次，与随机奖励同时生效）：")
+    if tiers:
+        for tier in tiers:
+            lines.append(
+                f"#{tier['id']} · 今日有效发言 {tier['messages']} 条 +{format_points(tier['points'])} 积分"
+            )
+    else:
+        lines.append("暂未设置。例如：10条+5、50条+20、100条+50")
+    lines.extend(["", f"有效发言：{EFFECTIVE_RULE_TEXT}。"])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 随机活跃奖励", callback_data="points:set:activity")],
+        [
+            InlineKeyboardButton("➕ 添加/修改阶梯", callback_data="points:set:tieradd"),
+            InlineKeyboardButton("➖ 删除阶梯", callback_data="points:set:tierdel"),
+        ],
+        [InlineKeyboardButton("⛔ 关闭随机活跃奖励", callback_data="points:activityoff")],
+        [InlineKeyboardButton("⬅️ 返回积分功能", callback_data="group:points")],
+    ])
+    return "\n".join(lines), keyboard
 
 
 def dice_max_bet_label(config) -> str:
@@ -990,7 +1035,7 @@ def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
         f"单注上限：{dice_max_bet_label(config)}\n"
         f"最低当日活跃：{dice_min_activity_label(config)}\n"
         f"免定时活跃：{dice_free_activity_label(config)}\n"
-        "（有效发言：1 分钟内多条只算 1 条）\n"
+        "（有效发言：1 分钟内最多算 2 条，少于 3 个字不算）\n"
         f"每日定时：{'开启' if scheduled else '关闭'}"
     )
     if scheduled:
@@ -1062,7 +1107,7 @@ def points_status_text(
         f"骰子免定时活跃：{dice_free_activity_label(config)}\n\n"
         f"积分抽奖：{draw}\n"
         f"积分兑换最低当日活跃：{redeem_min_activity_label(config)}\n"
-        "（当日活跃按有效发言计：1 分钟内多条只算 1 条）\n\n"
+        "（当日活跃按有效发言计：1 分钟内最多算 2 条，少于 3 个字不算）\n\n"
         "群员可发送：签到、积分、积分排行、积分礼品、兑换 礼品编号、游戏记录；\n也可发送 大3 / 小5 / 单10 / 双2 玩骰子。"
     )
 
@@ -7275,7 +7320,28 @@ async def commit_group_menu_input(
             action = mode.removeprefix("invite_")
             store: DirectoryStore = context.application.bot_data["store"]
             chat_id = target_chat_id
-            if action == "points":
+            if action in {"premium", "normal"}:
+                if not has_super_admin_access(context, user.id):
+                    raise ValueError("邀请积分仅超级管理员可以设置")
+                parts = settings_wizard.input_parts(message, text)
+                expected = 3 if action == "premium" else 2
+                if len(parts) != expected or not parts[0].strip().isdigit():
+                    raise ValueError(
+                        "格式：有效发言条数 | 达标奖励 | 每次助推奖励" if action == "premium"
+                        else "格式：有效发言条数 | 达标奖励"
+                    )
+                try:
+                    amounts = [parse_points_amount(part, allow_zero=True) for part in parts[1:]]
+                except ValueError as exc:
+                    raise ValueError("奖励请输入0或正数积分（最多两位小数）") from exc
+                values = {
+                    f"{action}_msg_threshold": int(parts[0]),
+                    f"{action}_msg_points": amounts[0],
+                }
+                if action == "premium":
+                    values["premium_boost_points"] = amounts[1]
+                store.update_invite_rewards(chat_id, user.id, **values)
+            elif action == "points":
                 if not has_super_admin_access(context, user.id):
                     raise ValueError("邀请积分仅超级管理员可以设置")
                 try:
@@ -7352,7 +7418,25 @@ async def commit_group_menu_input(
                 store.set_activity_points(
                     chat_id, int(parts[0]), int(parts[1]), pmin, pmax, user.id
                 )
-                result = "每日活跃积分设置成功（按有效发言计：1 分钟内多条只算 1 条）。"
+                result = "每日活跃积分设置成功（按有效发言计：1 分钟内最多算 2 条，少于 3 个字不算）。"
+            elif action == "tieradd":
+                if len(parts) != 2 or not parts[0].strip().isdigit():
+                    raise ValueError("格式：今日有效发言条数 | 奖励积分")
+                try:
+                    tier_points = parse_points_amount(parts[1])
+                except ValueError as exc:
+                    raise ValueError("奖励积分请输入正数（最多两位小数）") from exc
+                store.set_activity_tier(chat_id, int(parts[0]), tier_points, user.id)
+                result = f"阶梯奖励已保存：今日有效发言 {int(parts[0])} 条 +{format_points(tier_points)} 积分。"
+            elif action == "tierdel":
+                if text.strip() in {"全部", "all", "ALL"}:
+                    count = store.clear_activity_tiers(chat_id)
+                    result = f"已清空 {count} 档阶梯奖励。"
+                else:
+                    tier_id = parse_numbered_id(text)
+                    if not store.delete_activity_tier(chat_id, tier_id):
+                        raise ValueError("没有找到这个阶梯编号")
+                    result = f"阶梯 #{tier_id} 已删除。"
             elif action == "giftadd":
                 if len(parts) not in {2, 3}:
                     raise ValueError("格式：所需积分 | 礼品名称 | 库存")
@@ -7489,7 +7573,7 @@ async def commit_group_menu_input(
                     raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
                 store.set_point_draw_min_activity(chat_id, count, user.id)
                 result = (
-                    f"积分抽奖最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
+                    f"积分抽奖最低当日活跃已设为 {count} 条有效发言（1 分钟内最多算 2 条，少于 3 个字不算）。"
                     if count else "积分抽奖最低当日活跃已关闭（不限）。"
                 )
             elif action == "redeemmsgmin":
@@ -7499,7 +7583,7 @@ async def commit_group_menu_input(
                     raise ValueError("请发送0-100000之间的整数（0 表示不限）") from exc
                 store.set_point_redeem_min_activity(chat_id, count, user.id)
                 result = (
-                    f"积分兑换最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
+                    f"积分兑换最低当日活跃已设为 {count} 条有效发言（1 分钟内最多算 2 条，少于 3 个字不算）。"
                     if count else "积分兑换最低当日活跃已关闭（不限）。"
                 )
             elif action in {"dicemsgmin", "dicemsgfree"}:
@@ -7512,12 +7596,12 @@ async def commit_group_menu_input(
                 )
                 if action == "dicemsgmin":
                     result = (
-                        f"骰子最低当日活跃已设为 {count} 条有效发言（1 分钟内多条只算 1 条）。"
+                        f"骰子最低当日活跃已设为 {count} 条有效发言（1 分钟内最多算 2 条，少于 3 个字不算）。"
                         if count else "骰子最低当日活跃已关闭（不限）。"
                     )
                 else:
                     result = (
-                        f"今日有效发言满 {count} 条的成员将不受骰子定时限制（1 分钟内多条只算 1 条）。"
+                        f"今日有效发言满 {count} 条的成员将不受骰子定时限制（1 分钟内最多算 2 条，少于 3 个字不算）。"
                         if count else "骰子免定时活跃已关闭。"
                     )
             elif action == "dicemax":
@@ -7542,6 +7626,10 @@ async def commit_group_menu_input(
             if action in {"drawconfig", "drawmincost", "drawrate", "drawmsgmin"}:
                 settings_text, markup = point_draw_settings_view(store, chat_id)
                 result += "\n\n" + settings_text
+            elif action in {"tieradd", "tierdel", "activity"}:
+                settings_text, markup = activity_settings_view(store, chat_id)
+                result += "\n\n" + settings_text
+                store.audit(f"tg:{user.id}", f"points.{action}", str(chat_id), text[:200])
             elif action not in {"drawcost", "memberledger", "membergames"}:
                 config = store.points_config(chat_id)
                 show_draw = has_group_permission(context, chat_id, user.id, "points")
@@ -8417,7 +8505,7 @@ def point_gifts_text(store: DirectoryStore, chat_id: int) -> str:
         lines.append(f"#{row['id']} · {row['name']} · {format_points(row['points_cost'])} 积分 · {stock}")
     min_activity = int(store.points_config(chat_id)["redeem_min_activity"] or 0)
     if min_activity > 0:
-        lines.extend(["", f"兑换条件：今日有效发言满 {min_activity} 条（1 分钟内多条只算 1 条）"])
+        lines.extend(["", f"兑换条件：今日有效发言满 {min_activity} 条（1 分钟内最多算 2 条，少于 3 个字不算）"])
     lines.extend(["", "发送：兑换 礼品编号"])
     return "\n".join(lines)
 
@@ -8444,7 +8532,7 @@ def point_draw_view(
         if int(config["draw_min_activity"] or 0) > 0:
             lines.append(
                 f"参与条件：今日有效发言满 {int(config['draw_min_activity'])} 条"
-                "（1 分钟内多条只算 1 条）"
+                "（1 分钟内最多算 2 条，少于 3 个字不算）"
             )
         lines.append("")
         for row in rows:
@@ -8483,7 +8571,7 @@ def point_draw_settings_view(
         f"每次最低消耗：{format_points(config['draw_cost'])} 积分\n"
         f"中奖概率倍率：{multiplier:g}（范围 0-5）\n"
         f"最低当日活跃：{draw_min_activity_label(config)}\n"
-        "（有效发言：1 分钟内多条只算 1 条）\n\n"
+        "（有效发言：1 分钟内最多算 2 条，少于 3 个字不算）\n\n"
         "中奖率按本次消耗积分、礼品所需积分和倍率自动计算；"
         "群员抽奖页面不显示倍率。"
     )
@@ -8586,10 +8674,11 @@ async def point_checkin_reply(
         await message.reply_text(str(exc))
         return
     streak_text = f"，已连续签到 {streak} 天" if streak > 1 else ""
-    await message.reply_text(
-        f"📅 今日第 {today_number} 个签到\n"
-        f"签到成功 +{format_points(points)} 积分{streak_text}\n⭐ 当前积分：{format_points(balance)}"
-    )
+    with persistent_message():
+        await message.reply_text(
+            f"📅 今日第 {today_number} 个签到\n"
+            f"签到成功 +{format_points(points)} 积分{streak_text}\n⭐ 当前积分：{format_points(balance)}"
+        )
 
 
 
@@ -8625,14 +8714,14 @@ async def point_dice_bet_reply(
             if free_activity > 0:
                 notice += (
                     f"\n今日有效发言满 {free_activity} 条可不受时间限制"
-                    f"（1 分钟内多条只算 1 条，当前 {today_messages} 条）"
+                    f"（1 分钟内最多算 2 条，少于 3 个字不算，当前 {today_messages} 条）"
                 )
             await message.reply_text(notice)
             return
     if min_activity > 0 and today_messages < min_activity:
         await message.reply_text(
             f"今日活跃不足：需要当日有效发言 {min_activity} 条才能玩骰子"
-            f"（1 分钟内多条只算 1 条），你今天已有效发言 {today_messages} 条"
+            f"（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 {today_messages} 条"
         )
         return
     account = store.point_account(chat_id, user.id)
@@ -8788,6 +8877,47 @@ async def welcome_new_members(
                 )
 
 
+async def award_effective_message_rewards(
+    update, context: ContextTypes.DEFAULT_TYPE, store: DirectoryStore, chat, user, message,
+) -> None:
+    """Rewards triggered by one counted effective message: activity tiers and
+    invite (message) rewards. Award messages are never auto-deleted."""
+    try:
+        tiers = store.award_activity_tiers(
+            chat.id, user.id, user.username or "", user.full_name or "群成员"
+        )
+    except ValueError:
+        tiers = []
+    for need, points, balance in tiers:
+        with persistent_message():
+            await message.reply_text(
+                f"🏅 今日有效发言达到 {need} 条，阶梯奖励 +{format_points(points)} 积分\n"
+                f"⭐ 当前积分：{format_points(balance)}"
+            )
+    try:
+        invite = store.award_invite_message_reward(chat.id, user.id)
+    except ValueError:
+        invite = None
+    if invite:
+        join, points, balance, threshold = invite
+        inviter_id = int(join["inviter_id"])
+        inviter = store.find_group_user(chat.id, str(inviter_id))
+        inviter_name = (
+            str(inviter["display_name"] or inviter["username"] or inviter_id)
+            if inviter else str(inviter_id)
+        )
+        kind = "会员" if int(join["is_premium"] or 0) else "成员"
+        with persistent_message():
+            await context.bot.send_message(
+                chat.id,
+                f"🎉 邀请奖励：{telegram_user_link(inviter_id, inviter_name)} 邀请的{kind} "
+                f"{telegram_user_link(user.id, user.full_name or user.username or str(user.id))} "
+                f"有效发言已满 {threshold} 条\n"
+                f"邀请人 +{format_points(points)} 积分，当前积分：{format_points(balance)}",
+                parse_mode=ParseMode.HTML,
+            )
+
+
 async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     message = update.effective_message
@@ -8809,8 +8939,11 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
     # 骰子口令（大3/小5/单10/双2，含被拒绝的下注）不算发言条数：
     # 不计入群统计、活跃奖励、骰子活跃门槛和抽奖发言条件。
     counted_message = 0 if (normal_message and is_dice_command(points_config, message)) else normal_message
+    # 有效发言：去掉空白后至少 3 个字（贴纸/无说明媒体不算），滚动 1 分钟最多计 2 条。
+    effective_text = is_effective_text(message.text or message.caption or "")
+    effective_counted = False
     if normal_message or joins or leaves or settings.get("group_monitoring_enabled") == "1" or points_tracking:
-        store.record_group_activity(
+        effective_counted = store.record_group_activity(
             chat.id,
             chat.title or "",
             chat.username or "",
@@ -8821,7 +8954,9 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
             messages=counted_message,
             joins=joins,
             leaves=leaves,
-        )
+            effective=effective_text,
+            is_premium=bool(getattr(user, "is_premium", False)) if user else False,
+        ) is True
     for member in message.new_chat_members or ():
         if not member.is_bot:
             sight_user_profile_from_tg(store, chat.id, member)
@@ -8895,17 +9030,20 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
                 + f"🏆 中奖名额：{raffle['winner_count']} 人{count_line}",
                 parse_mode=ParseMode.HTML,
             )
-    if counted_message and points_tracking and user:
+    if effective_counted and points_tracking and user:
         reward = store.award_activity_points(
             chat.id, user.id, user.username or "", user.full_name or "群成员"
         )
         if reward:
             points, balance, _, today_messages = reward
-            await message.reply_text(
-                f"🔥 今日已有效发言 {today_messages} 条（1 分钟内多条只算 1 条），"
-                f"随机奖励 +{format_points(points)} 积分\n"
-                f"⭐ 当前积分：{format_points(balance)}"
-            )
+            with persistent_message():
+                await message.reply_text(
+                    f"🔥 今日已有效发言 {today_messages} 条（{EFFECTIVE_RULE_TEXT}），"
+                    f"随机奖励 +{format_points(points)} 积分\n"
+                    f"⭐ 当前积分：{format_points(balance)}"
+                )
+    if effective_counted and user and points_config["is_enabled"]:
+        await award_effective_message_rewards(update, context, store, chat, user, message)
     content = message.text or message.caption or ""
     user_data = getattr(context, "user_data", {})
     if user_data.pop("allowed_invite_message_id", None) == message.message_id:
@@ -9286,6 +9424,22 @@ async def user_info_command(
     )
 
 
+def invite_reward_label(config, kind: str) -> str:
+    keys = set(config.keys())
+    if f"{kind}_msg_points" not in keys:
+        return "关闭"
+    threshold = int(config[f"{kind}_msg_threshold"] or 0)
+    points = normalize_points(config[f"{kind}_msg_points"] or 0)
+    parts = []
+    if points > 0:
+        parts.append(f"有效发言满 {max(1, threshold)} 条 +{format_points(points)}")
+    if kind == "premium":
+        boost = normalize_points(config["premium_boost_points"] or 0)
+        if boost > 0:
+            parts.append(f"每次助推 +{format_points(boost)}")
+    return "，".join(parts) if parts else "关闭"
+
+
 def invite_menu_view(
     store: DirectoryStore, chat_id: int, config=None, page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -9304,7 +9458,10 @@ def invite_menu_view(
         f"┌状态: {'✅开启' if config['is_enabled'] else '❌关闭'}\n"
         f"├链接过期时间: {expire}\n"
         f"├最大邀请人数: {maximum}\n"
-        f"└每人邀请积分: {format_points(config['points_per_invite'])}\n\n"
+        f"├每人邀请积分: {format_points(config['points_per_invite'])}\n"
+        f"├会员邀请奖励: {invite_reward_label(config, 'premium')}\n"
+        f"└普通邀请奖励: {invite_reward_label(config, 'normal')}\n"
+        f"（有效发言：{EFFECTIVE_RULE_TEXT}；被邀请人退群/被踢会扣回对应奖励，取消助推扣回该次助推奖励）\n\n"
         "统计：\n"
         f"┌已生成链接数: {stats['links']}\n"
         f"├总邀请人数: {stats['invites']}\n"
@@ -9335,6 +9492,10 @@ def invite_menu_view(
         [InlineKeyboardButton("🛠 链接过期时间", callback_data="invite:set:expire")],
         [InlineKeyboardButton("🛠 最大邀请人数", callback_data="invite:set:max")],
         [InlineKeyboardButton("⭐ 每人邀请积分", callback_data="invite:set:points")],
+        [
+            InlineKeyboardButton("💎 会员邀请奖励", callback_data="invite:set:premium"),
+            InlineKeyboardButton("👤 普通邀请奖励", callback_data="invite:set:normal"),
+        ],
         [InlineKeyboardButton("🔎 查询邀请链接", callback_data="invite:query")],
         [InlineKeyboardButton("🔄 重置链接", callback_data="invite:reset")],
     ]
@@ -9641,6 +9802,16 @@ async def track_personal_invite(
         ChatMemberStatus.LEFT, ChatMemberStatus.BANNED,
     }:
         departed = store.record_invite_leave(change.chat.id, member.id)
+        if departed:
+            extra = store.revoke_invite_extra_rewards(
+                change.chat.id, member.id, int(departed["inviter_id"]),
+                departed["msg_reward"] if "msg_reward" in departed.keys() else 0,
+            )
+            if extra > 0:
+                store.audit(
+                    f"tg:{member.id}", "invite.leave.extra", str(change.chat.id),
+                    f"inviter={departed['inviter_id']}; points=-{extra}",
+                )
         if departed and normalize_points(departed["points_awarded"] or 0) != 0:
             inviter_id = int(departed["inviter_id"])
             inviter = store.find_group_user(change.chat.id, str(inviter_id))
@@ -9678,10 +9849,69 @@ async def track_personal_invite(
         credit_points=True, inviter_username=str(row["username"] or ""),
         inviter_name=str(row["display_name"] or ""),
     ):
+        store.mark_invitee_premium(
+            change.chat.id, member_id, bool(getattr(member, "is_premium", False))
+        )
         store.audit(
             f"tg:{member_id}", "invite.join", str(change.chat.id),
             f"inviter={row['user_id']}",
         )
+
+
+def _boost_source_user(boost):
+    source = getattr(boost, "source", None)
+    return getattr(source, "user", None) if source is not None else None
+
+
+async def track_chat_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """chat_boost: an invited member boosted the group -> inviter earns points."""
+    change = getattr(update, "chat_boost", None)
+    if not change:
+        return
+    boost = getattr(change, "boost", None)
+    booster = _boost_source_user(boost)
+    if boost is None or booster is None:
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    chat_id = int(change.chat.id)
+    result = store.award_invite_boost(chat_id, str(boost.boost_id), int(booster.id))
+    if not result:
+        return
+    join, points, balance = result
+    inviter_id = int(join["inviter_id"])
+    inviter = store.find_group_user(chat_id, str(inviter_id))
+    inviter_name = (
+        str(inviter["display_name"] or inviter["username"] or inviter_id) if inviter else str(inviter_id)
+    )
+    store.audit(f"tg:{booster.id}", "invite.boost", str(chat_id), f"inviter={inviter_id}; points={points}")
+    try:
+        with persistent_message():
+            await context.bot.send_message(
+                chat_id,
+                f"⚡ 助推奖励：{telegram_user_link(inviter_id, inviter_name)} 邀请的会员 "
+                f"{telegram_user_link(booster.id, booster.full_name or booster.username or str(booster.id))} "
+                f"助推了本群\n邀请人 +{format_points(points)} 积分，当前积分：{format_points(balance)}",
+                parse_mode=ParseMode.HTML,
+            )
+    except TelegramError as exc:
+        logging.info("Could not announce boost reward in %s: %s", chat_id, exc)
+
+
+async def track_removed_chat_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """removed_chat_boost: boost removed/expired -> claw back that boost's reward."""
+    removed = getattr(update, "removed_chat_boost", None)
+    if not removed:
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    chat_id = int(removed.chat.id)
+    result = store.revoke_invite_boost(chat_id, str(removed.boost_id))
+    if not result:
+        return
+    row, points, _balance = result
+    store.audit(
+        f"tg:{row['user_id']}", "invite.boost.removed", str(chat_id),
+        f"inviter={row['inviter_id']}; points=-{points}",
+    )
 
 
 async def moderation_command(
@@ -11619,25 +11849,32 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer("邀请链接功能已开启。" if enabled else "邀请链接功能已关闭。")
         await query.edit_message_text(text, reply_markup=keyboard)
         return
-    if data in {"invite:set:expire", "invite:set:max", "invite:set:points"}:
+    if data in {
+        "invite:set:expire", "invite:set:max", "invite:set:points",
+        "invite:set:premium", "invite:set:normal",
+    }:
         if target_group_id is None or not await is_chat_admin(
             context, target_group_id, user_id
         ):
             await query.answer("只有群管理员可以设置。", show_alert=True)
             return
         action = data.rsplit(":", 1)[-1]
-        if action == "points" and not is_super_user:
+        if action in {"points", "premium", "normal"} and not is_super_user:
             await query.answer("邀请积分仅超级管理员可以设置。", show_alert=True)
             return
         context.user_data["menu_mode"] = {
             "expire": "invite_expirehours",
             "max": "invite_maxmembers",
             "points": "invite_points",
+            "premium": "invite_premium",
+            "normal": "invite_normal",
         }[action]
         prompt = {
             "expire": "请输入链接有效小时数，0表示无限制。",
             "max": "请输入最大邀请人数，0表示无限制。",
             "points": "请输入每成功邀请1人奖励的积分，0表示不奖励。",
+            "premium": "邀请 Telegram 会员：有效发言条数 | 达标奖励 | 每次助推奖励，0 表示关闭。",
+            "normal": "邀请普通成员：有效发言条数 | 达标奖励，0 表示关闭。",
         }[action]
         await query.answer()
         await query.edit_message_text(prompt + "\n\n发送 /cancel 取消。")
@@ -11839,10 +12076,11 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     target_group_id, user_id, query.from_user.username or "",
                     query.from_user.full_name or "群成员",
                 )
-                await query.message.reply_text(
-                    f"📅 今日第 {today_number} 个签到\n"
-                    f"签到成功 +{format_points(points)} 积分\n⭐ 当前积分：{format_points(balance_value)}"
-                )
+                with persistent_message():
+                    await query.message.reply_text(
+                        f"📅 今日第 {today_number} 个签到\n"
+                        f"签到成功 +{format_points(points)} 积分\n⭐ 当前积分：{format_points(balance_value)}"
+                    )
             except ValueError as exc:
                 await query.message.reply_text(str(exc))
         elif data == "points:balance":
@@ -12021,24 +12259,31 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         prompts = {
             "checkin": "请发送：签到最小积分 | 签到最大积分 | 连续3天额外积分\n例如：5 | 10 | 3",
-            "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8\n消息目标按有效发言计：1 分钟内多条只算 1 条。",
+            "activity": "请发送：消息目标最小 | 消息目标最大 | 奖励最小 | 奖励最大\n例如：10 | 30 | 2 | 8\n消息目标按有效发言计：1 分钟内最多算 2 条，少于 3 个字不算。",
             "giftadd": "请发送：所需积分 | 礼品名称 | 库存\n库存填 -1 表示不限量，例如：100 | 会员奖励 | 10",
             "giftdel": "请发送要删除的礼品编号，例如：#1。",
-            "redeemmsgmin": "请设置当日有效发言满多少条才能兑换积分礼品，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
+            "tieradd": "请发送：今日有效发言条数 | 奖励积分\n例如：50 | 20（同条数再次设置即修改）",
+            "tierdel": "请发送要删除的阶梯编号，例如：#1；发送“全部”清空。",
+            "redeemmsgmin": "请设置当日有效发言满多少条才能兑换积分礼品，0 表示不限。\n有效发言：1 分钟内最多算 2 条，少于 3 个字不算。",
             "adjust": "请发送：@用户名或数字ID | 增减数量 | 原因\n例如：@alice | +1.5 | 活动奖励",
             "clear": "请发送 @用户名或数字ID；发送 all 清零本群所有成员积分。",
             "memberledger": "请发送要查询账单的 @用户名或数字ID。",
             "membergames": "请发送 @用户名或数字ID（也可回复对方消息）",
             "drawmincost": "请发送每次抽奖最低消耗积分，范围0.01-1000000（最多两位小数）。",
-            "drawmsgmin": "请设置当日有效发言满多少条才能参与积分抽奖，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
+            "drawmsgmin": "请设置当日有效发言满多少条才能参与积分抽奖，0 表示不限。\n有效发言：1 分钟内最多算 2 条，少于 3 个字不算。",
             "drawrate": "请发送中奖概率倍率，范围0-5。\n0表示不会中奖，1表示自动换算倍率。",
             "diceodds": "请发送骰子赔率（1.7-2.0，也可写 1700-2000；例如 1.95，押1000中奖反1950）",
             "dicemin": "请设置每次玩骰子的最低积分。",
             "dicemax": "请设置骰子单注最高积分，0 表示不限。",
-            "dicemsgmin": "请设置当日有效发言满多少条才能玩骰子，0 表示不限。\n有效发言：1 分钟内多条只算 1 条。",
-            "dicemsgfree": "请设置当日有效发言满多少条可不受骰子定时限制，0 表示关闭。\n有效发言：1 分钟内多条只算 1 条。",
+            "dicemsgmin": "请设置当日有效发言满多少条才能玩骰子，0 表示不限。\n有效发言：1 分钟内最多算 2 条，少于 3 个字不算。",
+            "dicemsgfree": "请设置当日有效发言满多少条可不受骰子定时限制，0 表示关闭。\n有效发言：1 分钟内最多算 2 条，少于 3 个字不算。",
             "diceschedule": "请设置每日定时开关和开放时段。",
         }
+        if action == "activitymenu":
+            text, keyboard = activity_settings_view(store, target_group_id)
+            await query.answer()
+            await query.edit_message_text(text, reply_markup=keyboard)
+            return
         if action == "drawconfig":
             text, keyboard = point_draw_settings_view(store, target_group_id)
             await query.answer()
@@ -13133,6 +13378,8 @@ def build_application(config: Config) -> Application:
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(InlineQueryHandler(quick_post_inline))
     application.add_handler(ChatMemberHandler(track_personal_invite, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(ChatBoostHandler(track_chat_boost, ChatBoostHandler.CHAT_BOOST))
+    application.add_handler(ChatBoostHandler(track_removed_chat_boost, ChatBoostHandler.REMOVED_CHAT_BOOST))
     application.add_handler(
         MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, group_menu_input),
         group=-1,

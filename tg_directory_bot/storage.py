@@ -41,6 +41,15 @@ POINTS_ABS_MAX = Decimal("1000000000")
 
 
 ACTIVE_MESSAGE_WINDOW_SECONDS = 60
+# 有效发言：滚动 60 秒内最多计 2 条；去掉空白后少于 3 个字不计（贴纸/无说明媒体也不计）。
+ACTIVE_MESSAGES_PER_WINDOW = 2
+MIN_EFFECTIVE_CHARS = 3
+EFFECTIVE_RULE_TEXT = "1 分钟内最多算 2 条，少于 3 个字不算"
+
+
+def is_effective_text(text: str | None) -> bool:
+    """去掉所有空白后至少 3 个字符才算有效发言。"""
+    return len("".join(str(text or "").split())) >= MIN_EFFECTIVE_CHARS
 
 
 def activity_now() -> float:
@@ -127,7 +136,10 @@ class Entry:
     keyword_key: str = ""
 
 
-class DirectoryStore:
+from .storage_features import FeatureStoreMixin  # noqa: E402
+
+
+class DirectoryStore(FeatureStoreMixin):
     _REUSABLE_ID_TABLES = {"custom_buttons", "point_gifts", "raffles"}
 
     def __init__(self, db_path: Path):
@@ -1111,7 +1123,7 @@ class DirectoryStore:
                 conn, "point_activity_rewards", "reward_count",
                 "INTEGER NOT NULL DEFAULT 0",
             )
-            # message_baseline 的计数口径：0=旧的原始发言数，1=有效发言数（1 分钟内多条只算 1 条）。
+            # message_baseline 的计数口径：0=旧的原始发言数，1=有效发言数（1 分钟内最多算 2 条，少于 3 个字不算）。
             # 旧行在下次结算时按 award_activity_points 中的规则换算，不重复发奖。
             self._ensure_column(
                 conn, "point_activity_rewards", "effective_basis",
@@ -1229,6 +1241,7 @@ class DirectoryStore:
                     conn.execute(
                         "UPDATE entries SET keyword_key=? WHERE id=?", (key, int(row["id"]))
                     )
+            self._migrate_features(conn)
 
     def ensure_config_admins(
         self, admin_ids: set[int], super_admin_ids: set[int],
@@ -2341,7 +2354,7 @@ class DirectoryStore:
         return int(row["messages"]) if row else 0
 
     def user_today_active_messages(self, chat_id: int, user_id: int) -> int:
-        """该成员在本群今日（北京时间）的有效发言条数：1 分钟内多条只算 1 条。
+        """该成员在本群今日（北京时间）的有效发言条数：1 分钟内最多算 2 条，少于 3 个字不算。
         用于活跃奖励，以及骰子/积分抽奖/积分兑换的「最低当日活跃」「免定时活跃」门槛。"""
         with self.connect() as conn:
             row = conn.execute(
@@ -2564,7 +2577,8 @@ class DirectoryStore:
         ).fetchone()
         current = normalize_points(row["balance"] if row else 0)
         balance = normalize_points(current + delta)
-        if balance < 0 and not allow_negative:
+        # 负分只限制“花积分”（游戏、抽奖、兑换）；任何加分（签到、活跃、邀请等）照常入账。
+        if balance < 0 and delta < 0 and not allow_negative:
             raise ValueError("积分余额不足")
         # Cycle flag: invite awards set it; balance at or below 5 clears the cycle.
         cycle_sql = "invite_source_cycle=invite_source_cycle"
@@ -2995,7 +3009,7 @@ class DirectoryStore:
                 (chat_id, user_id),
             ).fetchone()
             raw_messages = int(messages["messages"]) if messages else 0
-            # 活跃奖励按有效发言计：1 分钟内多条只算 1 条。
+            # 活跃奖励按有效发言计：1 分钟内最多算 2 条，少于 3 个字不算。
             current_messages = int(messages["active_messages"]) if messages else 0
             baseline = int(reward["message_baseline"])
             if not int(reward["effective_basis"]):
@@ -3085,7 +3099,7 @@ class DirectoryStore:
             if current < min_activity:
                 raise ValueError(
                     f"今日活跃不足：需要当日有效发言 {min_activity} 条才能兑换"
-                    f"（1 分钟内多条只算 1 条），你今天已有效发言 {current} 条"
+                    f"（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 {current} 条"
                 )
         with self.connect() as conn:
             gift = conn.execute(
@@ -3136,7 +3150,7 @@ class DirectoryStore:
             if current < min_activity:
                 raise ValueError(
                     f"今日活跃不足：需要当日有效发言 {min_activity} 条才能参与积分抽奖"
-                    f"（1 分钟内多条只算 1 条），你今天已有效发言 {current} 条"
+                    f"（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 {current} 条"
                 )
         with self.connect() as conn:
             gift = conn.execute(
@@ -4784,7 +4798,12 @@ class DirectoryStore:
         joins: int = 0,
         leaves: int = 0,
         blocked: int = 0,
-    ) -> None:
+        effective: bool = True,
+        is_premium: bool = False,
+    ) -> bool:
+        """Record activity. Returns True when this message counted as an
+        effective message (有效发言：滚动 60 秒最多 2 条，且 >=3 个字)."""
+        counted = False
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO groups
@@ -4822,20 +4841,27 @@ class DirectoryStore:
                     (chat_id, user_id, user_username[:80], display_name[:160], messages),
                 )
                 now_ts = float(activity_now())
-                conn.execute(
-                    """UPDATE group_activity_users SET
-                         active_messages=active_messages + CASE
-                           WHEN last_counted_ts<=0 OR ?-last_counted_ts>=? THEN 1 ELSE 0 END,
-                         last_counted_ts=CASE
-                           WHEN last_counted_ts<=0 OR ?-last_counted_ts>=? THEN ?
-                           ELSE last_counted_ts END
+                state = conn.execute(
+                    """SELECT last_counted_ts, prev_counted_ts FROM group_activity_users
                        WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
-                    (
-                        now_ts, ACTIVE_MESSAGE_WINDOW_SECONDS,
-                        now_ts, ACTIVE_MESSAGE_WINDOW_SECONDS, now_ts,
-                        chat_id, user_id,
-                    ),
+                    (chat_id, user_id),
+                ).fetchone()
+                last_ts = float(state["last_counted_ts"] or 0) if state else 0.0
+                prev_ts = float(state["prev_counted_ts"] or 0) if state else 0.0
+                window = ACTIVE_MESSAGE_WINDOW_SECONDS
+                recent = sum(
+                    1 for ts in (last_ts, prev_ts) if ts > 0 and now_ts - ts < window
                 )
+                counted = bool(effective) and recent < ACTIVE_MESSAGES_PER_WINDOW
+                if counted:
+                    conn.execute(
+                        """UPDATE group_activity_users SET
+                             active_messages=active_messages+1,
+                             prev_counted_ts=last_counted_ts,
+                             last_counted_ts=?
+                           WHERE chat_id=? AND user_id=? AND day=DATE('now','+8 hours')""",
+                        (now_ts, chat_id, user_id),
+                    )
                 conn.executemany(
                     """INSERT INTO group_message_events
                        (chat_id, user_id, username, display_name)
@@ -4859,13 +4885,15 @@ class DirectoryStore:
                              THEN CURRENT_TIMESTAMP ELSE name_changed_at END,
                            current_display_name=CASE
                              WHEN ?<>'' THEN ? ELSE current_display_name END,
-                           spoken_messages=spoken_messages+?
+                           spoken_messages=spoken_messages+?,
+                           effective_messages=effective_messages+?,
+                           is_premium=MAX(is_premium, ?)
                        WHERE chat_id=? AND user_id=? AND left_at IS NULL""",
                     (
                         display_name[:160], display_name[:160],
                         display_name[:160], display_name[:160],
                         display_name[:160], display_name[:160],
-                        messages, chat_id, user_id,
+                        messages, int(counted), int(bool(is_premium)), chat_id, user_id,
                     ),
                 )
             conn.execute(
@@ -4877,6 +4905,7 @@ class DirectoryStore:
             conn.execute(
                 "DELETE FROM group_message_events WHERE created_at < DATETIME('now','-31 days')"
             )
+        return counted
 
     def group_join_config(self, chat_id: int) -> sqlite3.Row:
         with self.connect() as conn:

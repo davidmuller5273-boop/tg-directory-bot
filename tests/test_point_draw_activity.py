@@ -49,7 +49,7 @@ class PointDrawActivityTest(unittest.TestCase):
     def balance(self):
         return Decimal(str(self.store.point_account(CHAT, USER)["balance"]))
 
-    def speak(self, text="聊天"):
+    def speak(self, text="大家好啊"):
         message = SimpleNamespace(
             text=text, caption=None, new_chat_members=[], left_chat_member=None,
             entities=[], caption_entities=[], chat_id=CHAT, message_id=1,
@@ -72,7 +72,7 @@ class PointDrawActivityTest(unittest.TestCase):
         self.speak()
         with self.assertRaises(ValueError) as raised:
             self.store.draw_point_gift(CHAT, USER, self.gift, "u", "U")
-        self.assertEqual(str(raised.exception), "今日活跃不足：需要当日有效发言 2 条才能参与积分抽奖（1 分钟内多条只算 1 条），你今天已有效发言 1 条")
+        self.assertEqual(str(raised.exception), "今日活跃不足：需要当日有效发言 2 条才能参与积分抽奖（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 1 条")
         self.assertEqual(self.balance(), before)
         self.speak("大3")   # 骰子口令不算发言
         with self.assertRaises(ValueError):
@@ -114,7 +114,7 @@ class PointDrawActivityTest(unittest.TestCase):
         self.store.set_point_draw_min_activity(CHAT, 1, 1)
         query = self.click(CHAT)                     # 群内按钮
         query.answer.assert_awaited_once_with(
-            "今日活跃不足：需要当日有效发言 1 条才能参与积分抽奖（1 分钟内多条只算 1 条），你今天已有效发言 0 条", show_alert=True,
+            "今日活跃不足：需要当日有效发言 1 条才能参与积分抽奖（1 分钟内最多算 2 条，少于 3 个字不算），你今天已有效发言 0 条", show_alert=True,
         )
         query = self.click(USER, override=CHAT)      # 私聊群组管理里选中的群
         self.assertIn("才能参与积分抽奖", query.answer.await_args.args[0])
@@ -133,7 +133,7 @@ class PointDrawActivityTest(unittest.TestCase):
         self.store.set_point_draw_min_activity(CHAT, 6, 1)
         self.assertIn("最低当日活跃：今日有效发言满 6 条才能参与",
                       point_draw_settings_view(self.store, CHAT)[0])
-        self.assertIn("参与条件：今日有效发言满 6 条（1 分钟内多条只算 1 条）", point_draw_view(self.store, CHAT)[0])
+        self.assertIn("参与条件：今日有效发言满 6 条（1 分钟内最多算 2 条，少于 3 个字不算）", point_draw_view(self.store, CHAT)[0])
         self.assertIn("积分抽奖：开启，每次 10 积分，今日有效发言满 6 条可参与",
                       points_status_text(self.store, CHAT))
         self.assertIn("points_drawmsgmin", settings_wizard.FLOWS)
