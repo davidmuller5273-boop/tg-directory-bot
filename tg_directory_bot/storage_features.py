@@ -102,6 +102,22 @@ class FeatureStoreMixin:
             """
         )
         ensure(conn, "price_alerts", "disabled_reason", "TEXT NOT NULL DEFAULT ''")
+        ensure(conn, "group_points_config", "self_boost_points", "REAL NOT NULL DEFAULT 0")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS self_boost_rewards (
+                chat_id INTEGER NOT NULL,
+                boost_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                points REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                removed_at TEXT,
+                PRIMARY KEY(chat_id, boost_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_self_boost_user
+                ON self_boost_rewards(chat_id, user_id, removed_at);
+            """
+        )
         # 涨跌监控始终双向：旧的「只涨/只跌」迁移为双向
         conn.execute("UPDATE price_alerts SET direction='both' WHERE direction<>'both'")
         if not conn.execute("SELECT 1 FROM raffle_win_log LIMIT 1").fetchone():
@@ -544,3 +560,66 @@ class FeatureStoreMixin:
                 (reason[:200], chat_id),
             )
             return cursor.rowcount
+
+
+    # ---- 自己助推奖励 ------------------------------------------------------
+
+    def set_self_boost_points(self, chat_id: int, points, updated_by: int) -> Decimal:
+        amount = _np(points)
+        if amount < 0 or amount > 1000000:
+            raise ValueError("助推奖励积分范围为0-1000000（0 表示关闭）")
+        self.points_config(chat_id)  # type: ignore[attr-defined]
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                "UPDATE group_points_config SET self_boost_points=? WHERE chat_id=?",
+                (_db(amount), chat_id),
+            )
+        return amount
+
+    def self_boost_points(self, chat_id: int) -> Decimal:
+        config = self.points_config(chat_id)  # type: ignore[attr-defined]
+        return _np(config["self_boost_points"] or 0) if "self_boost_points" in config.keys() else _np(0)
+
+    def award_self_boost(self, chat_id: int, boost_id: str, user_id: int,
+                         username: str = "", display_name: str = ""):
+        """Member boosted the group: +B once per boost_id. Returns (points, balance) or None."""
+        if not boost_id or not self.points_config(chat_id)["is_enabled"]:  # type: ignore[attr-defined]
+            return None
+        points = self.self_boost_points(chat_id)
+        if points <= 0:
+            return None
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO self_boost_rewards (chat_id, boost_id, user_id, points)
+                   VALUES (?, ?, ?, ?)""",
+                (chat_id, str(boost_id)[:200], user_id, _db(points)),
+            )
+            if not cursor.rowcount:
+                return None
+            balance = self._adjust_points_conn(  # type: ignore[attr-defined]
+                conn, chat_id, user_id, points, "助推本群奖励", 0, username, display_name,
+            )
+            return points, balance
+
+    def revoke_self_boost(self, chat_id: int, boost_id: str):
+        """Boost removed/expired: deduct the reward given for it (may go negative).
+        Returns (row, points, balance) or None when that boost was never rewarded."""
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            row = conn.execute(
+                """SELECT * FROM self_boost_rewards
+                   WHERE chat_id=? AND boost_id=? AND removed_at IS NULL""",
+                (chat_id, str(boost_id)[:200]),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """UPDATE self_boost_rewards SET removed_at=CURRENT_TIMESTAMP
+                   WHERE chat_id=? AND boost_id=?""",
+                (chat_id, str(boost_id)[:200]),
+            )
+            points = _np(row["points"] or 0)
+            balance = self._adjust_points_conn(  # type: ignore[attr-defined]
+                conn, chat_id, int(row["user_id"]), -points, "取消助推，扣回助推奖励", 0,
+                allow_negative=True,
+            )
+            return row, points, balance

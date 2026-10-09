@@ -93,6 +93,7 @@ FLOWS = {
     "points_drawmsgmin": ("积分抽奖最低当日活跃", [number("当日最少有效发言条数", "0", "100000", True, hint="发送整数；0 表示不限制。1 分钟内最多算 2 条，少于 3 个字不算。")]),
     "points_drawmincost": ("积分抽奖最低消耗", [number("最低消耗积分", "0.01", "1000000")]),
     "points_drawconfig": ("积分抽奖", [number("最低消耗积分", "0.01", "1000000"), Question("抽奖开关", choices=("开启", "关闭"))]),
+    "points_selfboost": ("助推奖励", [number("每助推一次奖励积分", "0", "1000000", hint="可带两位小数；0 表示关闭。成员取消助推或助推到期时扣回。")]),
     "points_drawrate": ("积分抽奖中奖倍率", [number("中奖倍率", "0", "5")]),
     "points_diceodds": ("骰子赔率", [Question("赔率", "例如 2000 表示赔率 2.000。")]),
     "points_dicemin": ("骰子最低参与积分", [number("每次最低积分", "0.01", "1000000")]),

@@ -164,7 +164,7 @@ HELP_TEXT = """📖 使用帮助
 • 中奖记录、兑换记录、游戏记录、积分抽奖
 • 兑换 礼品编号；群内骰子：大3 / 小5 / 单10 / 双2
 • 有效发言：1 分钟内最多算 2 条，少于 3 个字不算
-• 活跃阶梯奖励、邀请奖励在“⭐ 积分”分类里设置
+• 活跃阶梯奖励、邀请奖励、⚡ 助推奖励（自己助推一次加分，取消助推扣回）在“⭐ 积分”分类里设置
 
 🎁 全部抽奖
 • 抽奖：本群进行中；抽奖历史：往期
@@ -982,7 +982,10 @@ def points_menu_keyboard(
                 ),
                 InlineKeyboardButton("⚙️ 签到设置", callback_data="points:set:checkin"),
             ],
-            [InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activitymenu")],
+            [
+                InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activitymenu"),
+                InlineKeyboardButton("⚡ 助推奖励", callback_data="points:set:selfboost"),
+            ],
             [
                 InlineKeyboardButton("➕ 添加礼品", callback_data="points:set:giftadd"),
                 InlineKeyboardButton("➖ 删除礼品", callback_data="points:set:giftdel"),
@@ -1098,6 +1101,13 @@ def dice_settings_view(config) -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
+def self_boost_label(store: DirectoryStore, chat_id: int) -> str:
+    points = store.self_boost_points(chat_id)
+    if points <= 0:
+        return "助推奖励：关闭"
+    return f"助推奖励：每助推一次 +{format_points(points)} 积分，取消助推扣回"
+
+
 def points_status_text(
     store: DirectoryStore, chat_id: int, show_admin: bool = False
 ) -> str:
@@ -1134,6 +1144,7 @@ def points_status_text(
         f"签到：{checkin} 积分\n"
         f"连续签到：第3天起每天额外 +{format_points(config['streak_bonus'])}\n"
         f"活跃奖励：{activity}\n"
+        f"{self_boost_label(store, chat_id)}\n"
         f"骰子游戏：{dice}\n"
         f"骰子赔率：{odds / 1000:.3f}（{odds}）\n\n"
         f"骰子最低参与：{format_points(config['dice_min_bet'])} 积分\n"
@@ -7600,6 +7611,13 @@ async def commit_group_menu_input(
                     normalize_points(config["draw_cost"]), multiplier, user.id,
                 )
                 result = f"积分抽奖中奖倍率已设为 {multiplier:g}。"
+            elif action == "selfboost":
+                amount = parse_points_amount(text.strip(), allow_zero=True)
+                amount = store.set_self_boost_points(chat_id, amount, user.id)
+                result = (
+                    f"助推奖励已设为每助推一次 +{format_points(amount)} 积分（取消助推会扣回）。"
+                    if amount > 0 else "助推奖励已关闭。"
+                )
             elif action == "diceodds":
                 odds = parse_dice_odds_input(text)
                 store.set_dice_odds(chat_id, odds, user.id)
@@ -9917,6 +9935,7 @@ async def track_chat_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     store: DirectoryStore = context.application.bot_data["store"]
     chat_id = int(change.chat.id)
+    await reward_self_boost(context, store, chat_id, str(boost.boost_id), booster)
     result = store.award_invite_boost(chat_id, str(boost.boost_id), int(booster.id))
     if not result:
         return
@@ -9940,6 +9959,54 @@ async def track_chat_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logging.info("Could not announce boost reward in %s: %s", chat_id, exc)
 
 
+async def reward_self_boost(context, store: DirectoryStore, chat_id: int, boost_id: str, booster) -> None:
+    """Member boosted: +B points to the booster (once per boost_id)."""
+    name = booster.full_name or booster.username or str(booster.id)
+    try:
+        result = store.award_self_boost(
+            chat_id, boost_id, int(booster.id), booster.username or "", booster.full_name or "",
+        )
+    except ValueError as exc:
+        logging.info("Self boost reward skipped in %s: %s", chat_id, exc)
+        return
+    if not result:
+        return
+    points, balance = result
+    store.audit(f"tg:{booster.id}", "points.selfboost", str(chat_id), f"boost={boost_id}; points={points}")
+    try:
+        with persistent_message():
+            await context.bot.send_message(
+                chat_id,
+                f"⚡ 感谢助推：{telegram_user_link(booster.id, name)} +{format_points(points)} 积分\n"
+                f"当前积分：{format_points(balance)}",
+                parse_mode=ParseMode.HTML,
+            )
+    except TelegramError as exc:
+        logging.info("Could not announce self boost reward in %s: %s", chat_id, exc)
+
+
+async def clawback_self_boost(context, store: DirectoryStore, chat_id: int, boost_id: str) -> None:
+    """Boost removed/expired: -B for that rewarded boost."""
+    result = store.revoke_self_boost(chat_id, boost_id)
+    if not result:
+        return
+    row, points, balance = result
+    user_id = int(row["user_id"])
+    member = store.find_group_user(chat_id, str(user_id))
+    name = str(member["display_name"] or member["username"] or user_id) if member else str(user_id)
+    store.audit(f"tg:{user_id}", "points.selfboost.removed", str(chat_id), f"boost={boost_id}; points=-{points}")
+    try:
+        with persistent_message():
+            await context.bot.send_message(
+                chat_id,
+                f"⚡ 助推已取消：{telegram_user_link(user_id, name)} -{format_points(points)} 积分\n"
+                f"当前积分：{format_points(balance)}",
+                parse_mode=ParseMode.HTML,
+            )
+    except TelegramError as exc:
+        logging.info("Could not announce self boost clawback in %s: %s", chat_id, exc)
+
+
 async def track_removed_chat_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """removed_chat_boost: boost removed/expired -> claw back that boost's reward."""
     removed = getattr(update, "removed_chat_boost", None)
@@ -9947,6 +10014,7 @@ async def track_removed_chat_boost(update: Update, context: ContextTypes.DEFAULT
         return
     store: DirectoryStore = context.application.bot_data["store"]
     chat_id = int(removed.chat.id)
+    await clawback_self_boost(context, store, chat_id, str(removed.boost_id))
     result = store.revoke_invite_boost(chat_id, str(removed.boost_id))
     if not result:
         return
@@ -12325,6 +12393,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "drawmincost": "请发送每次抽奖最低消耗积分，范围0.01-1000000（最多两位小数）。",
             "drawmsgmin": "请设置当日有效发言满多少条才能参与积分抽奖，0 表示不限。\n有效发言：1 分钟内最多算 2 条，少于 3 个字不算。",
             "drawrate": "请发送中奖概率倍率，范围0-5。\n0表示不会中奖，1表示自动换算倍率。",
+            "selfboost": "请设置成员每助推本群一次奖励多少积分，0 表示关闭；助推取消或到期会扣回。",
             "diceodds": "请发送骰子赔率（1.7-2.0，也可写 1700-2000；例如 1.95，押1000中奖反1950）",
             "dicemin": "请设置每次玩骰子的最低积分。",
             "dicemax": "请设置骰子单注最高积分，0 表示不限。",
@@ -13811,6 +13880,7 @@ def category_group_rows(category: str, allowed: set[str]) -> list[list[InlineKey
         if "points" in allowed:
             rows.append([InlineKeyboardButton("⭐ 积分·签到·礼品", callback_data="group:points")])
             rows.append([InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activitymenu")])
+            rows.append([InlineKeyboardButton("⚡ 助推奖励", callback_data="points:set:selfboost")])
         if "invite" in allowed:
             rows.append([InlineKeyboardButton("🔗 邀请链接与奖励", callback_data="invite:menu")])
     elif category == "dice":
