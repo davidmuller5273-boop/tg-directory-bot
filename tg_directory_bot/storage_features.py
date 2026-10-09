@@ -81,8 +81,27 @@ class FeatureStoreMixin:
             );
             CREATE INDEX IF NOT EXISTS idx_raffle_win_log
                 ON raffle_win_log(chat_id, user_id, won_at);
+            CREATE TABLE IF NOT EXISTS price_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                owner_id INTEGER NOT NULL DEFAULT 0,
+                symbol TEXT NOT NULL,
+                daily_pct REAL NOT NULL DEFAULT 0,
+                fast_pct REAL NOT NULL DEFAULT 0,
+                direction TEXT NOT NULL DEFAULT 'both',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_daily_up TEXT NOT NULL DEFAULT '',
+                last_daily_down TEXT NOT NULL DEFAULT '',
+                last_fast_at REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, symbol)
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_alerts_enabled
+                ON price_alerts(enabled, symbol);
             """
         )
+        ensure(conn, "price_alerts", "disabled_reason", "TEXT NOT NULL DEFAULT ''")
         if not conn.execute("SELECT 1 FROM raffle_win_log LIMIT 1").fetchone():
             conn.execute(
                 """INSERT INTO raffle_win_log (chat_id, user_id, raffle_id, won_at)
@@ -420,3 +439,107 @@ class FeatureStoreMixin:
                    ORDER BY created_at DESC, id DESC LIMIT 1""",
                 (chat_id,),
             ).fetchone()
+
+
+    # ---- 币价涨跌监控 ------------------------------------------------------
+
+    def upsert_price_alert(
+        self, chat_id: int, owner_id: int, symbol: str, daily_pct, fast_pct,
+        direction: str = "both", max_per_chat: int = 50,
+    ) -> int:
+        symbol = str(symbol or "").upper()
+        if not symbol:
+            raise ValueError("币种不能为空")
+        if direction not in {"both", "up", "down"}:
+            raise ValueError("方向无效")
+        daily, fast = float(daily_pct or 0), float(fast_pct or 0)
+        if daily < 0 or fast < 0:
+            raise ValueError("阈值不能小于 0")
+        if daily <= 0 and fast <= 0:
+            raise ValueError("日涨跌和10分钟涨跌至少设置一个大于 0 的阈值")
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            existing = conn.execute(
+                "SELECT id FROM price_alerts WHERE chat_id=? AND symbol=?", (chat_id, symbol),
+            ).fetchone()
+            if existing is None and max_per_chat and max_per_chat > 0:
+                count = int(conn.execute(
+                    "SELECT COUNT(*) FROM price_alerts WHERE chat_id=?", (chat_id,),
+                ).fetchone()[0])
+                if count >= max_per_chat:
+                    raise ValueError(f"每个聊天最多监控 {max_per_chat} 个币种，请先删除不需要的")
+            conn.execute(
+                """INSERT INTO price_alerts (chat_id, owner_id, symbol, daily_pct, fast_pct, direction)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chat_id, symbol) DO UPDATE SET
+                     owner_id=excluded.owner_id, daily_pct=excluded.daily_pct,
+                     fast_pct=excluded.fast_pct, direction=excluded.direction,
+                     enabled=1, disabled_reason='', last_daily_up='', last_daily_down='',
+                     last_fast_at=0, updated_at=CURRENT_TIMESTAMP""",
+                (chat_id, owner_id, symbol, daily, fast, direction),
+            )
+            row = conn.execute(
+                "SELECT id FROM price_alerts WHERE chat_id=? AND symbol=?", (chat_id, symbol),
+            ).fetchone()
+            return int(row["id"])
+
+    def price_alert(self, alert_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute("SELECT * FROM price_alerts WHERE id=?", (alert_id,)).fetchone()
+
+    def price_alert_for(self, chat_id: int, symbol: str) -> sqlite3.Row | None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                "SELECT * FROM price_alerts WHERE chat_id=? AND symbol=?",
+                (chat_id, str(symbol or "").upper()),
+            ).fetchone()
+
+    def list_price_alerts(self, chat_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                "SELECT * FROM price_alerts WHERE chat_id=? ORDER BY symbol", (chat_id,),
+            ).fetchall()
+
+    def active_price_alerts(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                "SELECT * FROM price_alerts WHERE enabled=1 ORDER BY id",
+            ).fetchall()
+
+    def delete_price_alert(self, chat_id: int, symbol: str = "", alert_id: int = 0) -> bool:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            if alert_id:
+                cursor = conn.execute(
+                    "DELETE FROM price_alerts WHERE id=? AND chat_id=?", (alert_id, chat_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM price_alerts WHERE chat_id=? AND symbol=?",
+                    (chat_id, str(symbol or "").upper()),
+                )
+            return cursor.rowcount > 0
+
+    def mark_price_alert_fired(
+        self, alert_id: int, *, daily_up: str = "", daily_down: str = "", fast_at: float = 0,
+    ) -> None:
+        sets, params = [], []
+        if daily_up:
+            sets.append("last_daily_up=?")
+            params.append(daily_up)
+        if daily_down:
+            sets.append("last_daily_down=?")
+            params.append(daily_down)
+        if fast_at:
+            sets.append("last_fast_at=?")
+            params.append(float(fast_at))
+        if not sets:
+            return
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute(f"UPDATE price_alerts SET {', '.join(sets)} WHERE id=?", (*params, alert_id))
+
+    def disable_price_alerts(self, chat_id: int, reason: str = "") -> int:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            cursor = conn.execute(
+                "UPDATE price_alerts SET enabled=0, disabled_reason=? WHERE chat_id=? AND enabled=1",
+                (reason[:200], chat_id),
+            )
+            return cursor.rowcount

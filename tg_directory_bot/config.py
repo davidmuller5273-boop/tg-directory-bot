@@ -66,6 +66,8 @@ class Config:
     mother_bot_id: int = 0
     clone_cipher_key: str = ""
     storage_quota_bytes: int = 0
+    price_alert_max_per_chat: int = 50
+    price_alert_poll_seconds: int = 30
 
 
 def _csv(value: str | None, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -213,6 +215,8 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
             "https://raw.githubusercontent.com/wenjinliuu/lottery-data-repo/main/public_data",
         ).strip().rstrip("/"),
         lottery_poll_seconds=lottery_poll_seconds,
+        price_alert_max_per_chat=int(_float_env("PRICE_ALERT_MAX_PER_CHAT", 50, 0)),
+        price_alert_poll_seconds=int(_float_env("PRICE_ALERT_POLL_SECONDS", 30, 10)),
         message_auto_delete_seconds=message_auto_delete_seconds,
         is_clone=is_clone,
         telegram_api_id=telegram_api_id,

@@ -14,6 +14,24 @@ from telegram.ext import ExtBot
 
 _PERSISTENT_MESSAGE: ContextVar[bool] = ContextVar("persistent_bot_message", default=False)
 _AD_MESSAGE: ContextVar[bool] = ContextVar("bot_ad_message", default=False)
+# 私聊消息统一按指定秒数撤回（如贴纸复制：私聊 10 分钟撤回）；群/频道不受影响
+_PRIVATE_DELETE_AFTER: ContextVar[int] = ContextVar("private_delete_after", default=0)
+
+
+@contextmanager
+def private_delete_after(seconds: int) -> Iterator[None]:
+    """Bot messages sent to *private* chats inside this scope are deleted after
+    ``seconds`` (also persisted, so the deletion survives restarts), even when
+    they are marked persistent. Group and channel messages are unaffected."""
+    token = _PRIVATE_DELETE_AFTER.set(max(0, int(seconds)))
+    try:
+        yield
+    finally:
+        _PRIVATE_DELETE_AFTER.reset(token)
+
+
+def private_delete_seconds() -> int:
+    return int(_PRIVATE_DELETE_AFTER.get())
 
 
 @contextmanager
@@ -42,6 +60,7 @@ class AutoDeleteBot(ExtBot):
     __slots__ = (
         "auto_delete_seconds", "_delete_tasks", "message_decorator",
         "media_ad_sender", "markup_decorator", "_delete_by_message",
+        "deletion_recorder",
     )
 
     def __init__(self, *args: Any, auto_delete_seconds: int = 180, **kwargs: Any):
@@ -52,6 +71,8 @@ class AutoDeleteBot(ExtBot):
         object.__setattr__(self, "message_decorator", None)
         object.__setattr__(self, "media_ad_sender", None)
         object.__setattr__(self, "markup_decorator", None)
+        # callable(chat_id, message_id, seconds) that persists a deletion
+        object.__setattr__(self, "deletion_recorder", None)
 
     @staticmethod
     def _chat_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int | str | None:
@@ -135,13 +156,35 @@ class AutoDeleteBot(ExtBot):
         return tuple(values), kwargs
 
     def _schedule_delete(self, result: Any) -> None:
-        if self.auto_delete_seconds <= 0 or _PERSISTENT_MESSAGE.get():
-            return
+        override = _PRIVATE_DELETE_AFTER.get()
         messages = result if isinstance(result, (list, tuple)) else (result,)
         for message in messages:
             if not isinstance(message, Message):
                 continue
+            if override and int(message.chat_id) > 0:
+                self.schedule_private_cleanup(message.chat_id, message.message_id, override)
+                continue
+            if self.auto_delete_seconds <= 0 or _PERSISTENT_MESSAGE.get():
+                continue
             self.schedule_delete(message.chat_id, message.message_id)
+
+    def schedule_private_cleanup(self, chat_id: int, message_id: int, seconds: int) -> bool:
+        """Delete a private-chat message after ``seconds`` (in memory and in the
+        persistent deletion queue). Returns False for groups/channels."""
+        try:
+            chat_id, message_id = int(chat_id), int(message_id)
+        except (TypeError, ValueError):
+            return False
+        if chat_id <= 0 or seconds <= 0:
+            return False
+        self._schedule_delete_after(chat_id, message_id, seconds)
+        recorder = self.deletion_recorder
+        if recorder is not None:
+            try:
+                recorder(chat_id, message_id, seconds)
+            except Exception:  # noqa: BLE001 - 记录失败不影响发送
+                logging.exception("Could not persist deletion of %s/%s", chat_id, message_id)
+        return True
 
     def schedule_delete(self, chat_id: int, message_id: int) -> None:
         if self.auto_delete_seconds <= 0:

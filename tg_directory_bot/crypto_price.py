@@ -112,6 +112,14 @@ class Quote:
     cny_rate: Decimal | None
     rate_source: str
     fetched_at: float
+    sod_utc8: Decimal | None = None
+
+    @property
+    def day_change_pct(self) -> Decimal | None:
+        """日涨跌：相对北京时间当天 0 点开盘价（OKX sodUtc8）。"""
+        if not self.sod_utc8:
+            return None
+        return (self.last - self.sod_utc8) / self.sod_utc8 * 100
 
     @property
     def change_pct(self) -> Decimal:
@@ -184,6 +192,7 @@ class PriceService:
             symbol, _decimal(row["last"]), _decimal(row.get("open24h") or row["last"]),
             _decimal(row.get("high24h") or row["last"]), _decimal(row.get("low24h") or row["last"]),
             rate, source, now,
+            _decimal(row["sodUtc8"]) if row.get("sodUtc8") else None,
         )
         self._cache[symbol] = (now, quote)
         if len(self._cache) > 500:
@@ -206,6 +215,9 @@ def quote_text(quote: Quote, now: datetime | None = None) -> str:
     else:
         lines.append("折合人民币：汇率暂时获取失败")
     lines.append(f"24h 涨跌：{'+' if change > 0 else ''}{change.quantize(Decimal('0.01'))}% {arrow}")
+    day = quote.day_change_pct
+    if day is not None:
+        lines.append(f"日涨跌（北京时间0点起）：{'+' if day > 0 else ''}{day.quantize(Decimal('0.01'))}%")
     lines.append(f"24h 最高 / 最低：{format_price(quote.high24h)} / {format_price(quote.low24h)}")
     stamp = (now or datetime.now(BJT)).astimezone(BJT).strftime("%H:%M:%S")
     lines.append(f"更新时间：{stamp}（北京时间）")
@@ -221,5 +233,7 @@ HELP_TEXT = (
     "• 发送 /price btc，或发送「币价 btc」查询任意币种。\n"
     "• 直接发送常见币种代码（如 BTC、ETH、SOL）也会回复价格。\n"
     "• 价格来自 OKX 现货 USDT 交易对，人民币按 OKX C2C 价格换算（失败时用美元汇率）。\n"
-    "• 群管理员可在 群设置 → 💹 币价 中开关本群的币价回复。"
+    "• 群管理员可在 群设置 → 💹 币价 中开关本群的币价回复。\n"
+    "• 🔔 涨跌监控：查询结果下点「🔔 监控此币涨跌」，或 /pricealert btc 5 2"
+    "（日涨跌 5%、10分钟涨跌 2% 提醒）；/pricealerts 查看，/pricealert del btc 删除。"
 )

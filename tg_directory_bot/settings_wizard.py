@@ -197,6 +197,11 @@ FLOWS = {
     "tron_monitor_low": ("监控低余额提醒", [Question("低余额阈值", "低于该余额才提醒；发送“关闭”可停用。", "threshold", "0")]),
     "tron_monitor_high": ("监控高余额提醒", [Question("高余额阈值", "高于该余额才提醒；发送“关闭”可停用。", "threshold", "0")]),
     "tron_monitor_transfer": ("监控交易提醒", [Question("最小交易金额", "小于该金额不提醒；至少0.1；发送“关闭”可停用。", "threshold", "0.1")]),
+    "price_alert": ("币价涨跌监控", [
+        number("日涨跌阈值 %", "0", "1000", hint="北京时间 0 点起的涨跌幅达到该百分比就提醒，例如 5；发送 0 表示不监控日涨跌。"),
+        number("10分钟涨跌阈值 %", "0", "1000", hint="与 10 分钟前价格相比涨跌达到该百分比就提醒，例如 2；发送 0 表示不监控。"),
+        Question("提醒方向", "选择涨、跌都提醒，还是只提醒一个方向。", choices=("双向", "只涨", "只跌")),
+    ]),
     "tron_monitor_delete": ("监控消息撤回时间", [number("撤回天数", "0", "30", True, "0 表示不自动撤回。")]),
 }
 
@@ -227,7 +232,7 @@ class Draft:
     def view(self, error=""):
         title, questions = FLOWS[self.mode]
         lines = ["正在设置：" + (self.action_title or title)]
-        if self.group_id:
+        if self.group_id and self.mode != "price_alert":
             lines.append(f"群组ID：{self.group_id}")
         lines.append(f"第 {min(self.step + 1, len(questions))}/{len(questions)} 步" if self.step < len(questions) else "确认设置（尚未保存）")
         for question, answer in zip(questions, self.answers):
@@ -334,6 +339,10 @@ async def begin(update, context, group_id):
     draft = Draft(mode, update.effective_user.id, update.effective_chat.id, group_id, update.callback_query.message.message_id)
     prefills = context.user_data.pop("wizard_prefills", None)
     panel = update.callback_query.message
+    panel_override = context.user_data.pop("wizard_panel_id", None)
+    if isinstance(panel_override, int) and not isinstance(panel_override, bool):
+        # 在新发送的面板消息里进行（保留原消息，例如币价查询结果）
+        draft.panel_id = panel_override
     if isinstance(prefills, (list, tuple)):
         for index, value in enumerate(prefills):
             if index < len(draft.answers) and value is not None:
@@ -376,6 +385,7 @@ def discard(context):
     context.user_data.pop("edit_raffle_id", None)
     context.user_data.pop("wizard_prefills", None)
     context.user_data.pop("wizard_action_title", None)
+    context.user_data.pop("wizard_panel_id", None)
 
 
 async def receive(update, context):

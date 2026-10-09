@@ -25,7 +25,7 @@ from telegram import (
     InputTextMessageContent, KeyboardButton, MessageEntity, ReplyKeyboardMarkup, Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
-from telegram.error import Forbidden, TelegramError
+from telegram.error import BadRequest as TelegramBadRequest, Forbidden, TelegramError
 import httpx
 from telegram.ext import (
     Application,
@@ -66,7 +66,7 @@ from .storage import (
     normalize_points,
 )
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
-from . import crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
+from . import crypto_alert, crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
@@ -184,8 +184,9 @@ HELP_TEXT = """📖 使用帮助
 🧰 其他
 • z0 或 /rate：OKX 商户报价
 • /price btc、“币价 btc”或直接发 BTC：查币价
+• 币价涨跌监控：查询结果下点“🔔 监控此币涨跌”，或 /pricealert btc 5 2（日涨跌5%、10分钟2%）；/pricealerts 查看
 • /userinfo @用户名：查询账户资料
-• /jx：复制贴纸包并改标题
+• /jx：复制贴纸包并改标题（私聊里相关消息10分钟后自动撤回）
 • 主菜单“😊 表情包复制更改标题”：固定模式保存标题和频道后，发链接即自动生成并发到频道
 • 链接后加序号可去掉部分贴图，例如：链接 3|5|12
 • /life 或发送“人生指南”：📖 人生指南
@@ -10831,6 +10832,9 @@ async def commit_settings_draft(update, context, draft):
         await dispatch_callback(ActionUpdate(), context)
         record_selected_bot_usage(update, context.application.bot_data["store"])
         return
+    if mode == "price_alert":
+        await commit_price_alert(update, context, draft)
+        return
     permission = menu_mode_group_permission(mode)
     if mode.startswith("groupperm_"):
         if not has_super_admin_access(context, update.effective_user.id):
@@ -13199,6 +13203,8 @@ async def post_init(application: Application) -> None:
         BotCommand("jx", "复制贴纸包并改标题"),
         BotCommand("life", "人生指南"),
         BotCommand("price", "查询币价，如 /price btc"),
+        BotCommand("pricealert", "币价涨跌监控，如 /pricealert btc 5 2"),
+        BotCommand("pricealerts", "查看我的币价涨跌监控"),
     ]
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username or ""
@@ -13356,6 +13362,7 @@ def build_application(config: Config) -> Application:
     object.__setattr__(bot, "message_decorator", ad_decorator)
     object.__setattr__(bot, "media_ad_sender", media_ad_sender)
     object.__setattr__(bot, "markup_decorator", markup_decorator)
+    object.__setattr__(bot, "deletion_recorder", store.schedule_message_deletion)
 
     application.add_handler(
         CallbackQueryHandler(refresh_callback_cleanup), group=-2
@@ -13428,6 +13435,8 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("jx", jx_command))
     application.add_handler(CommandHandler(["life", "rensheng"], life_command))
     application.add_handler(CommandHandler("price", price_command))
+    application.add_handler(CommandHandler("pricealert", price_alert_command))
+    application.add_handler(CommandHandler("pricealerts", price_alerts_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(InlineQueryHandler(quick_post_inline))
     application.add_handler(ChatMemberHandler(track_personal_invite, ChatMemberHandler.CHAT_MEMBER))
@@ -13500,6 +13509,10 @@ def build_application(config: Config) -> Application:
     application.job_queue.run_repeating(
         poll_lottery_results, interval=5, first=5, job_kwargs=single_job
     )
+    application.job_queue.run_repeating(
+        poll_price_alerts, interval=max(10, int(getattr(config, "price_alert_poll_seconds", 30) or 30)),
+        first=20, job_kwargs=single_job,
+    )
     if "clone_manager" in application.bot_data:
         application.job_queue.run_repeating(
             sync_clone_requests if not config.is_clone else notify_clone_results,
@@ -13538,7 +13551,10 @@ def price_symbols(store: DirectoryStore) -> set[str]:
 
 
 def price_refresh_markup(symbol: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新", callback_data=f"price:q:{symbol}")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 刷新", callback_data=f"price:q:{symbol}")],
+        [InlineKeyboardButton(crypto_alert.BUTTON_TEXT, callback_data=f"palert:set:{symbol}")],
+    ])
 
 
 async def price_reply_text(context: ContextTypes.DEFAULT_TYPE, symbol: str) -> str:
@@ -13573,7 +13589,8 @@ def price_menu_view(store: DirectoryStore, can_manage: bool) -> tuple[str, Inlin
     rows = [[
         InlineKeyboardButton(symbol, callback_data=f"price:q:{symbol}")
         for symbol in ("BTC", "ETH", "SOL", "TRX")
-    ], [InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")]]
+    ], [InlineKeyboardButton(crypto_alert.LIST_BUTTON_TEXT, callback_data="palert:list")],
+        [InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")]]
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -13921,6 +13938,9 @@ async def feature_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, d
             return True
         await query.answer()
         return True
+    if data.startswith("palert:"):
+        await price_alert_callback(update, context, data)
+        return True
     if data.startswith("cat:") or data.startswith("catsel:"):
         parts = data.split(":")
         category = parts[1] if len(parts) > 1 else ""
@@ -14124,3 +14144,303 @@ async def quick_text_features(
         await reply_price(message, context, symbol or bare)
         return True
     return False
+
+
+
+# ---- 🔔 币价涨跌监控 -----------------------------------------------------
+
+PRICE_ALERT_TARGET_KEY = "price_alert_target"
+PRICE_ALERT_POLLER_KEY = "price_alert_poller"
+PRICE_ALERT_GROUP_DENIED = "只有群管理员可以设置本群的涨跌监控；个人提醒请私聊机器人设置。"
+
+
+async def can_manage_group_alerts(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    if has_group_permission(context, chat_id, user_id, "view"):
+        return True
+    try:
+        return await is_telegram_chat_admin(context, chat_id, user_id)
+    except Exception:  # noqa: BLE001 - 无法确认时按非管理员处理
+        return False
+
+
+def price_alert_max(context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = context.application.bot_data.get("config")
+    return int(getattr(config, "price_alert_max_per_chat", crypto_alert.DEFAULT_MAX_PER_CHAT) or 0)
+
+
+async def price_alert_target(
+    context: ContextTypes.DEFAULT_TYPE, chat, user_id: int,
+) -> int | None:
+    """Private → the user's own alerts; group → the group's alerts (admins only)."""
+    if chat is None or chat.type == ChatType.PRIVATE:
+        return int(user_id)
+    if await can_manage_group_alerts(context, int(chat.id), user_id):
+        return int(chat.id)
+    return None
+
+
+def price_alert_list_view(store: DirectoryStore, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    rows = store.list_price_alerts(chat_id)
+    where = "本群" if chat_id < 0 else "我的"
+    lines = [f"🔔 {where}币价涨跌监控", ""]
+    buttons: list[list[InlineKeyboardButton]] = []
+    if not rows:
+        lines.append("还没有监控。查询币价后点「🔔 监控此币涨跌」，或发送 /pricealert btc 5 2 添加。")
+    for row in rows:
+        mark = "" if int(row["enabled"] or 0) else "（已停用：机器人无法发送提醒）"
+        lines.append(f"• {crypto_alert.monitor_summary(row)}{mark}")
+        buttons.append([
+            InlineKeyboardButton(f"✏️ {row['symbol']}", callback_data=f"palert:set:{row['symbol']}"),
+            InlineKeyboardButton("🗑 删除", callback_data=f"palert:del:{row['id']}"),
+        ])
+    lines.extend([
+        "", f"{crypto_alert.DAILY_LABEL}：每天每个方向最多提醒一次；",
+        f"{crypto_alert.FAST_LABEL}：提醒后冷却 10 分钟。",
+    ])
+    buttons.append([InlineKeyboardButton("⬅️ 返回币价", callback_data="price:menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def price_alert_prefills(row) -> list[str]:
+    def number_text(value) -> str:
+        return format(Decimal(str(value or 0)).normalize(), "f")
+    return [
+        number_text(row["daily_pct"]), number_text(row["fast_pct"]),
+        crypto_alert.DIRECTIONS.get(str(row["direction"] or "both"), "双向"),
+    ]
+
+
+def price_alert_saved_text(symbol: str, daily, fast, direction: str, chat_id: int) -> str:
+    return (
+        f"✅ 已设置 {symbol} 涨跌监控\n"
+        f"{crypto_alert.DAILY_LABEL}：{crypto_alert.threshold_text(daily)}\n"
+        f"{crypto_alert.FAST_LABEL}：{crypto_alert.threshold_text(fast)}\n"
+        f"提醒方向：{crypto_alert.DIRECTIONS.get(direction, '双向')}\n"
+        f"提醒发送到：{'本群' if chat_id < 0 else '私聊'}\n"
+        "日涨跌每天每个方向最多提醒一次；10分钟涨跌提醒后冷却 10 分钟。"
+    )
+
+
+def price_alert_list_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(crypto_alert.LIST_BUTTON_TEXT, callback_data="palert:list")]])
+
+
+async def price_alert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat = query.message.chat if query.message else None
+    store: DirectoryStore = context.application.bot_data["store"]
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    group = bool(chat and chat.type != ChatType.PRIVATE)
+    if action == "list":
+        target = int(chat.id) if group else int(user_id)
+        text, markup = price_alert_list_view(store, target)
+        await query.answer()
+        try:
+            await query.edit_message_text(text, reply_markup=markup)
+        except TelegramError as exc:
+            if "not modified" not in str(exc).lower() and query.message is not None:
+                await query.message.reply_text(text, reply_markup=markup)
+        return
+    target = await price_alert_target(context, chat, user_id)
+    if target is None:
+        await query.answer(PRICE_ALERT_GROUP_DENIED, show_alert=True)
+        return
+    if action == "del" and len(parts) > 2 and parts[2].isdigit():
+        removed = store.delete_price_alert(target, alert_id=int(parts[2]))
+        text, markup = price_alert_list_view(store, target)
+        await query.answer("已删除" if removed else "监控不存在或已删除")
+        try:
+            await query.edit_message_text(text, reply_markup=markup)
+        except TelegramError:
+            pass
+        return
+    if action == "set" and len(parts) > 2:
+        symbol = crypto_price.normalize_symbol(parts[2])
+        if not symbol or symbol == "USDT":
+            await query.answer("币种无效。", show_alert=True)
+            return
+        existing = store.price_alert_for(target, symbol)
+        if existing is None and price_alert_max(context) > 0 and len(store.list_price_alerts(target)) >= price_alert_max(context):
+            await query.answer(f"每个聊天最多监控 {price_alert_max(context)} 个币种，请先删除不需要的。", show_alert=True)
+            return
+        await query.answer()
+        try:
+            panel = await context.bot.send_message(chat.id if chat else user_id, f"🔔 正在设置 {symbol} 涨跌监控…")
+        except TelegramError:
+            panel = None
+        context.user_data.pop("settings_draft", None)
+        context.user_data[PRICE_ALERT_TARGET_KEY] = {"chat_id": target, "symbol": symbol}
+        if existing is not None:
+            context.user_data["wizard_prefills"] = price_alert_prefills(existing)
+        else:
+            context.user_data.pop("wizard_prefills", None)
+        if panel is not None:
+            context.user_data["wizard_panel_id"] = panel.message_id
+        context.user_data["wizard_action_title"] = (
+            f"{symbol} 涨跌监控（{'提醒发到本群' if target < 0 else '私聊提醒'}）"
+        )
+        context.user_data["menu_mode"] = "price_alert"
+        return
+    await query.answer("操作无效。")
+
+
+async def commit_price_alert(update, context: ContextTypes.DEFAULT_TYPE, draft) -> None:
+    target = context.user_data.get(PRICE_ALERT_TARGET_KEY) or {}
+    chat_id, symbol = target.get("chat_id"), target.get("symbol")
+    if not isinstance(chat_id, int) or not symbol:
+        raise ValueError("监控目标已失效，请重新点击「🔔 监控此币涨跌」")
+    user_id = update.effective_user.id
+    if chat_id < 0 and not await can_manage_group_alerts(context, chat_id, user_id):
+        raise ValueError("你已没有本群的管理权限")
+    daily = crypto_alert.parse_threshold(draft.answers[0])
+    fast = crypto_alert.parse_threshold(draft.answers[1])
+    direction = crypto_alert.parse_direction(draft.answers[2])
+    if daily <= 0 and fast <= 0:
+        raise ValueError("日涨跌和10分钟涨跌至少设置一个大于 0 的阈值")
+    store: DirectoryStore = context.application.bot_data["store"]
+    store.upsert_price_alert(chat_id, user_id, symbol, daily, fast, direction, price_alert_max(context))
+    store.audit(f"tg:{user_id}", "price_alert.set", f"{chat_id}:{symbol}", f"{daily}/{fast}/{direction}")
+    context.user_data.pop("menu_mode", None)
+    context.user_data.pop(PRICE_ALERT_TARGET_KEY, None)
+    await context.bot.send_message(
+        draft.chat_id, price_alert_saved_text(symbol, daily, fast, direction, chat_id),
+        reply_markup=price_alert_list_markup(),
+    )
+
+
+async def price_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not user:
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    try:
+        command = crypto_alert.parse_command(context.args or [])
+    except ValueError as exc:
+        await message.reply_text(f"{exc}\n\n{crypto_alert.USAGE}")
+        return
+    if command.action == "help":
+        await message.reply_text(crypto_alert.USAGE, reply_markup=price_alert_list_markup())
+        return
+    group = bool(chat and chat.type != ChatType.PRIVATE)
+    if command.action == "list":
+        text, markup = price_alert_list_view(store, int(chat.id) if group else int(user.id))
+        await message.reply_text(text, reply_markup=markup)
+        return
+    target = await price_alert_target(context, chat, user.id)
+    if target is None:
+        await message.reply_text(PRICE_ALERT_GROUP_DENIED)
+        return
+    if command.action == "del":
+        removed = store.delete_price_alert(target, command.symbol)
+        await message.reply_text(
+            f"已删除 {command.symbol} 涨跌监控。" if removed else f"没有找到 {command.symbol} 的涨跌监控。"
+        )
+        return
+    try:
+        store.upsert_price_alert(
+            target, user.id, command.symbol, command.daily, command.fast, command.direction,
+            price_alert_max(context),
+        )
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
+    store.audit(f"tg:{user.id}", "price_alert.set", f"{target}:{command.symbol}",
+                f"{command.daily}/{command.fast}/{command.direction}")
+    await message.reply_text(
+        price_alert_saved_text(command.symbol, command.daily, command.fast, command.direction, target),
+        reply_markup=price_alert_list_markup(),
+    )
+
+
+async def price_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not user:
+        return
+    store: DirectoryStore = context.application.bot_data["store"]
+    group = bool(chat and chat.type != ChatType.PRIVATE)
+    text, markup = price_alert_list_view(store, int(chat.id) if group else int(user.id))
+    await message.reply_text(text, reply_markup=markup)
+
+
+def price_alert_poller(application: Application) -> crypto_alert.AlertPoller:
+    poller = application.bot_data.get(PRICE_ALERT_POLLER_KEY)
+    if poller is None:
+        poller = crypto_alert.AlertPoller()
+        application.bot_data[PRICE_ALERT_POLLER_KEY] = poller
+    return poller
+
+
+_ALERT_UNREACHABLE = (
+    "chat not found", "not enough rights", "have no rights", "need administrator rights",
+    "bot was kicked", "group chat was upgraded", "chat_write_forbidden", "user is deactivated",
+)
+
+
+async def poll_price_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Background job: one OKX tickers request per round, only when monitors exist."""
+    application = context.application
+    store: DirectoryStore = application.bot_data["store"]
+    rows = store.active_price_alerts()
+    if not rows:
+        return
+    poller = price_alert_poller(application)
+    symbols = {str(row["symbol"]) for row in rows}
+    fast_symbols = {str(row["symbol"]) for row in rows if float(row["fast_pct"] or 0) > 0}
+    try:
+        snapshots, refs = await poller.snapshot(symbols, fast_symbols)
+    except Exception as exc:  # noqa: BLE001 - 行情失败下一轮再试
+        logging.warning("Price alert poll failed: %s", exc)
+        return
+    now_ts = poller.clock()
+    now = datetime.now(crypto_price.BJT)
+    today = now.strftime("%Y-%m-%d")
+    rate: Decimal | None = None
+    rate_loaded = False
+    for row in rows:
+        symbol = str(row["symbol"])
+        snapshot = snapshots.get(symbol)
+        if snapshot is None:
+            continue
+        ref = refs.get(symbol)
+        fired = crypto_alert.evaluate(row, snapshot, ref, now_ts, today)
+        if not fired:
+            continue
+        if not rate_loaded:
+            rate_loaded = True
+            try:
+                rate, _ = await price_service(context).cny_rate()
+            except Exception:  # noqa: BLE001
+                rate = None
+        fast_change = (snapshot.last - ref) / ref * 100 if ref else None
+        text = crypto_alert.alert_text(symbol, snapshot, fired, rate, now, fast_change)
+        store.mark_price_alert_fired(
+            int(row["id"]),
+            daily_up=today if any(f.kind == "daily" and f.direction == "up" for f in fired) else "",
+            daily_down=today if any(f.kind == "daily" and f.direction == "down" for f in fired) else "",
+            fast_at=now_ts if any(f.kind == "fast" for f in fired) else 0,
+        )
+        chat_id = int(row["chat_id"])
+        try:
+            with persistent_message():
+                await context.bot.send_message(chat_id, text)
+        except Forbidden as exc:
+            store.disable_price_alerts(chat_id, str(exc))
+            logging.info("Price alerts disabled for %s: %s", chat_id, exc)
+        except TelegramBadRequest as exc:
+            if any(marker in str(exc).lower() for marker in _ALERT_UNREACHABLE):
+                store.disable_price_alerts(chat_id, str(exc))
+                logging.info("Price alerts disabled for %s: %s", chat_id, exc)
+            else:
+                logging.warning("Price alert send failed for %s: %s", chat_id, exc)
+        except TelegramError as exc:
+            logging.warning("Price alert send failed for %s: %s", chat_id, exc)

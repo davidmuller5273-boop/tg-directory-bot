@@ -18,7 +18,7 @@ from telegram.constants import ChatType
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
-from .auto_delete import persistent_message
+from .auto_delete import persistent_message, private_delete_after
 from .sticker_preview import build_sticker_preview
 
 STATE_KEY = "sticker_clone"
@@ -29,6 +29,7 @@ ADD_BUTTON_TEXT = "✨ 免费添加贴纸 ✨"
 MAX_INITIAL_STICKERS = 50          # createNewStickerSet 一次最多 50 张
 SET_LIMITS = {"regular": 120, "mask": 120, "custom_emoji": 200}
 MAX_CONCURRENT_JOBS = 2            # 全局同时封装的任务数
+PRIVATE_DELETE_SECONDS = 600       # 私聊里本功能的所有消息 10 分钟后撤回
 MAX_TITLE_LENGTH = 64
 MAX_RETRY_AFTER_SECONDS = 600
 ADD_INTERVAL_SECONDS = 0.35
@@ -524,6 +525,27 @@ async def publish_result(
 
 
 
+# ---- 私聊 10 分钟撤回 ----------------------------------------------------
+
+def cleanup_private(bot: Any, chat_id: Any, message_id: Any) -> bool:
+    """Delete a private-chat message after PRIVATE_DELETE_SECONDS (persisted)."""
+    hook = getattr(bot, "schedule_private_cleanup", None)
+    if not callable(hook) or chat_id is None or message_id is None:
+        return False
+    return bool(hook(chat_id, message_id, PRIVATE_DELETE_SECONDS))
+
+
+def cleanup_incoming(update: Any, context: Any) -> None:
+    """The user's own command/link message in private: delete after 10 minutes
+    instead of the generic incoming cleanup."""
+    message = getattr(update, "effective_message", None)
+    chat = getattr(update, "effective_chat", None)
+    if not message or not chat or chat.type != ChatType.PRIVATE:
+        return
+    if cleanup_private(context.bot, chat.id, message.message_id) and context.user_data is not None:
+        context.user_data["preserve_incoming_message_id"] = message.message_id
+
+
 # ---- Telegram handlers --------------------------------------------------
 
 def _jobs(context: ContextTypes.DEFAULT_TYPE) -> tuple[set[int], asyncio.Semaphore]:
@@ -545,6 +567,12 @@ def _bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 async def begin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Entry for /jx (and /start jx). Private chats only."""
+    with private_delete_after(PRIVATE_DELETE_SECONDS):
+        cleanup_incoming(update, context)
+        await _begin(update, context)
+
+
+async def _begin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -676,6 +704,15 @@ async def run_job(
     )
     bot_data["sticker_clone_semaphore"] = semaphore
     last_edit = [0.0]
+    last_cleanup = [time.monotonic()]
+
+    def refresh_cleanup(force: bool = False) -> None:
+        # 进度消息在封装期间不被撤回：每分钟顺延，结束后再从此刻起算 10 分钟
+        now = time.monotonic()
+        if force or now - last_cleanup[0] >= 60:
+            last_cleanup[0] = now
+            cleanup_private(bot, getattr(progress_message, "chat_id", None),
+                            getattr(progress_message, "message_id", None))
 
     async def edit(text: str, force: bool = False) -> None:
         now = time.monotonic()
@@ -687,10 +724,13 @@ async def run_job(
                 await progress_message.edit_text(text, disable_web_page_preview=True)
         except TelegramError:
             pass
+        refresh_cleanup(force)
 
     async def progress(done: int, total: int) -> None:
         await edit(f"正在封装贴纸包：{done}/{total}，请稍候…")
 
+    token = private_delete_after(PRIVATE_DELETE_SECONDS)
+    token.__enter__()
     try:
         async with semaphore:
             result = await clone_sticker_set(
@@ -712,6 +752,7 @@ async def run_job(
         await edit("贴纸包封装失败，请稍后重试。", force=True)
     finally:
         active.discard(user_id)
+        token.__exit__(None, None, None)
     return None
 
 
@@ -894,6 +935,15 @@ async def _enter_fixed(update, context) -> None:
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with private_delete_after(PRIVATE_DELETE_SECONDS):
+        await _handle_callback(update, context)
+        query = update.callback_query
+        chat = update.effective_chat
+        if query is not None and query.message is not None and chat and chat.type == ChatType.PRIVATE:
+            cleanup_private(context.bot, chat.id, query.message.message_id)
+
+
+async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = str(query.data or "")
     chat = update.effective_chat
@@ -1064,6 +1114,14 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if step == "fixed_link" and not is_sticker_link(text):
         return  # 固定模式只拦截贴纸包链接，其它消息照常处理
     context.user_data["consumed_private_message"] = message.message_id
+    with private_delete_after(PRIVATE_DELETE_SECONDS):
+        cleanup_incoming(update, context)
+        await _dispatch_input(update, context, state, step, text)
+    raise ApplicationHandlerStop
+
+
+async def _dispatch_input(update, context, state: dict, step: Any, text: str) -> None:
+    message = update.effective_message
     if step == "fixed_channel":
         await _handle_fixed_channel(update, context, state)
     elif not text:
@@ -1076,4 +1134,3 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _handle_fixed_title(update, context, state, text)
     elif step == "fixed_link":
         await _handle_fixed_link(update, context, state, text)
-    raise ApplicationHandlerStop
