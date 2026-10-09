@@ -42,6 +42,37 @@ SAMPLE = """📜 规则：
 [如何参与？]
 当天发言达到 10 条即自动参与，无需点击按钮。"""
 
+USER_SAMPLE = """抽奖 #37
+
+📜 规则：
+1、关注频道: @jiuyecc (https://t.me/jiuyecc)
+2、助推群2次。
+3、一共5个88也可以当日有充值500的领取
+4、有充值的开奖前必须找 @huanhuan (https://t.me/huanhuan) 报备否者无效。
+5、所有奖品必须当日23点领取，过时不侯
+
+每日活动福利🎁
+├活动类型: 通用抽奖
+├定时开奖: 2026-10-09 21:22:00 +0800
+├关注频道: @jiuyecc (https://t.me/jiuyecc)
+├最低发言: 9 条
+├最低助推: 2
+├最少参与: 39 人（不足自动顺延一天）
+├已参与: 25 人
+├奖品列表:
+  ├ 5*88RMB x 5
+[如何参与？]
+1、先关注频道 @jiuyecc (https://t.me/jiuyecc)  。2、群助推两次。3、群内发言 9条自动参加。"""
+
+USER_RULES = [
+    "1、关注频道: @jiuyecc (https://t.me/jiuyecc)",
+    "2、助推群2次。",
+    "3、一共5个88也可以当日有充值500的领取",
+    "4、有充值的开奖前必须找 @huanhuan (https://t.me/huanhuan) 报备否者无效。",
+    "5、所有奖品必须当日23点领取，过时不侯",
+]
+USER_HOW_TO = "1、先关注频道 @jiuyecc (https://t.me/jiuyecc)  。2、群助推两次。3、群内发言 9条自动参加。"
+
 RULES = [
     "1. 本群每日晚上 9 点自动开奖",
     "2. 中奖后请在 24 小时内联系管理员领奖，逾期视为放弃",
@@ -238,6 +269,48 @@ class RaffleParseTest(unittest.TestCase):
         # 再识别一次机器人自己的公告，结果不变（含“已参与”被忽略）
         again = rp.parse(text.replace("&amp;", "&"), now=NOW)
         self.assertEqual((again.title, again.rules, again.prizes), (parsed.title, RULES, parsed.prizes))
+
+    def test_user_sample_exact(self):
+        parsed = rp.parse(USER_SAMPLE, now=NOW)
+        self.assertEqual(parsed.title, "每日活动福利🎁")
+        self.assertEqual(parsed.rules, USER_RULES)
+        self.assertEqual(parsed.raffle_type, "通用抽奖")
+        self.assertEqual(parsed.draw_at, datetime(2026, 10, 9, 21, 22, tzinfo=BEIJING_TZ))
+        self.assertFalse(parsed.draw_adjusted)
+        self.assertTrue(parsed.daily_hint)
+        self.assertEqual(parsed.channel, "@jiuyecc")
+        self.assertEqual((parsed.messages, parsed.boosts, parsed.min_participants), (9, 2, 39))
+        self.assertEqual(parsed.prizes, [(5, "5*88RMB")])
+        self.assertEqual(parsed.how_to, USER_HOW_TO)
+        self.assertEqual(parsed.warnings, [])
+        self.assertTrue(rp.looks_like_raffle(USER_SAMPLE))
+        # 开奖时间已过 → 顺延到下一次 21:22（每日重复）
+        later = rp.parse(USER_SAMPLE, now=datetime(2026, 10, 9, 22, 1, tzinfo=BEIJING_TZ))
+        self.assertEqual(later.draw_at, datetime(2026, 10, 10, 21, 22, tzinfo=BEIJING_TZ))
+        self.assertTrue(later.draw_adjusted)
+        answers = rp.to_answers(parsed)
+        self.assertEqual(answers[1], "\n".join(USER_RULES))
+        self.assertEqual(answers[4], "频道 @jiuyecc\n发言 9\n助推 2")
+        self.assertEqual(answers[5], USER_HOW_TO)
+        self.assertEqual(answers[6], "5 | 5*88RMB")
+        self.assertEqual(answers[7], "是")
+        self.assertEqual(answers[8], "39")
+        answers[2] = (datetime.now(BEIJING_TZ) + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        ends_at, winners, prize, extras = botmod.build_raffle_extras_from_pro(answers)
+        self.assertEqual((winners, prize), (5, "5*88RMB"))
+        self.assertEqual(json.loads(extras["rules_json"]), USER_RULES)
+        self.assertEqual(extras["how_to_join"], USER_HOW_TO)
+        self.assertEqual((extras["min_messages"], extras["min_boosts"], extras["min_participants"],
+                          extras["recur_daily"], extras["channel_ref"]), (9, 2, 39, 1, "@jiuyecc"))
+
+        class Row(dict):
+            pass
+        text = botmod.raffle_text(Row(dict(extras, raffle_type="universal", ends_at=ends_at,
+                                               prize=prize, winner_count=winners, entries=0)), False)
+        self.assertEqual(text.count("规则"), 1)
+        self.assertIn("  ├ 5*88RMB x 5", text)
+        again = rp.parse(text.replace("&amp;", "&"), now=NOW)
+        self.assertEqual((again.rules, again.prizes, again.how_to), (USER_RULES, [(5, "5*88RMB")], USER_HOW_TO))
 
     def test_loose_text(self):
         text = ("周末福利\n开奖时间：10月12日 20:30\n关注频道 https://t.me/abcd_channel\n"

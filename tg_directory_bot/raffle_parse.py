@@ -31,6 +31,7 @@ _FIELD_RE = re.compile(
     + r")\s*[:：]?\s*(.*)$"
 )
 _ALIAS_TO_KEY = {alias: key for key, aliases in FIELD_ALIASES.items() for alias in aliases}
+HEADER_ID_RE = re.compile(r"^(?:[🎁🎉]\s*)?(?:通用)?抽奖\s*#\s*\d+$")
 MARKERS = ("活动类型", "定时开奖", "开奖时间", "奖品列表", "如何参与", "最低发言", "关注频道",
            "最少参与", "最低助推", "奖品")
 
@@ -83,6 +84,7 @@ def _int(value: str) -> int:
     return int(match.group(0)) if match else 0
 
 
+_PRIZE_LABEL_X_QTY = re.compile(r"^(.+?)\s+[xX×]\s*(\d+)\s*(?:份|个|名|人)?$")
 _PRIZE_LABEL_QTY = re.compile(r"^(.+?)\s*[xX×*]\s*(\d+)\s*(?:份|个|名|人)?$")
 _PRIZE_QTY_LABEL = re.compile(r"^(\d+)\s*(?:份|个|名|人)?\s*[xX×*]\s*(.+)$")
 _PRIZE_LABEL_COUNT = re.compile(r"^(.+?)\s+(\d+)\s*(?:份|个|名|人)$")
@@ -93,7 +95,9 @@ def parse_prize(text: str) -> tuple[int, str] | None:
     raw = re.sub(r"^\d+\s*[.、)）]\s*", "", raw) if re.match(r"^\d+\s*[.、)）]\s*\D", raw) else raw
     if not raw:
         return None
-    for regex, order in ((_PRIZE_QTY_LABEL, "ql"), (_PRIZE_LABEL_QTY, "lq"), (_PRIZE_LABEL_COUNT, "lq")):
+    # 「5*88RMB x 5」：末尾的 “ x 数量” 优先（机器人公告格式），奖品名里可以带 *
+    for regex, order in ((_PRIZE_LABEL_X_QTY, "lq"), (_PRIZE_QTY_LABEL, "ql"),
+                         (_PRIZE_LABEL_QTY, "lq"), (_PRIZE_LABEL_COUNT, "lq")):
         match = regex.match(raw)
         if match:
             a, b = match.group(1).strip(), match.group(2).strip()
@@ -146,8 +150,10 @@ def parse(text: str, now: datetime | None = None) -> ParsedRaffle:
     result = ParsedRaffle()
     lines = [line.rstrip() for line in (text or "").replace("\r", "").split("\n")]
     index = 0
-    # 跳过开头空行
-    while index < len(lines) and not lines[index].strip():
+    # 跳过开头空行和「抽奖 #37」这类编号行
+    while index < len(lines) and (
+        not lines[index].strip() or HEADER_ID_RE.match(lines[index].strip())
+    ):
         index += 1
     # 📜 规则：…（直到空行）
     if index < len(lines):
