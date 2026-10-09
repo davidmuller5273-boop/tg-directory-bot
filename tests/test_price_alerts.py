@@ -41,20 +41,22 @@ def snap(last, sod="100", open24h="100", symbol="BTC"):
 class CommandParsingTest(unittest.TestCase):
     def test_set_variants(self):
         cmd = ca.parse_command(["btc", "5", "2"])
-        self.assertEqual((cmd.action, cmd.symbol, cmd.daily, cmd.fast, cmd.direction),
-                         ("set", "BTC", Decimal("5.00"), Decimal("2.00"), "both"))
+        self.assertEqual((cmd.action, cmd.symbol, cmd.daily, cmd.fast),
+                         ("set", "BTC", Decimal("5.00"), Decimal("2.00")))
+        self.assertFalse(hasattr(cmd, "direction"))
         cmd = ca.parse_command(["eth", "3%"])
         self.assertEqual((cmd.symbol, cmd.daily, cmd.fast), ("ETH", Decimal("3.00"), Decimal("0")))
-        self.assertEqual(ca.parse_command(["sol", "0", "1.5", "跌"]).direction, "down")
-        self.assertEqual(ca.parse_command(["sol", "4", "0", "涨"]).direction, "up")
-        self.assertEqual(ca.parse_command(["sol", "4", "0", "双向"]).direction, "both")
+        # 旧语法里的方向参数被接受但忽略（始终双向）
+        for word in ("跌", "涨", "双向", "只涨", "只跌", "up", "down"):
+            cmd = ca.parse_command(["sol", "4", "1.5", word])
+            self.assertEqual((cmd.action, cmd.daily, cmd.fast), ("set", Decimal("4.00"), Decimal("1.50")))
 
     def test_other_actions_and_errors(self):
         self.assertEqual(ca.parse_command([]).action, "help")
         self.assertEqual(ca.parse_command(["list"]).action, "list")
         cmd = ca.parse_command(["del", "btc"])
         self.assertEqual((cmd.action, cmd.symbol), ("del", "BTC"))
-        for bad in (["btc"], ["btc", "0", "0"], ["btc", "x"], ["btc", "-1"], ["btc", "5", "2", "横盘"],
+        for bad in (["btc"], ["btc", "0", "0"], ["btc", "x"], ["btc", "-1"], ["btc", "5", "2", "横盘"], ["btc", "5", "2", "涨", "x"],
                     ["del"], ["usdt", "5"], ["btc", "2000"]):
             with self.assertRaises(ValueError, msg=bad):
                 ca.parse_command(bad)
@@ -74,12 +76,15 @@ class EvaluateTest(unittest.TestCase):
         fired = ca.evaluate(row(daily_pct=10, fast_pct=0), snap("105", "100", "90"), None, 0, TODAY)
         self.assertEqual(fired, [])
 
-    def test_direction_filter(self):
-        self.assertEqual(ca.evaluate(row(direction="down", fast_pct=0), snap("110"), None, 0, TODAY), [])
-        self.assertEqual(len(ca.evaluate(row(direction="down", fast_pct=0), snap("90"), None, 0, TODAY)), 1)
-        self.assertEqual(ca.evaluate(row(direction="up", fast_pct=0), snap("90"), None, 0, TODAY), [])
-        self.assertEqual(ca.evaluate(row(direction="up", daily_pct=0), snap("100"), Decimal("103"), 0, TODAY), [])
-        self.assertEqual(len(ca.evaluate(row(direction="down", daily_pct=0), snap("100"), Decimal("103"), 0, TODAY)), 1)
+    def test_always_bidirectional_even_with_legacy_direction(self):
+        for legacy in ("both", "up", "down"):
+            for price, sign in (("110", "up"), ("90", "down")):
+                fired = ca.evaluate(row(direction=legacy, fast_pct=0), snap(price), None, 0, TODAY)
+                self.assertEqual([(f.kind, f.direction) for f in fired], [("daily", sign)])
+            fired = ca.evaluate(row(direction=legacy, daily_pct=0), snap("100"), Decimal("103"), 0, TODAY)
+            self.assertEqual([(f.kind, f.direction) for f in fired], [("fast", "down")])
+            fired = ca.evaluate(row(direction=legacy, daily_pct=0), snap("103"), Decimal("100"), 0, TODAY)
+            self.assertEqual([(f.kind, f.direction) for f in fired], [("fast", "up")])
 
     def test_daily_cooldown_once_per_day_per_direction(self):
         done_up = row(fast_pct=0, last_daily_up=TODAY)
@@ -169,23 +174,31 @@ class StoreTest(unittest.TestCase):
         self.store.init()  # 迁移可重复
 
     def test_upsert_cap_delete_and_cooldown_reset(self):
-        alert_id = self.store.upsert_price_alert(5, 5, "btc", 5, 2, "both", 2)
+        alert_id = self.store.upsert_price_alert(5, 5, "btc", 5, 2, 2)
         self.store.mark_price_alert_fired(alert_id, daily_up=TODAY, fast_at=123)
-        again = self.store.upsert_price_alert(5, 5, "BTC", 6, 0, "up", 2)
+        again = self.store.upsert_price_alert(5, 5, "BTC", 6, 0, 2)
         self.assertEqual(again, alert_id)
         saved = self.store.price_alert(alert_id)
-        self.assertEqual((saved["daily_pct"], saved["fast_pct"], saved["direction"]), (6, 0, "up"))
+        self.assertEqual((saved["daily_pct"], saved["fast_pct"], saved["direction"]), (6, 0, "both"))
         self.assertEqual((saved["last_daily_up"], saved["last_fast_at"]), ("", 0))
-        self.store.upsert_price_alert(5, 5, "ETH", 1, 0, "both", 2)
+        self.store.upsert_price_alert(5, 5, "ETH", 1, 0, 2)
         with self.assertRaises(ValueError):
-            self.store.upsert_price_alert(5, 5, "SOL", 1, 0, "both", 2)
-        self.store.upsert_price_alert(5, 5, "SOL", 1, 0, "both", 0)  # 0 = 不限
+            self.store.upsert_price_alert(5, 5, "SOL", 1, 0, 2)
+        self.store.upsert_price_alert(5, 5, "SOL", 1, 0, 0)  # 0 = 不限
         self.store.upsert_price_alert(-100, 5, "SOL", 1, 0)
         self.assertEqual([r["symbol"] for r in self.store.list_price_alerts(5)], ["BTC", "ETH", "SOL"])
         self.assertTrue(self.store.delete_price_alert(5, "eth"))
         self.assertFalse(self.store.delete_price_alert(5, "eth"))
         self.assertEqual(self.store.disable_price_alerts(5, "blocked"), 2)
         self.assertEqual([r["chat_id"] for r in self.store.active_price_alerts()], [-100])
+
+
+    def test_legacy_direction_migrated_to_both(self):
+        alert_id = self.store.upsert_price_alert(5, 5, "BTC", 5, 2)
+        with self.store.connect() as conn:
+            conn.execute("UPDATE price_alerts SET direction='up' WHERE id=?", (alert_id,))
+        self.store.init()
+        self.assertEqual(self.store.price_alert(alert_id)["direction"], "both")
 
 
 class ButtonsTest(unittest.TestCase):
@@ -204,6 +217,9 @@ class ButtonsTest(unittest.TestCase):
         self.assertIn("palert:list", [b.callback_data for r in markup.inline_keyboard for b in r])
         self.assertIn("/pricealert", cp.HELP_TEXT)
         self.assertIn("/pricealert", handlers.HELP_TEXT)
+        for text in (cp.HELP_TEXT, handlers.HELP_TEXT, ca.USAGE):
+            for word in ("只涨", "只跌", "方向"):
+                self.assertNotIn(word, text)
 
     def test_quote_shows_beijing_day_change(self):
         quote = cp.Quote("BTC", Decimal("105"), Decimal("90"), Decimal("110"), Decimal("80"),
@@ -285,12 +301,13 @@ class AppBase(unittest.IsolatedAsyncioTestCase):
     def texts(self):
         return [str(p.get("text", "")) for api, p in self.request.calls if api in {"sendMessage", "editMessageText"}]
 
-    async def run_wizard(self, symbol, daily, fast, direction):
+    async def run_wizard(self, symbol, daily, fast):
         await self.tap(f"palert:set:{symbol}")
         await self.send(daily)
         await self.send(fast)
-        data, mid = self.button(direction)
-        await self.tap(data, mid)
+        joined = "\n".join(self.texts())
+        self.assertIn("第 2/2 步", joined)
+        self.assertNotIn("方向", joined)
         data, mid = self.button("确认保存")
         self.request.calls.clear()
         await self.tap(data, mid)
@@ -299,11 +316,13 @@ class AppBase(unittest.IsolatedAsyncioTestCase):
 
 class AppTest(AppBase):
     async def test_group_admin_wizard_saves_group_alert(self):
-        await self.run_wizard("BTC", "5", "2", "双向")
+        await self.run_wizard("BTC", "5", "2")
         joined = "\n".join(self.texts())
         self.assertNotIn("保存未完成", joined)
         self.assertIn("✅ 已设置 BTC 涨跌监控", joined)
         self.assertIn("提醒发送到：本群", joined)
+        self.assertIn("涨跌都会提醒", joined)
+        self.assertNotIn("提醒方向", joined)
         saved = self.store.price_alert_for(GROUP, "BTC")
         self.assertEqual((saved["daily_pct"], saved["fast_pct"], saved["direction"], saved["owner_id"]),
                          (5, 2, "both", ADMIN))
@@ -311,9 +330,9 @@ class AppTest(AppBase):
 
     async def test_private_wizard_saves_personal_alert_and_edit_prefills(self):
         self.private = True
-        await self.run_wizard("ETH", "0", "1.5", "只跌")
+        await self.run_wizard("ETH", "0", "1.5")
         saved = self.store.price_alert_for(ADMIN, "ETH")
-        self.assertEqual((saved["daily_pct"], saved["fast_pct"], saved["direction"]), (0, 1.5, "down"))
+        self.assertEqual((saved["daily_pct"], saved["fast_pct"], saved["direction"]), (0, 1.5, "both"))
         self.assertIn("提醒发送到：私聊", "\n".join(self.texts()))
         # 再次打开：带出当前值
         self.request.calls.clear()
@@ -322,7 +341,7 @@ class AppTest(AppBase):
 
     async def test_wizard_rejects_both_zero(self):
         self.private = True
-        await self.run_wizard("SOL", "0", "0", "双向")
+        await self.run_wizard("SOL", "0", "0")
         self.assertIn("保存未完成", "\n".join(self.texts()))
         self.assertIsNone(self.store.price_alert_for(ADMIN, "SOL"))
 
@@ -340,12 +359,14 @@ class AppTest(AppBase):
         await self.send("/pricealert btc 5 2")
         self.assertEqual(self.store.price_alert_for(ADMIN, "BTC")["fast_pct"], 2)
         await self.send("/pricealert sol 3 0 涨")
-        self.assertEqual(self.store.price_alert_for(ADMIN, "SOL")["direction"], "up")
+        self.assertEqual(self.store.price_alert_for(ADMIN, "SOL")["direction"], "both")  # 旧语法按双向
         self.request.calls.clear()
         await self.send("/pricealerts")
         listing = self.texts()[-1]
-        self.assertIn("BTC：日涨跌 5%，10分钟 2%，双向", listing)
-        self.assertIn("SOL：日涨跌 3%，10分钟 不监控，只涨", listing)
+        self.assertIn("BTC：日涨跌 5%，10分钟 2%", listing)
+        self.assertIn("SOL：日涨跌 3%，10分钟 不监控", listing)
+        for word in ("双向", "只涨", "只跌", "方向"):
+            self.assertNotIn(word, listing)
         await self.send("/pricealert del btc")
         self.assertIsNone(self.store.price_alert_for(ADMIN, "BTC"))
         self.request.calls.clear()

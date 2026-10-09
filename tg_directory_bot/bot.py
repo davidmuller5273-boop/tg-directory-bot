@@ -14194,7 +14194,7 @@ def price_alert_list_view(store: DirectoryStore, chat_id: int) -> tuple[str, Inl
             InlineKeyboardButton("🗑 删除", callback_data=f"palert:del:{row['id']}"),
         ])
     lines.extend([
-        "", f"{crypto_alert.DAILY_LABEL}：每天每个方向最多提醒一次；",
+        "", "涨跌都会提醒。", f"{crypto_alert.DAILY_LABEL}：每天上涨、下跌各最多提醒一次；",
         f"{crypto_alert.FAST_LABEL}：提醒后冷却 10 分钟。",
     ])
     buttons.append([InlineKeyboardButton("⬅️ 返回币价", callback_data="price:menu")])
@@ -14206,18 +14206,16 @@ def price_alert_prefills(row) -> list[str]:
         return format(Decimal(str(value or 0)).normalize(), "f")
     return [
         number_text(row["daily_pct"]), number_text(row["fast_pct"]),
-        crypto_alert.DIRECTIONS.get(str(row["direction"] or "both"), "双向"),
     ]
 
 
-def price_alert_saved_text(symbol: str, daily, fast, direction: str, chat_id: int) -> str:
+def price_alert_saved_text(symbol: str, daily, fast, chat_id: int) -> str:
     return (
         f"✅ 已设置 {symbol} 涨跌监控\n"
         f"{crypto_alert.DAILY_LABEL}：{crypto_alert.threshold_text(daily)}\n"
         f"{crypto_alert.FAST_LABEL}：{crypto_alert.threshold_text(fast)}\n"
-        f"提醒方向：{crypto_alert.DIRECTIONS.get(direction, '双向')}\n"
         f"提醒发送到：{'本群' if chat_id < 0 else '私聊'}\n"
-        "日涨跌每天每个方向最多提醒一次；10分钟涨跌提醒后冷却 10 分钟。"
+        "涨跌都会提醒。日涨跌每天上涨、下跌各最多提醒一次；10分钟涨跌提醒后冷却 10 分钟。"
     )
 
 
@@ -14296,16 +14294,15 @@ async def commit_price_alert(update, context: ContextTypes.DEFAULT_TYPE, draft) 
         raise ValueError("你已没有本群的管理权限")
     daily = crypto_alert.parse_threshold(draft.answers[0])
     fast = crypto_alert.parse_threshold(draft.answers[1])
-    direction = crypto_alert.parse_direction(draft.answers[2])
     if daily <= 0 and fast <= 0:
         raise ValueError("日涨跌和10分钟涨跌至少设置一个大于 0 的阈值")
     store: DirectoryStore = context.application.bot_data["store"]
-    store.upsert_price_alert(chat_id, user_id, symbol, daily, fast, direction, price_alert_max(context))
-    store.audit(f"tg:{user_id}", "price_alert.set", f"{chat_id}:{symbol}", f"{daily}/{fast}/{direction}")
+    store.upsert_price_alert(chat_id, user_id, symbol, daily, fast, price_alert_max(context))
+    store.audit(f"tg:{user_id}", "price_alert.set", f"{chat_id}:{symbol}", f"{daily}/{fast}")
     context.user_data.pop("menu_mode", None)
     context.user_data.pop(PRICE_ALERT_TARGET_KEY, None)
     await context.bot.send_message(
-        draft.chat_id, price_alert_saved_text(symbol, daily, fast, direction, chat_id),
+        draft.chat_id, price_alert_saved_text(symbol, daily, fast, chat_id),
         reply_markup=price_alert_list_markup(),
     )
 
@@ -14344,16 +14341,16 @@ async def price_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     try:
         store.upsert_price_alert(
-            target, user.id, command.symbol, command.daily, command.fast, command.direction,
+            target, user.id, command.symbol, command.daily, command.fast,
             price_alert_max(context),
         )
     except ValueError as exc:
         await message.reply_text(str(exc))
         return
     store.audit(f"tg:{user.id}", "price_alert.set", f"{target}:{command.symbol}",
-                f"{command.daily}/{command.fast}/{command.direction}")
+                f"{command.daily}/{command.fast}")
     await message.reply_text(
-        price_alert_saved_text(command.symbol, command.daily, command.fast, command.direction, target),
+        price_alert_saved_text(command.symbol, command.daily, command.fast, target),
         reply_markup=price_alert_list_markup(),
     )
 

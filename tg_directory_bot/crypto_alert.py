@@ -6,6 +6,7 @@
   限速 20 次/2 秒，本任务默认 30 秒一次，母/子机器人各自轮询也远低于限速）。
 - 10 分钟涨跌：用每轮行情在内存里保存约 15 分钟的价格样本；刚启动或刚添加的币种
   没有 10 分钟历史时，用 1 分钟 K 线（limit=11）补齐，每轮最多补 5 个币种。
+- 涨跌都提醒（双向，按绝对值判断）。
 - 冷却：日涨跌规则每个北京时间自然日、每个方向（涨/跌）最多提醒一次；
   10 分钟规则提醒后该监控冷却 10 分钟。冷却状态写入数据库，重启后不会重复提醒。
 """
@@ -32,11 +33,9 @@ MAX_THRESHOLD = Decimal("1000")
 DEFAULT_MAX_PER_CHAT = 50
 DEFAULT_POLL_SECONDS = 30
 
-DIRECTIONS = {"both": "双向", "up": "只涨", "down": "只跌"}
-DIRECTION_ALIASES = {
-    "双向": "both", "both": "both", "all": "both", "涨跌": "both",
-    "只涨": "up", "涨": "up", "up": "up", "上涨": "up",
-    "只跌": "down", "跌": "down", "down": "down", "下跌": "down",
+# 旧语法里的方向参数：仍然接受，但一律按双向处理
+LEGACY_DIRECTION_WORDS = {
+    "双向", "both", "all", "涨跌", "只涨", "涨", "up", "上涨", "只跌", "跌", "down", "下跌",
 }
 DAILY_LABEL = "日涨跌（北京时间0点起）"
 FAST_LABEL = "10分钟涨跌"
@@ -46,18 +45,11 @@ LIST_BUTTON_TEXT = "🔔 我的涨跌监控"
 USAGE = (
     "🔔 币价涨跌监控用法：\n"
     "• /pricealert btc 5 2：BTC 日涨跌达 5% 或 10 分钟涨跌达 2% 时提醒\n"
-    "• /pricealert btc 5 0 涨：只监控日涨幅 5%（方向可选 涨/跌/双向，默认双向）\n"
+    "• /pricealert btc 5：只监控日涨跌 5%；/pricealert btc 0 2：只监控10分钟涨跌 2%\n"
     "• /pricealert del btc：删除监控；/pricealerts：查看全部\n"
     "• 也可以在币价查询结果下点「🔔 监控此币涨跌」\n"
     "私聊设置提醒发给自己；群里由群管理员设置，提醒发到本群。"
 )
-
-
-def parse_direction(text: str) -> str:
-    value = DIRECTION_ALIASES.get(str(text or "").strip().casefold())
-    if not value:
-        raise ValueError("方向请填写：涨、跌 或 双向")
-    return value
 
 
 def parse_threshold(text: Any) -> Decimal:
@@ -79,11 +71,10 @@ class AlertCommand:
     symbol: str = ""
     daily: Decimal = Decimal("0")
     fast: Decimal = Decimal("0")
-    direction: str = "both"
 
 
 def parse_command(args: Iterable[str]) -> AlertCommand:
-    """/pricealert btc 5 2 [涨|跌|双向] · /pricealert del btc · /pricealert list"""
+    """/pricealert btc 5 2 · /pricealert del btc · /pricealert list（涨跌均提醒）"""
     items = [str(item).strip() for item in args if str(item).strip()]
     if not items:
         return AlertCommand("help")
@@ -102,12 +93,15 @@ def parse_command(args: Iterable[str]) -> AlertCommand:
         raise ValueError("请填写阈值，例如：/pricealert btc 5 2（日 5%，10分钟 2%）")
     daily = parse_threshold(items[1])
     fast = parse_threshold(items[2]) if len(items) > 2 else Decimal("0")
-    direction = parse_direction(items[3]) if len(items) > 3 else "both"
-    if len(items) > 4:
-        raise ValueError("参数过多，例如：/pricealert btc 5 2 双向")
+    extra = items[3:]
+    # 兼容旧语法 /pricealert btc 5 2 涨：方向参数忽略，始终双向
+    if extra and extra[0].casefold() in LEGACY_DIRECTION_WORDS:
+        extra = extra[1:]
+    if extra:
+        raise ValueError("参数过多，例如：/pricealert btc 5 2（日涨跌 5%，10分钟涨跌 2%，涨跌都提醒）")
     if daily <= 0 and fast <= 0:
         raise ValueError("日涨跌和10分钟涨跌至少设置一个大于 0 的阈值")
-    return AlertCommand("set", symbol, daily, fast, direction)
+    return AlertCommand("set", symbol, daily, fast)
 
 
 def pct_text(value: Decimal | float | None) -> str:
@@ -127,7 +121,7 @@ def threshold_text(value: Any) -> str:
 def monitor_summary(row: Any) -> str:
     return (
         f"{row['symbol']}：日涨跌 {threshold_text(row['daily_pct'])}，"
-        f"10分钟 {threshold_text(row['fast_pct'])}，{DIRECTIONS.get(str(row['direction']), '双向')}"
+        f"10分钟 {threshold_text(row['fast_pct'])}"
     )
 
 
@@ -228,29 +222,25 @@ class Fired:
     threshold: Decimal
 
 
-def _allowed(direction: str, sign: str) -> bool:
-    return direction == "both" or direction == sign
-
-
 def evaluate(row: Any, snapshot: Snapshot, ref10: Decimal | None,
              now_ts: float, today: str) -> list[Fired]:
-    """Return the rules that fire now (cooldowns already applied)."""
+    """Return the rules that fire now (cooldowns already applied). Always
+    bidirectional: a rise or a fall of at least the threshold fires."""
     fired: list[Fired] = []
-    direction = str(row["direction"] or "both")
     daily_pct = _dec(row["daily_pct"])
     fast_pct = _dec(row["fast_pct"])
     daily = snapshot.daily_change
     if daily_pct > 0 and daily is not None and abs(daily) >= daily_pct and daily != 0:
         sign = "up" if daily > 0 else "down"
         last_day = str(row["last_daily_up" if sign == "up" else "last_daily_down"] or "")
-        if _allowed(direction, sign) and last_day != today:
+        if last_day != today:
             fired.append(Fired("daily", sign, daily, daily_pct))
     if fast_pct > 0 and ref10:
         change = (snapshot.last - ref10) / ref10 * 100
         if abs(change) >= fast_pct and change != 0:
             sign = "up" if change > 0 else "down"
             last_fast = float(row["last_fast_at"] or 0)
-            if _allowed(direction, sign) and (not last_fast or now_ts - last_fast >= FAST_COOLDOWN_SECONDS):
+            if not last_fast or now_ts - last_fast >= FAST_COOLDOWN_SECONDS:
                 fired.append(Fired("fast", sign, change, fast_pct))
     return fired
 

@@ -102,6 +102,8 @@ class FeatureStoreMixin:
             """
         )
         ensure(conn, "price_alerts", "disabled_reason", "TEXT NOT NULL DEFAULT ''")
+        # 涨跌监控始终双向：旧的「只涨/只跌」迁移为双向
+        conn.execute("UPDATE price_alerts SET direction='both' WHERE direction<>'both'")
         if not conn.execute("SELECT 1 FROM raffle_win_log LIMIT 1").fetchone():
             conn.execute(
                 """INSERT INTO raffle_win_log (chat_id, user_id, raffle_id, won_at)
@@ -445,13 +447,12 @@ class FeatureStoreMixin:
 
     def upsert_price_alert(
         self, chat_id: int, owner_id: int, symbol: str, daily_pct, fast_pct,
-        direction: str = "both", max_per_chat: int = 50,
+        max_per_chat: int = 50,
     ) -> int:
+        """Monitors are always bidirectional (direction column kept as 'both')."""
         symbol = str(symbol or "").upper()
         if not symbol:
             raise ValueError("币种不能为空")
-        if direction not in {"both", "up", "down"}:
-            raise ValueError("方向无效")
         daily, fast = float(daily_pct or 0), float(fast_pct or 0)
         if daily < 0 or fast < 0:
             raise ValueError("阈值不能小于 0")
@@ -469,13 +470,13 @@ class FeatureStoreMixin:
                     raise ValueError(f"每个聊天最多监控 {max_per_chat} 个币种，请先删除不需要的")
             conn.execute(
                 """INSERT INTO price_alerts (chat_id, owner_id, symbol, daily_pct, fast_pct, direction)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, 'both')
                    ON CONFLICT(chat_id, symbol) DO UPDATE SET
                      owner_id=excluded.owner_id, daily_pct=excluded.daily_pct,
-                     fast_pct=excluded.fast_pct, direction=excluded.direction,
+                     fast_pct=excluded.fast_pct, direction='both',
                      enabled=1, disabled_reason='', last_daily_up='', last_daily_down='',
                      last_fast_at=0, updated_at=CURRENT_TIMESTAMP""",
-                (chat_id, owner_id, symbol, daily, fast, direction),
+                (chat_id, owner_id, symbol, daily, fast),
             )
             row = conn.execute(
                 "SELECT id FROM price_alerts WHERE chat_id=? AND symbol=?", (chat_id, symbol),
