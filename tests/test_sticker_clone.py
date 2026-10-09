@@ -53,7 +53,7 @@ class FakeStickerBot:
         raise BadRequest("Stickerset_invalid")
 
     async def create_new_sticker_set(self, user_id, name, title, stickers,
-                                     sticker_type=None, needs_repainting=None):
+                                     sticker_type=None, needs_repainting=None, **_timeouts):
         self.create_calls.append(dict(user_id=user_id, name=name, title=title,
                                       stickers=list(stickers), sticker_type=sticker_type,
                                       needs_repainting=needs_repainting))
@@ -69,7 +69,7 @@ class FakeStickerBot:
                               "stickers": list(stickers)}
         return True
 
-    async def add_sticker_to_set(self, user_id, name, sticker):
+    async def add_sticker_to_set(self, user_id, name, sticker, **_timeouts):
         self.add_calls.append((user_id, name, sticker.sticker))
         queued = self.add_errors.get(sticker.sticker)
         if queued:

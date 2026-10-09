@@ -35,11 +35,17 @@ ADD_INTERVAL_SECONDS = 0.35
 PROGRESS_EVERY = 10
 DEFAULT_EMOJI = "🙂"
 
+DELETE_HINT = "如需去掉部分贴图：链接后加空格和序号，例如 链接 3|5|12（序号从 1 开始）"
 LINK_PROMPT = (
-    "请发送要解析的贴纸包链接\n"
-    "例如：https://t.me/addstickers/贴纸地址\n\n"
+    "请发送要解析的贴纸包链接（贴纸包或自定义表情包都可以）\n"
+    "例如：https://t.me/addstickers/贴纸地址\n"
+    f"{DELETE_HINT}\n\n"
     "随时可发送 /cancel 取消"
 )
+# 创建/添加贴纸可能很慢（尤其 50 张动态/表情），默认 5 秒读超时远远不够。
+API_TIMEOUTS = {"read_timeout": 120, "write_timeout": 120, "connect_timeout": 30, "pool_timeout": 30}
+TIMEOUT_POLL_ATTEMPTS = 6
+TIMEOUT_POLL_SECONDS = 5
 START_HINT = "无法为你创建贴纸包：请先私聊本机器人并点击“开始”（/start），然后重新发送 /jx。"
 
 _LINK_RE = re.compile(
@@ -60,6 +66,51 @@ def parse_sticker_set_name(text: str) -> str | None:
         return None
     name = match.group(1)
     return name if name[0].isalpha() else None
+
+
+_POSITIONS_RE = re.compile(r"^[\d\s|｜,，、/;；]+$")
+
+
+def split_link_and_positions(text: str) -> tuple[str, str]:
+    """`链接 3|5|12` → (链接, "3|5|12")；没有序号时第二项为空。"""
+    raw = (text or "").strip()
+    parts = raw.split(None, 1)
+    if len(parts) == 2 and _POSITIONS_RE.match(parts[1]) and re.search(r"\d", parts[1]):
+        return parts[0], parts[1].strip()
+    return raw, ""
+
+
+def plan_deletions(count: int, spec: str) -> tuple[list[int], list[str]]:
+    """Return (sorted 1-based positions to delete, notes about ignored items)."""
+    deleted: list[int] = []
+    out_of_range: list[str] = []
+    duplicates: list[str] = []
+    for token in re.findall(r"\d+", spec or ""):
+        position = int(token)
+        if not 1 <= position <= count:
+            if token not in out_of_range:
+                out_of_range.append(token)
+        elif position in deleted:
+            if token not in duplicates:
+                duplicates.append(token)
+        else:
+            deleted.append(position)
+    notes = []
+    if out_of_range:
+        notes.append(f"已忽略超出范围的序号：{'、'.join(out_of_range)}（共 {count} 张）")
+    if duplicates:
+        notes.append(f"已忽略重复的序号：{'、'.join(duplicates)}")
+    return sorted(deleted), notes
+
+
+def deletion_summary(count: int, deleted: list[int], notes: list[str]) -> list[str]:
+    lines = []
+    if deleted:
+        lines.append(
+            f"将删除第 {'、'.join(map(str, deleted))} 张，剩余 {count - len(deleted)} 张"
+        )
+    lines.extend(notes)
+    return lines
 
 
 def title_length(text: str) -> int:
@@ -125,6 +176,11 @@ def _is_user_unreachable(exc: Exception) -> bool:
     ))
 
 
+def _is_name_invalid(exc: Exception) -> bool:
+    text = _error_text(exc)
+    return "name_invalid" in text or ("name" in text and "invalid" in text and "set" in text)
+
+
 def _is_set_gone(exc: Exception) -> bool:
     text = _error_text(exc)
     return any(key in text for key in (
@@ -172,6 +228,7 @@ class CloneResult:
     source_count: int
     sticker_type: str = "regular"
     animated: bool = False
+    deleted: int = 0
 
 
 async def clone_sticker_set(
@@ -179,6 +236,7 @@ async def clone_sticker_set(
     progress: Callable[[int, int], Awaitable[None]] | None = None,
     sleep: Callable[[float], Awaitable[Any]] | None = None,
     name_factory: Callable[[], str] | None = None,
+    skip: Any = (),
 ) -> CloneResult:
     sleep = sleep or asyncio.sleep
     try:
@@ -186,9 +244,13 @@ async def clone_sticker_set(
     except BadRequest as exc:
         raise StickerCloneError("未找到该贴纸包，可能已被删除。") from exc
     sticker_type = str(getattr(source, "sticker_type", "regular") or "regular")
-    all_stickers = list(source.stickers or [])
-    if not all_stickers:
+    original = list(source.stickers or [])
+    if not original:
         raise StickerCloneError("该贴纸包里没有贴图。")
+    skip_set = {int(p) for p in (skip or ()) if 1 <= int(p) <= len(original)}
+    all_stickers = [s for i, s in enumerate(original, start=1) if i not in skip_set]
+    if not all_stickers:
+        raise StickerCloneError("删除指定序号后没有剩余贴图。")
     limit = SET_LIMITS.get(sticker_type, 120)
     stickers = all_stickers[:limit]
     over_limit = len(all_stickers) - len(stickers)
@@ -198,41 +260,95 @@ async def clone_sticker_set(
         any(getattr(s, "needs_repainting", False) for s in stickers)
         if sticker_type == "custom_emoji" else None
     )
-    make_name = name_factory or (lambda: build_set_name(source_name, bot_username))
+    username = {"value": str(bot_username or "").lstrip("@")}
+
+    async def refresh_username() -> bool:
+        """Name must end with `_by_<bot username>`: ask Telegram for the real one."""
+        get_me = getattr(bot, "get_me", None)
+        if get_me is None:
+            return False
+        try:
+            me = await get_me()
+        except TelegramError:
+            return False
+        real = str(getattr(me, "username", "") or "")
+        if real and real.casefold() != username["value"].casefold():
+            username["value"] = real
+            return True
+        return False
+
+    if not username["value"]:
+        await refresh_username()
+    make_name = name_factory or (lambda: build_set_name(source_name, username["value"]))
 
     async def set_size(name: str) -> int:
         try:
-            current = await call_with_retry(bot.get_sticker_set, name, sleep=sleep)
+            current = await call_with_retry(bot.get_sticker_set, name, sleep=sleep, attempts=2)
         except TelegramError:
             return -1
         return len(current.stickers or [])
 
+    async def wait_for_set(name: str) -> int:
+        """After a timeout Telegram may still be creating the set: poll a while."""
+        for attempt in range(TIMEOUT_POLL_ATTEMPTS):
+            size = await set_size(name)
+            if size > 0:
+                return size
+            if attempt < TIMEOUT_POLL_ATTEMPTS - 1:
+                await sleep(TIMEOUT_POLL_SECONDS)
+        return -1
+
     async def create_with(initial: list[InputSticker]) -> str:
         last_exc: Exception | None = None
-        for _ in range(5):
-            name = make_name()
+        timed_out: set[str] = set()
+        name_retries = 0
+        refreshed = False
+        name = make_name()
+        for _ in range(8):
             try:
                 await call_with_retry(
                     bot.create_new_sticker_set,
                     user_id=user_id, name=name, title=title, stickers=initial,
                     sticker_type=sticker_type, needs_repainting=needs_repainting,
-                    sleep=sleep, retry_timeouts=False,
+                    sleep=sleep, retry_timeouts=False, **API_TIMEOUTS,
                 )
                 return name
             except TimedOut as exc:
-                # 可能其实已创建成功：查一下
-                if await set_size(name) > 0:
-                    return name
+                # 可能其实已创建成功（或仍在创建中）：等一会儿再查；
+                # 没查到就用同一个名称重试，避免留下多个半成品贴纸包。
                 last_exc = exc
+                if await wait_for_set(name) > 0:
+                    return name
+                timed_out.add(name)
             except BadRequest as exc:
                 if _is_user_unreachable(exc):
                     raise StickerCloneError(START_HINT) from exc
                 if _is_name_taken(exc):
+                    if name in timed_out and await wait_for_set(name) > 0:
+                        return name  # 之前超时的那次其实成功了
                     last_exc = exc
+                    name_retries += 1
+                    if name_retries > 5:
+                        break
+                    name = make_name()
+                    continue
+                if _is_name_invalid(exc):
+                    last_exc = exc
+                    if not refreshed and await refresh_username():
+                        refreshed = True
+                        name = make_name()
+                        continue
+                    refreshed = True
+                    name_retries += 1
+                    if name_retries > 2:
+                        break
+                    name = make_name()
                     continue
                 raise
             except Forbidden as exc:
                 raise StickerCloneError(START_HINT) from exc
+        if isinstance(last_exc, TimedOut):
+            raise StickerCloneError("Telegram 响应超时，请稍后重试。") from last_exc
         raise StickerCloneError("贴纸包名称生成失败，请稍后重试。") from last_exc
 
     failed = 0
@@ -268,7 +384,7 @@ async def clone_sticker_set(
         try:
             await call_with_retry(
                 bot.add_sticker_to_set, user_id=user_id, name=name, sticker=item,
-                sleep=sleep, retry_timeouts=False,
+                sleep=sleep, retry_timeouts=False, **API_TIMEOUTS,
             )
             added += 1
         except TimedOut:
@@ -280,7 +396,7 @@ async def clone_sticker_set(
                 try:
                     await call_with_retry(
                         bot.add_sticker_to_set, user_id=user_id, name=name,
-                        sticker=item, sleep=sleep,
+                        sticker=item, sleep=sleep, **API_TIMEOUTS,
                     )
                     added += 1
                 except TelegramError:
@@ -306,12 +422,15 @@ async def clone_sticker_set(
         len(all_stickers), sticker_type,
         any(getattr(s, "is_animated", False) or getattr(s, "is_video", False)
             for s in stickers),
+        len(skip_set),
     )
 
 
 def result_text(result: CloneResult) -> str:
     lines = ["贴纸包封装完成：", result.link]
     notes = []
+    if result.deleted:
+        notes.append(f"已按要求删除 {result.deleted} 张")
     if result.failed:
         notes.append(f"成功 {result.added} 张，{result.failed} 张复制失败已跳过")
     if result.skipped_over_limit:
@@ -326,8 +445,9 @@ def result_text(result: CloneResult) -> str:
 
 def is_sticker_link(text: str) -> bool:
     """Full t.me/addstickers or addemoji link (bare names don't count)."""
-    raw = (text or "").strip().lower()
-    return bool(parse_sticker_set_name(text)) and ("addstickers" in raw or "addemoji" in raw)
+    link, _spec = split_link_and_positions(text)
+    raw = link.lower()
+    return bool(parse_sticker_set_name(link)) and ("addstickers" in raw or "addemoji" in raw)
 
 
 def post_caption(title: str, sticker_type: str = "regular", animated: bool = False) -> str:
@@ -449,18 +569,20 @@ async def begin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     args = list(getattr(context, "args", None) or [])
     if args and parse_sticker_set_name(args[0]):
-        await _handle_link(update, context, context.user_data[STATE_KEY], args[0])
+        await _handle_link(update, context, context.user_data[STATE_KEY], " ".join(args))
         return
     await message.reply_text(LINK_PROMPT, disable_web_page_preview=True)
 
 
 async def _handle_link(update, context, state: dict, text: str) -> None:
     message = update.effective_message
-    name = parse_sticker_set_name(text)
+    link, spec = split_link_and_positions(text)
+    name = parse_sticker_set_name(link)
     if not name:
         await message.reply_text(
             "链接格式不正确，请发送 https://t.me/addstickers/贴纸地址 或 "
-            "https://t.me/addemoji/表情地址\n\n发送 /cancel 取消",
+            "https://t.me/addemoji/表情地址\n"
+            f"{DELETE_HINT}\n\n发送 /cancel 取消",
             disable_web_page_preview=True,
         )
         return
@@ -478,13 +600,20 @@ async def _handle_link(update, context, state: dict, text: str) -> None:
         return
     sticker_type = str(getattr(sticker_set, "sticker_type", "regular") or "regular")
     limit = SET_LIMITS.get(sticker_type, 120)
+    deleted, notes = plan_deletions(len(stickers), spec)
+    remaining = len(stickers) - len(deleted)
+    if remaining <= 0:
+        await message.reply_text("删除这些序号后没有剩余贴图，请重新发送。\n\n发送 /cancel 取消")
+        return
     state.update({
-        "step": "title", "source": sticker_set.name, "count": len(stickers),
-        "expires": time.time() + PROMPT_TTL_SECONDS,
+        "step": "title", "source": sticker_set.name, "count": min(remaining, limit),
+        "skip": deleted, "expires": time.time() + PROMPT_TTL_SECONDS,
     })
     kind = "表情" if sticker_type == "custom_emoji" else "贴图"
-    lines = [f"已解析贴纸包：{sticker_set.title}", f"共 {len(stickers)} 张{kind}"]
-    if len(stickers) > limit:
+    lines = [f"已解析{'表情包' if sticker_type == 'custom_emoji' else '贴纸包'}：{sticker_set.title}",
+             f"共 {len(stickers)} 张{kind}"]
+    lines.extend(deletion_summary(len(stickers), deleted, notes))
+    if remaining > limit:
         lines.append(f"（单个贴纸包最多 {limit} 张，将只复制前 {limit} 张）")
     lines.extend(["", "请发送需要更改的联系方式（将作为新贴纸包标题）："])
     await message.reply_text("\n".join(lines), disable_web_page_preview=True)
@@ -498,13 +627,14 @@ async def _handle_title(update, context, state: dict, text: str) -> None:
             f"标题需要 1-{MAX_TITLE_LENGTH} 个字符，请重新发送。\n\n发送 /cancel 取消"
         )
         return
-    if await _start_job(update, context, str(state["source"]), int(state.get("count") or 0), title):
+    if await _start_job(update, context, str(state["source"]), int(state.get("count") or 0), title,
+                        skip=list(state.get("skip") or [])):
         context.user_data.pop(STATE_KEY, None)
 
 
 async def _start_job(
     update, context, source: str, count: int, title: str, *,
-    channel_id: int = 0, channel_label: str = "", intro: str = "",
+    channel_id: int = 0, channel_label: str = "", intro: str = "", skip: Any = (),
 ) -> bool:
     message = update.effective_message
     user = update.effective_user
@@ -524,7 +654,7 @@ async def _start_job(
     job = run_job(
         context.bot, context.application.bot_data, user.id, source,
         title, _bot_username(context), progress_message,
-        channel_id=channel_id, channel_label=channel_label,
+        channel_id=channel_id, channel_label=channel_label, skip=list(skip or ()),
     )
     spawn = getattr(context.application, "create_task", None)
     if callable(spawn):
@@ -538,6 +668,7 @@ async def run_job(
     bot: Any, bot_data: dict, user_id: int, source: str, title: str,
     bot_username: str, progress_message: Any, *,
     channel_id: int = 0, channel_label: str = "", publish: bool = True,
+    skip: Any = (),
 ) -> CloneResult | None:
     active = bot_data.setdefault("sticker_clone_active", set())
     semaphore = bot_data.get("sticker_clone_semaphore") or asyncio.Semaphore(
@@ -563,7 +694,7 @@ async def run_job(
     try:
         async with semaphore:
             result = await clone_sticker_set(
-                bot, user_id, source, title, bot_username, progress=progress,
+                bot, user_id, source, title, bot_username, progress=progress, skip=skip,
             )
         await edit(result_text(result), force=True)
         if publish:
@@ -657,7 +788,8 @@ def fixed_ready_view(profile) -> tuple[str, InlineKeyboardMarkup]:
         f"固定更改标题：{profile['fixed_title']}\n"
         f"固定发送频道：{channel or '未设置（只发给你）'}\n\n"
         "现在直接发送贴纸包链接即可自动生成，可以连续发送。\n"
-        "例如：https://t.me/addstickers/贴纸地址\n\n"
+        "例如：https://t.me/addstickers/贴纸地址\n"
+        f"{DELETE_HINT}\n\n"
         "发送 /cancel 退出固定模式"
     )
     return text, InlineKeyboardMarkup([
@@ -874,7 +1006,8 @@ async def _handle_fixed_link(update, context, state: dict, text: str) -> None:
         await message.reply_text("固定标题未设置，请先在主菜单“😊 表情包复制更改标题 → 固定模式”中设置。")
         return
     state["expires"] = time.time() + FIXED_TTL_SECONDS
-    name = parse_sticker_set_name(text)
+    link, spec = split_link_and_positions(text)
+    name = parse_sticker_set_name(link)
     try:
         sticker_set = await call_with_retry(context.bot.get_sticker_set, name, attempts=3)
     except BadRequest:
@@ -891,16 +1024,24 @@ async def _handle_fixed_link(update, context, state: dict, text: str) -> None:
     limit = SET_LIMITS.get(sticker_type, 120)
     kind = "表情" if sticker_type == "custom_emoji" else "贴图"
     channel_id = int(profile["channel_id"] or 0)
+    deleted, notes = plan_deletions(len(stickers), spec)
+    remaining = len(stickers) - len(deleted)
+    if remaining <= 0:
+        await message.reply_text("删除这些序号后没有剩余贴图，请重新发送。")
+        return
+    deletion_lines = "".join(f"{line}\n" for line in deletion_summary(len(stickers), deleted, notes))
     intro = (
         f"已解析贴纸包：{sticker_set.title}\n共 {len(stickers)} 张{kind}\n"
-        + (f"（单个贴纸包最多 {limit} 张，将只复制前 {limit} 张）\n" if len(stickers) > limit else "")
+        + deletion_lines
+        + (f"（单个贴纸包最多 {limit} 张，将只复制前 {limit} 张）\n" if remaining > limit else "")
         + f"固定标题：{title}\n"
         + (f"完成后发送到频道：{channel_label(profile)}\n" if channel_id else "")
         + "\n"
     )
     await _start_job(
-        update, context, sticker_set.name, min(len(stickers), limit), title,
+        update, context, sticker_set.name, min(remaining, limit), title,
         channel_id=channel_id, channel_label=channel_label(profile), intro=intro,
+        skip=deleted,
     )
 
 

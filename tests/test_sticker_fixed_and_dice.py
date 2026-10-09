@@ -87,7 +87,7 @@ class FakeBot:
         raise BadRequest("Stickerset_invalid")
 
     async def create_new_sticker_set(self, user_id, name, title, stickers,
-                                     sticker_type=None, needs_repainting=None):
+                                     sticker_type=None, needs_repainting=None, **_timeouts):
         source = next(iter(self.sources.values()))
         by_id = {s.file_id: s for s in source.stickers}
         self.created[name] = SimpleNamespace(
@@ -96,7 +96,7 @@ class FakeBot:
         )
         return True
 
-    async def add_sticker_to_set(self, user_id, name, sticker):
+    async def add_sticker_to_set(self, user_id, name, sticker, **_timeouts):
         source = next(iter(self.sources.values()))
         by_id = {s.file_id: s for s in source.stickers}
         self.created[name].stickers.append(by_id[sticker.sticker])
