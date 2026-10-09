@@ -66,7 +66,7 @@ from .storage import (
     normalize_points,
 )
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
-from . import raffle_fair, settings_wizard, sticker_clone
+from . import crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
@@ -144,7 +144,7 @@ def parse_group_permissions(value: str) -> set[str]:
 HELP_TEXT = """📖 使用帮助
 
 🏠 基础
-• /start 打开菜单；/help 查看帮助；/cancel 退出当前操作
+• /start 打开分类主菜单；/help 查看帮助；/cancel 退出当前操作
 • 操作页面3分钟无点击会自动撤回
 
 🔎 搜索收录
@@ -157,30 +157,38 @@ HELP_TEXT = """📖 使用帮助
 
 ⛓ 波场查询
 • 发送 T 开头地址或 /balance 地址：余额、资源、授权
-• 页面按钮可看交易记录、设置地址监控
+• 主菜单“💰 波场/地址监控”：交易记录、地址监控
 
 ⭐ 积分
 • 签到、我的积分、积分排行、积分礼品、积分账单
 • 中奖记录、兑换记录、游戏记录、积分抽奖
 • 兑换 礼品编号；群内骰子：大3 / 小5 / 单10 / 双2
+• 有效发言：1 分钟内最多算 2 条，少于 3 个字不算
+• 活跃阶梯奖励、邀请奖励在“⭐ 积分”分类里设置
 
 🎁 全部抽奖
 • 抽奖：本群进行中；抽奖历史：往期
 • /raffle 分钟 人数 奖品；/raffles 记录；/draw 编号 立即开奖
+• 私聊粘贴或转发抽奖公告，或发送“识别抽奖”：自动识别后确认创建
+• “用上次模板”“复制为新抽奖”：沿用以前的抽奖设置
 
 🎟 彩票
 • 开奖：本群已开启的彩种
 • /lottery 彩种：最新；/lotteryhistory 彩种：历史
 
 👥 群组管理
-• 点“群组管理”，在私聊选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接、快捷发布
+• 主菜单按分类进入：🎁 抽奖、⭐ 积分、🎲 骰子、📢 广告、⚙️ 群设置
+• 在私聊选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接、快捷发布
 • /link：生成个人邀请链接
 
 🧰 其他
 • z0 或 /rate：OKX 商户报价
+• /price btc、“币价 btc”或直接发 BTC：查币价
 • /userinfo @用户名：查询账户资料
 • /jx：复制贴纸包并改标题
 • 主菜单“😊 表情包复制更改标题”：固定模式保存标题和频道后，发链接即自动生成并发到频道
+• 链接后加序号可去掉部分贴图，例如：链接 3|5|12
+• /life 或发送“人生指南”：📖 人生指南
 
 🛡 权限
 • 超级管理员：管理本机器人、管理员，审核收录
@@ -324,17 +332,38 @@ def all_developer_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
 
 
 def main_keyboard(
-    is_admin: bool = False, is_super: bool = False, show_clone: bool = True
+    is_admin: bool = False, is_super: bool = False, show_clone: bool = True,
+    is_developer: bool = False,
 ) -> InlineKeyboardMarkup:
-    rows = [[
-        InlineKeyboardButton("🔎 搜索服务", callback_data="nav:search"),
-        InlineKeyboardButton("📮 提交搜录", callback_data="submit:start"),
-    ], [InlineKeyboardButton("👥 群组管理", callback_data="nav:group")]]
+    """Main menu grouped by category; every older entry stays reachable inside."""
+    rows = [
+        [
+            InlineKeyboardButton("🔎 搜索收录", callback_data="nav:search"),
+            InlineKeyboardButton("📮 提交搜录", callback_data="submit:start"),
+        ],
+        [
+            InlineKeyboardButton("🎁 抽奖", callback_data="cat:raffle"),
+            InlineKeyboardButton("⭐ 积分", callback_data="cat:points"),
+        ],
+        [
+            InlineKeyboardButton("🎲 骰子", callback_data="cat:dice"),
+            InlineKeyboardButton("📢 广告", callback_data="cat:ads"),
+        ],
+        [
+            InlineKeyboardButton("💰 波场/地址监控", callback_data="cat:tron"),
+            InlineKeyboardButton("💹 币价", callback_data="price:menu"),
+        ],
+        [InlineKeyboardButton(sticker_clone.MENU_BUTTON_TEXT, callback_data="stk:menu")],
+        [InlineKeyboardButton(life_guide.MENU_BUTTON_TEXT, callback_data="life:home")],
+        [InlineKeyboardButton("⚙️ 群设置", callback_data="nav:group")],
+    ]
     if is_admin:
         rows[-1].append(InlineKeyboardButton("🛡 管理员", callback_data="nav:admin"))
-    rows.append([InlineKeyboardButton(
-        sticker_clone.MENU_BUTTON_TEXT, callback_data="stk:menu",
-    )])
+    if is_developer:
+        rows.append([
+            InlineKeyboardButton("📝 私人笔记", callback_data="admin:notes"),
+            InlineKeyboardButton("🌳 子机器人", callback_data="cat:clone"),
+        ])
     rows.append([
         InlineKeyboardButton("👤 联系开发者", url="https://t.me/xinyuan188"),
         InlineKeyboardButton("📖 帮助教程", callback_data="menu:help"),
@@ -354,7 +383,7 @@ def main_keyboard_for(
 ) -> InlineKeyboardMarkup:
     return main_keyboard(
         has_admin_access(context, user_id), has_super_admin_access(context, user_id),
-        clone_available(context),
+        clone_available(context), has_developer_access(context, user_id),
     )
 
 
@@ -707,6 +736,7 @@ def group_menu_keyboard(
         rows.append([InlineKeyboardButton("🚫 删除·禁言·踢群", callback_data="group:moderation")])
     if "renamehist" in allowed:
         rows.append([InlineKeyboardButton("📝 改名记录", callback_data="group:renamehist")])
+    rows.append([InlineKeyboardButton("💹 币价回复开关", callback_data="price:group")])
     if is_super:
         rows.append([InlineKeyboardButton("👮 群管理员权限", callback_data="group:permissions")])
     rows.append([InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")])
@@ -842,6 +872,11 @@ def raffle_plan_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚡ 快速10分钟", callback_data="raffleplan:quick"),
         ],
         [InlineKeyboardButton("🧾 样板通用抽奖", callback_data="raffleplan:pro")],
+        [InlineKeyboardButton("📥 识别抽奖", callback_data="rparse:start")],
+        [
+            InlineKeyboardButton("🔁 用上次模板", callback_data="raffleplan:last"),
+            InlineKeyboardButton("📋 复制为新抽奖", callback_data="rafflecopy:menu:0"),
+        ],
         [
             InlineKeyboardButton("📋 最近抽奖", callback_data="raffleplan:list"),
             InlineKeyboardButton("🗑 删除群抽奖", callback_data="raffleplan:delete"),
@@ -2015,6 +2050,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("group_poll_question", None)
     context.user_data.pop("pending_private_note", None)
     context.user_data.pop(sticker_clone.STATE_KEY, None)
+    context.user_data.pop(RAFFLE_PARSE_WAIT_KEY, None)
+    context.user_data.pop(RAFFLE_PARSE_KEY, None)
     await update.effective_message.reply_text(
         "已取消。",
         reply_markup=main_keyboard_for(
@@ -4619,6 +4656,8 @@ async def group_keyword_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         schedule_group_trigger_cleanup(context, message, text)
         await apply_group_dice_toggle(update, context, dice_toggle)
         return
+    if await quick_text_features(update, context, text, False):
+        return
     if " ".join(text.split()) == "改名记录":
         if not has_group_permission(
             context, chat_id, update.effective_user.id, "renamehist"
@@ -5731,6 +5770,8 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     if await send_personal_invite_query(update, context, text):
+        return
+    if await quick_text_features(update, context, text, True):
         return
     account_match = re.fullmatch(r"1\s*@([A-Za-z0-9_]{5,32})", text)
     username_match = re.fullmatch(r"@([A-Za-z0-9_]{5,32})", text)
@@ -7978,6 +8019,7 @@ def callback_group_permission(data: str) -> str:
         return "stats"
     if data == "group:raffles" or data.startswith((
         "raffletype:", "raffleplan:", "raffle:count:", "raffledelete:", "raffleedit:",
+        "rafflecopy:",
     )):
         return "raffles"
     if data == "group:lottery" or data.startswith("lotterysub:"):
@@ -10916,6 +10958,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             if query.message:
                 schedule_setting_cleanup(context, query.message)
+    if await feature_callback(update, context, data):
+        return
     if data == "nav:main":
         context.user_data.pop("menu_mode", None)
         context.user_data.pop("support_mode", None)
@@ -10925,6 +10969,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             settings.get("welcome_text", "欢迎使用。"),
             reply_markup=main_keyboard(
                 is_admin_user, is_super_user, clone_available(context),
+                has_developer_access(context, user_id),
             ),
         )
         return
@@ -11627,6 +11672,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             HELP_TEXT, reply_markup=main_keyboard(
                 is_admin_user, is_super_user, clone_available(context),
+                has_developer_access(context, user_id),
             )
         )
         return
@@ -13151,6 +13197,8 @@ async def post_init(application: Application) -> None:
         BotCommand("raffle", "群管理员发起抽奖"),
         BotCommand("raffleat", "按时间定时抽奖"),
         BotCommand("jx", "复制贴纸包并改标题"),
+        BotCommand("life", "人生指南"),
+        BotCommand("price", "查询币价，如 /price btc"),
     ]
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username or ""
@@ -13378,6 +13426,8 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("noteadd", note_add_command))
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("jx", jx_command))
+    application.add_handler(CommandHandler(["life", "rensheng"], life_command))
+    application.add_handler(CommandHandler("price", price_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(InlineQueryHandler(quick_post_inline))
     application.add_handler(ChatMemberHandler(track_personal_invite, ChatMemberHandler.CHAT_MEMBER))
@@ -13456,3 +13506,621 @@ def build_application(config: Config) -> Application:
             interval=20, first=15, job_kwargs=single_job,
         )
     return application
+
+
+# ===================================================================
+# 人生指南 / 币价 / 抽奖识别 / 分类菜单
+# ===================================================================
+
+PRICE_SERVICE_KEY = "price_service"
+RAFFLE_PARSE_KEY = "raffle_parse"
+RAFFLE_PARSE_WAIT_KEY = "raffle_parse_wait"
+RAFFLE_PARSE_TTL = 1800
+
+
+def price_service(context: ContextTypes.DEFAULT_TYPE) -> crypto_price.PriceService:
+    data = context.application.bot_data
+    service = data.get(PRICE_SERVICE_KEY)
+    if service is None:
+        chain = data.get("chain")
+        c2c = None
+        if chain is not None and hasattr(chain, "okx_p2p_quotes"):
+            async def c2c() -> Decimal:
+                quotes = await chain.okx_p2p_quotes("buy")
+                return Decimal(str(quotes[0].price))
+        service = crypto_price.PriceService(c2c_rate=c2c)
+        data[PRICE_SERVICE_KEY] = service
+    return service
+
+
+def price_symbols(store: DirectoryStore) -> set[str]:
+    return crypto_price.known_symbols(store.get_settings().get(crypto_price.SETTING_EXTRA, ""))
+
+
+def price_refresh_markup(symbol: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新", callback_data=f"price:q:{symbol}")]])
+
+
+async def price_reply_text(context: ContextTypes.DEFAULT_TYPE, symbol: str) -> str:
+    try:
+        quote = await price_service(context).quote(symbol)
+    except crypto_price.PriceError as exc:
+        return f"币价查询失败：{exc}"
+    except Exception:  # noqa: BLE001 - 行情接口异常不影响机器人
+        logging.exception("Price query failed for %s", symbol)
+        return "币价查询失败：行情服务暂时不可用，请稍后再试。"
+    return crypto_price.quote_text(quote)
+
+
+async def reply_price(message, context: ContextTypes.DEFAULT_TYPE, symbol: str) -> None:
+    text = await price_reply_text(context, symbol)
+    ok = not text.startswith("币价查询失败")
+    await message.reply_text(text, reply_markup=price_refresh_markup(symbol) if ok else None)
+
+
+def group_price_enabled(store: DirectoryStore, chat_id: int) -> bool:
+    return crypto_price.group_enabled(store.get_settings(), chat_id)
+
+
+def price_menu_view(store: DirectoryStore, can_manage: bool) -> tuple[str, InlineKeyboardMarkup]:
+    extra = store.get_settings().get(crypto_price.SETTING_EXTRA, "").split()
+    text = crypto_price.HELP_TEXT
+    if can_manage:
+        text += (
+            "\n\n管理员：/price add 代码 添加自定义币种，/price del 代码 删除。\n"
+            f"已添加：{'、'.join(extra) if extra else '无'}"
+        )
+    rows = [[
+        InlineKeyboardButton(symbol, callback_data=f"price:q:{symbol}")
+        for symbol in ("BTC", "ETH", "SOL", "TRX")
+    ], [InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")]]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def group_price_view(store: DirectoryStore, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    enabled = group_price_enabled(store, chat_id)
+    text = (
+        "💹 币价回复\n\n"
+        f"当前状态：{'✅ 已开启' if enabled else '⛔ 已关闭'}\n"
+        "开启后，群成员发送 BTC、ETH 等常见币种代码或「币价 代码」时，机器人回复实时价格。\n"
+        "波场地址、比特币地址不会被当作币种。"
+    )
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("⛔ 关闭币价回复" if enabled else "✅ 开启币价回复",
+                              callback_data="price:group:off" if enabled else "price:group:on")],
+        [InlineKeyboardButton("⬅️ 返回群设置", callback_data="nav:groupmenu")],
+    ])
+
+
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    store: DirectoryStore = context.application.bot_data["store"]
+    args = [arg for arg in (context.args or []) if arg.strip()]
+    if args and args[0].casefold() in {"add", "del", "添加", "删除"}:
+        if not has_admin_access(context, user.id if user else None):
+            await message.reply_text("只有机器人管理员可以修改自定义币种。")
+            return
+        if len(args) < 2 or not crypto_price.normalize_symbol(args[1]):
+            await message.reply_text("用法：/price add 代码 或 /price del 代码，例如 /price add NOT")
+            return
+        symbol = crypto_price.normalize_symbol(args[1])
+        current = [s for s in store.get_settings().get(crypto_price.SETTING_EXTRA, "").split() if s]
+        if args[0].casefold() in {"add", "添加"}:
+            if symbol not in current:
+                if len(current) >= crypto_price.MAX_EXTRA_SYMBOLS:
+                    await message.reply_text(f"自定义币种最多 {crypto_price.MAX_EXTRA_SYMBOLS} 个。")
+                    return
+                current.append(symbol)
+            note = f"已添加 {symbol}，发送 {symbol} 即可查询价格。"
+        else:
+            current = [s for s in current if s != symbol]
+            note = f"已删除 {symbol}。"
+        store.set_setting(crypto_price.SETTING_EXTRA, " ".join(current))
+        await message.reply_text(note)
+        return
+    if chat and chat.type in {ChatType.GROUP, ChatType.SUPERGROUP} and not group_price_enabled(store, chat.id):
+        await message.reply_text("本群已关闭币价查询。")
+        return
+    if not args:
+        text, markup = price_menu_view(store, has_admin_access(context, user.id if user else None))
+        await message.reply_text(text, reply_markup=markup)
+        return
+    symbol = crypto_price.normalize_symbol(args[0])
+    if not symbol:
+        await message.reply_text("币种代码格式不正确，例如：/price btc")
+        return
+    await reply_price(message, context, symbol)
+
+
+async def life_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    chat = update.effective_chat
+    await life_guide.send_home(
+        update.effective_message, private=bool(chat and chat.type == ChatType.PRIVATE),
+    )
+
+
+def future_draw_clock(value: str) -> str:
+    """Keep a draw time that is still in the future; otherwise move it to the
+    next occurrence of the same clock time."""
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    try:
+        beijing_datetime_to_utc_text(raw)
+        return raw
+    except ValueError:
+        moved, _ = raffle_parse.parse_draw_time(raw)
+        return moved.strftime("%Y-%m-%d %H:%M:%S") if moved else ""
+
+
+def raffle_template_prefills(raffle) -> list[str]:
+    answers = raffle_pro_answers_from_row(raffle)
+    answers[2] = future_draw_clock(answers[2])
+    return answers
+
+
+async def raffle_groups_for(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[tuple[int, str]]:
+    store: DirectoryStore = context.application.bot_data["store"]
+    result = []
+    for group in store.list_groups(100):
+        chat_id = int(group["chat_id"])
+        if has_group_permission(context, chat_id, user_id, "raffles"):
+            result.append((chat_id, str(group["title"] or group["username"] or chat_id)))
+    return result
+
+
+def raffle_parse_view(state: dict) -> tuple[str, InlineKeyboardMarkup]:
+    parsed: raffle_parse.ParsedRaffle = state["parsed"]
+    recur = bool(state.get("recur"))
+    groups = state.get("groups") or []
+    chat_id = state.get("chat_id")
+    label = next((title for cid, title in groups if cid == chat_id), "")
+    text = raffle_parse.summary_text(parsed, recur, label)
+    rows: list[list[InlineKeyboardButton]] = []
+    if chat_id is None:
+        text += "\n\n请选择要发布到哪个群："
+        rows.extend([[InlineKeyboardButton(title[:40], callback_data=f"rparse:g:{cid}")]]
+                    for cid, title in groups[:20])
+    else:
+        rows.append([
+            InlineKeyboardButton("✅ 确认创建", callback_data="rparse:ok"),
+            InlineKeyboardButton("✏️ 修改", callback_data="rparse:edit"),
+        ])
+    rows.append([InlineKeyboardButton(f"🔁 每日重复：{'是' if recur else '否'}", callback_data="rparse:recur")])
+    if chat_id is not None and len(groups) > 1:
+        rows.append([InlineKeyboardButton("🔄 换一个群", callback_data="rparse:groups")])
+    rows.append([InlineKeyboardButton("取消", callback_data="rparse:cancel")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def start_raffle_recognition(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, group_chat_id: int | None = None,
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    parsed = raffle_parse.parse(text)
+    if not (parsed.prizes or parsed.draw_at):
+        await message.reply_text(
+            "没有识别到抽奖信息。请粘贴或转发完整的抽奖公告（需要包含开奖时间和奖品）。"
+        )
+        return
+    if group_chat_id is not None:
+        if not has_group_permission(context, group_chat_id, user.id, "raffles"):
+            await message.reply_text("你没有本群的抽奖管理权限。")
+            return
+        store: DirectoryStore = context.application.bot_data["store"]
+        group = store.group_stats(group_chat_id)
+        groups = [(group_chat_id, str(group["title"] if group else group_chat_id))]
+    else:
+        groups = await raffle_groups_for(context, user.id)
+        preferred = context.user_data.get("selected_group_id")
+        if isinstance(preferred, int) and any(cid == preferred for cid, _ in groups):
+            groups.sort(key=lambda item: item[0] != preferred)
+    if not groups:
+        await message.reply_text("你还没有可以创建抽奖的群组：需要该群的抽奖管理权限。")
+        return
+    wait = context.user_data.pop(RAFFLE_PARSE_WAIT_KEY, None) or {}
+    chosen = wait.get("chat_id") if isinstance(wait, dict) else None
+    if not any(cid == chosen for cid, _ in groups):
+        chosen = groups[0][0] if len(groups) == 1 else None
+    state = {
+        "parsed": parsed, "recur": parsed.daily_hint, "chat_id": chosen,
+        "groups": groups[:30], "expires": time.time() + RAFFLE_PARSE_TTL,
+    }
+    context.user_data[RAFFLE_PARSE_KEY] = state
+    body, markup = raffle_parse_view(state)
+    await message.reply_text(body, reply_markup=markup, disable_web_page_preview=True)
+
+
+def raffle_copy_view(store: DirectoryStore, chat_id: int, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    page_size = 8
+    rows = [row for row in store.list_raffles(chat_id, limit=60)
+            if str(row["raffle_type"] or "") == "universal"]
+    page_count = max(1, (len(rows) + page_size - 1) // page_size)
+    page = min(max(page, 0), page_count - 1)
+    lines = ["📋 复制为新抽奖", "", "选择一个抽奖，会把它的标题、规则、条件和奖品带入新抽奖，开奖时间自动顺延："]
+    buttons = []
+    for row in rows[page * page_size:(page + 1) * page_size]:
+        title = (str(row["title"] or "").strip() or str(row["prize"] or ""))[:28]
+        buttons.append([InlineKeyboardButton(f"#{row['id']} · {title}", callback_data=f"rafflecopy:item:{row['id']}")])
+    if not rows:
+        lines.append("当前群还没有通用抽奖可以复制。")
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton("上一页", callback_data=f"rafflecopy:menu:{page - 1}"))
+    if page + 1 < page_count:
+        nav.append(InlineKeyboardButton("下一页", callback_data=f"rafflecopy:menu:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("⬅️ 返回抽奖方案", callback_data="raffletype:universal")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def begin_raffle_prefill(context: ContextTypes.DEFAULT_TYPE, answers: list[str], title: str) -> None:
+    context.user_data.pop("edit_raffle_id", None)
+    context.user_data["wizard_prefills"] = list(answers)
+    context.user_data["wizard_action_title"] = title
+    context.user_data["menu_mode"] = "raffle_pro"
+
+
+# ---- 分类菜单 ------------------------------------------------------------
+
+CATEGORY_TITLES = {
+    "raffle": "🎁 抽奖", "points": "⭐ 积分", "dice": "🎲 骰子", "ads": "📢 广告",
+}
+
+
+def category_group_rows(category: str, allowed: set[str]) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    if category == "raffle":
+        if "raffles" in allowed:
+            rows.append([InlineKeyboardButton("🎁 抽奖方案", callback_data="group:raffles")])
+            rows.append([InlineKeyboardButton("📥 识别抽奖", callback_data="rparse:start")])
+            rows.append([
+                InlineKeyboardButton("🔁 用上次模板", callback_data="raffleplan:last"),
+                InlineKeyboardButton("📋 复制为新抽奖", callback_data="rafflecopy:menu:0"),
+            ])
+        if "lottery" in allowed:
+            rows.append([InlineKeyboardButton("🎟 开奖订阅", callback_data="group:lottery")])
+        if "polls" in allowed:
+            rows.append([InlineKeyboardButton("🗳 群投票", callback_data="group:polls")])
+    elif category == "points":
+        if "points" in allowed:
+            rows.append([InlineKeyboardButton("⭐ 积分·签到·礼品", callback_data="group:points")])
+            rows.append([InlineKeyboardButton("🔥 活跃设置", callback_data="points:set:activitymenu")])
+        if "invite" in allowed:
+            rows.append([InlineKeyboardButton("🔗 邀请链接与奖励", callback_data="invite:menu")])
+    elif category == "dice":
+        if "points" in allowed:
+            rows.append([InlineKeyboardButton("🎲 骰子设置", callback_data="points:dice:menu")])
+            rows.append([InlineKeyboardButton("⭐ 积分·签到·礼品", callback_data="group:points")])
+    elif category == "ads":
+        if "ads" in allowed:
+            rows.append([InlineKeyboardButton("⏱ 定时广告·消息前后广告", callback_data="group:ads")])
+        if "quickpost" in allowed:
+            rows.append([InlineKeyboardButton("✏️ 快捷发布", callback_data="quickpost:menu")])
+    return rows
+
+
+def category_view(
+    category: str, group_title: str, allowed: set[str], private: bool = True,
+) -> tuple[str, InlineKeyboardMarkup]:
+    rows = category_group_rows(category, allowed)
+    title = CATEGORY_TITLES.get(category, "功能")
+    text = f"{title} · {group_title}\n\n请选择："
+    if not rows:
+        text = f"{title} · {group_title}\n\n你在这个群没有此类功能的管理权限，请联系超级管理员分配。"
+    if private:
+        rows.append([InlineKeyboardButton("🔄 切换群组", callback_data=f"cat:{category}:pick")])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="nav:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def tron_category_view() -> tuple[str, InlineKeyboardMarkup]:
+    return "💰 波场/地址监控\n\n请选择：", InlineKeyboardMarkup([
+        [InlineKeyboardButton("⛓ 波场查询", callback_data="tron:prompt")],
+        [InlineKeyboardButton("⏰ 波场地址监控", callback_data="tronmonitor:menu")],
+        [InlineKeyboardButton("🏦 OKX 商户报价", callback_data="rate:buy:bank")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data="nav:main")],
+    ])
+
+
+def clone_category_view(is_developer: bool, show_clone: bool) -> tuple[str, InlineKeyboardMarkup]:
+    rows = []
+    if show_clone:
+        rows.append([InlineKeyboardButton("🤖 克隆机器人", callback_data="clone:start")])
+    if is_developer:
+        rows.append([
+            InlineKeyboardButton("🤖 克隆审核记录", callback_data="admin:clones"),
+            InlineKeyboardButton("🌳 子机器人管理", callback_data="clonetree:0"),
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="nav:main")])
+    return "🌳 子机器人\n\n请选择：", InlineKeyboardMarkup(rows)
+
+
+async def category_group_picker(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, category: str,
+) -> tuple[str, InlineKeyboardMarkup]:
+    store: DirectoryStore = context.application.bot_data["store"]
+    buttons = []
+    for group in store.list_groups(100):
+        chat_id = int(group["chat_id"])
+        if await is_chat_admin(context, chat_id, user_id):
+            buttons.append([InlineKeyboardButton(
+                str(group["title"] or group["username"] or chat_id)[:50],
+                callback_data=f"catsel:{category}:{chat_id}",
+            )])
+    title = CATEGORY_TITLES.get(category, "功能")
+    text = f"{title}\n\n请选择要设置的群组。" if buttons else (
+        f"{title}\n\n暂未找到你有管理权限的群组。请先把机器人添加到群组，"
+        "群管理员还需要超级管理员分配机器人权限。"
+    )
+    buttons.append([InlineKeyboardButton("⬅️ 返回", callback_data="nav:main")])
+    return text, InlineKeyboardMarkup(buttons[:51])
+
+
+def group_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> set[str]:
+    if has_super_admin_access(context, user_id):
+        return set(GROUP_PERMISSIONS)
+    store: DirectoryStore = context.application.bot_data["store"]
+    return set(store.group_admin_permissions(chat_id, user_id) or set())
+
+
+async def feature_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> bool:
+    """Callbacks for the newer features. Returns True when handled."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat = query.message.chat if query.message else None
+    private = bool(chat and chat.type == ChatType.PRIVATE)
+    store: DirectoryStore = context.application.bot_data["store"]
+
+    async def show(text: str, markup: InlineKeyboardMarkup | None = None, answer: str | None = None) -> None:
+        await query.answer(answer)
+        try:
+            await query.edit_message_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except TelegramError as exc:
+            if "not modified" not in str(exc).lower() and query.message is not None:
+                await query.message.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+    if data.startswith("life:"):
+        await life_guide.handle_callback(update, context)
+        return True
+    if data.startswith("price:"):
+        parts = data.split(":")
+        if parts[1] == "menu":
+            text, markup = price_menu_view(store, has_admin_access(context, user_id))
+            await show(text, markup)
+            return True
+        if parts[1] == "q" and len(parts) > 2:
+            symbol = crypto_price.normalize_symbol(parts[2])
+            if chat and chat.type != ChatType.PRIVATE and not group_price_enabled(store, chat.id):
+                await query.answer("本群已关闭币价查询。", show_alert=True)
+                return True
+            text = await price_reply_text(context, symbol)
+            await show(text, price_refresh_markup(symbol), "已刷新")
+            return True
+        if parts[1] == "group":
+            group_id = callback_group_id(context, chat)
+            if group_id is None:
+                await query.answer("请先选择群组。", show_alert=True)
+                return True
+            if not has_group_permission(context, group_id, user_id, "view"):
+                await query.answer("你没有这个群的管理权限。", show_alert=True)
+                return True
+            if len(parts) > 2 and parts[2] in {"on", "off"}:
+                store.set_setting(f"price_enabled:{group_id}", "1" if parts[2] == "on" else "0")
+                store.audit(f"tg:{user_id}", "price.group", str(group_id), parts[2])
+            text, markup = group_price_view(store, group_id)
+            await show(text, markup)
+            return True
+        await query.answer()
+        return True
+    if data.startswith("cat:") or data.startswith("catsel:"):
+        parts = data.split(":")
+        category = parts[1] if len(parts) > 1 else ""
+        if data.startswith("catsel:"):
+            if len(parts) != 3 or not parts[2].lstrip("-").isdigit():
+                await query.answer("群组编号无效。", show_alert=True)
+                return True
+            target = int(parts[2])
+            if not await is_chat_admin(context, target, user_id):
+                await query.answer("你没有这个群组的管理权限。", show_alert=True)
+                return True
+            context.user_data["selected_group_id"] = target
+            group = store.group_stats(target)
+            text, markup = category_view(category, str(group["title"] if group else target),
+                                         group_allowed(context, target, user_id), private)
+            await show(text, markup)
+            return True
+        if category == "tron":
+            await show(*tron_category_view())
+            return True
+        if category == "clone":
+            await show(*clone_category_view(has_developer_access(context, user_id), clone_available(context)))
+            return True
+        if category not in CATEGORY_TITLES:
+            await query.answer()
+            return True
+        context.user_data.pop("menu_mode", None)
+        group_id = callback_group_id(context, chat)
+        force_pick = len(parts) > 2 and parts[2] == "pick"
+        if private and (group_id is None or force_pick):
+            await show(*await category_group_picker(context, user_id, category))
+            return True
+        if group_id is None or not await is_chat_admin(context, group_id, user_id):
+            await query.answer("只有群管理员可以使用这里的设置。", show_alert=True)
+            return True
+        group = store.group_stats(group_id)
+        text, markup = category_view(category, str(group["title"] if group else group_id),
+                                     group_allowed(context, group_id, user_id), private)
+        await show(text, markup)
+        return True
+    if data == "raffleplan:last" or data.startswith("rafflecopy:"):
+        group_id = callback_group_id(context, chat)
+        if group_id is None:
+            await query.answer("请先选择群组。", show_alert=True)
+            return True
+        if data == "raffleplan:last":
+            raffle = store.latest_universal_raffle(group_id)
+            if not raffle:
+                await query.answer("这个群还没有可用的上次模板，请先创建一个样板通用抽奖。", show_alert=True)
+                return True
+            begin_raffle_prefill(context, raffle_template_prefills(raffle), f"用上次模板（#{raffle['id']}）创建")
+            await query.answer()
+            return True
+        parts = data.split(":")
+        if len(parts) == 3 and parts[1] == "menu" and parts[2].isdigit():
+            await show(*raffle_copy_view(store, group_id, int(parts[2])))
+            return True
+        if len(parts) == 3 and parts[1] == "item" and parts[2].isdigit():
+            raffle = store.get_raffle(int(parts[2]))
+            if not raffle or int(raffle["chat_id"]) != group_id or str(raffle["raffle_type"] or "") != "universal":
+                await query.answer("当前群没有这个通用抽奖。", show_alert=True)
+                return True
+            begin_raffle_prefill(context, raffle_template_prefills(raffle), f"复制抽奖 #{raffle['id']} 为新抽奖")
+            await query.answer()
+            return True
+        await query.answer("参数无效。", show_alert=True)
+        return True
+    if data.startswith("rparse:"):
+        action = data.split(":", 2)[1] if ":" in data else ""
+        if action == "start":
+            group_id = callback_group_id(context, chat)
+            if not private:
+                await query.answer("请回复抽奖公告并发送「识别抽奖」。", show_alert=True)
+                return True
+            context.user_data[RAFFLE_PARSE_WAIT_KEY] = {
+                "expires": time.time() + 600, "chat_id": group_id,
+            }
+            await show(
+                "📥 识别抽奖\n\n请直接粘贴或转发一条抽奖公告给我，我会自动识别标题、规则、开奖时间、条件和奖品。\n\n"
+                "发送 /cancel 取消。",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回", callback_data="cat:raffle")]]),
+            )
+            return True
+        state = context.user_data.get(RAFFLE_PARSE_KEY)
+        if not isinstance(state, dict) or float(state.get("expires") or 0) < time.time():
+            context.user_data.pop(RAFFLE_PARSE_KEY, None)
+            await query.answer("识别结果已过期，请重新发送抽奖内容。", show_alert=True)
+            return True
+        if action == "cancel":
+            context.user_data.pop(RAFFLE_PARSE_KEY, None)
+            await show("已取消识别抽奖。")
+            return True
+        if action == "recur":
+            state["recur"] = not state.get("recur")
+        elif action == "groups":
+            state["chat_id"] = None
+        elif action == "g":
+            raw = data.rsplit(":", 1)[-1]
+            if not raw.lstrip("-").isdigit() or not any(cid == int(raw) for cid, _ in state.get("groups") or []):
+                await query.answer("群组无效。", show_alert=True)
+                return True
+            state["chat_id"] = int(raw)
+        elif action in {"ok", "edit"}:
+            target = state.get("chat_id")
+            if target is None:
+                await query.answer("请先选择要发布的群组。", show_alert=True)
+                return True
+            if not has_group_permission(context, int(target), user_id, "raffles"):
+                await query.answer("你没有这个群的抽奖管理权限。", show_alert=True)
+                return True
+            parsed: raffle_parse.ParsedRaffle = state["parsed"]
+            answers = raffle_parse.to_answers(parsed, bool(state.get("recur")))
+            if action == "edit":
+                if private:
+                    context.user_data["selected_group_id"] = int(target)
+                context.user_data.pop(RAFFLE_PARSE_KEY, None)
+                begin_raffle_prefill(context, answers, "识别抽奖 · 修改后创建")
+                await query.answer()
+                return True
+            if parsed.missing():
+                await query.answer(f"缺少{'、'.join(parsed.missing())}，请点「✏️ 修改」补充。", show_alert=True)
+                return True
+            try:
+                ends_at, winner_count, prize, extras = build_raffle_extras_from_pro(answers)
+                await create_raffle_from_input(
+                    update, context, ends_at, winner_count, prize,
+                    chat_id_override=int(target), **extras,
+                )
+            except ValueError as exc:
+                await query.answer(f"创建失败：{exc}", show_alert=True)
+                return True
+            except TelegramError as exc:
+                await query.answer(f"发布到群失败：{exc}", show_alert=True)
+                return True
+            context.user_data.pop(RAFFLE_PARSE_KEY, None)
+            label = next((title for cid, title in state.get("groups") or [] if cid == target), str(target))
+            await show(f"✅ 抽奖「{parsed.title or '通用抽奖'}」已创建并发布到 {label}。",
+                       InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回", callback_data="nav:main")]])
+                       if private else None)
+            return True
+        text, markup = raffle_parse_view(state)
+        await show(text, markup)
+        return True
+    return False
+
+
+async def quick_text_features(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, private: bool,
+) -> bool:
+    """Keyword triggers shared by private and group chats. True when handled."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not user:
+        return False
+    if context.user_data.get("menu_mode"):
+        return False
+    store: DirectoryStore = context.application.bot_data["store"]
+    normalized = " ".join((text or "").split())
+    # 识别抽奖
+    wait = context.user_data.get(RAFFLE_PARSE_WAIT_KEY)
+    if private and isinstance(wait, dict) and float(wait.get("expires") or 0) >= time.time() and normalized:
+        await start_raffle_recognition(update, context, text)
+        return True
+    if normalized.startswith("识别抽奖"):
+        body = (text or "").strip()[len("识别抽奖"):].strip()
+        reply = getattr(message, "reply_to_message", None)
+        if not body and reply is not None:
+            body = (getattr(reply, "text", None) or getattr(reply, "caption", None) or "").strip()
+        group_id = None if private else (chat.id if chat else None)
+        if not body:
+            if not private:
+                await message.reply_text("请回复一条抽奖公告并发送「识别抽奖」。")
+                return True
+            context.user_data[RAFFLE_PARSE_WAIT_KEY] = {
+                "expires": time.time() + 600, "chat_id": context.user_data.get("selected_group_id"),
+            }
+            await message.reply_text("请粘贴或转发一条抽奖公告给我。\n\n发送 /cancel 取消。")
+            return True
+        await start_raffle_recognition(update, context, body, group_id)
+        return True
+    if private and raffle_parse.looks_like_raffle(text):
+        await start_raffle_recognition(update, context, text)
+        return True
+    # 人生指南
+    if life_guide.is_keyword(normalized):
+        await life_guide.send_home(message, private=private)
+        return True
+    # 币价
+    if normalized == "币价":
+        if not private and chat and not group_price_enabled(store, chat.id):
+            return False
+        text_body, markup = price_menu_view(store, has_admin_access(context, user.id))
+        await message.reply_text(text_body, reply_markup=markup if private else None)
+        return True
+    symbol = crypto_price.parse_query(normalized)
+    bare = "" if symbol else crypto_price.bare_symbol(normalized, price_symbols(store))
+    if symbol or bare:
+        if not private and chat and not group_price_enabled(store, chat.id):
+            return False
+        await reply_price(message, context, symbol or bare)
+        return True
+    return False
