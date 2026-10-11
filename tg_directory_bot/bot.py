@@ -8735,11 +8735,22 @@ async def point_checkin_reply(
         await message.reply_text(str(exc))
         return
     streak_text = f"，已连续签到 {streak} 天" if streak > 1 else ""
-    with persistent_message():
-        await message.reply_text(
-            f"📅 今日第 {today_number} 个签到\n"
-            f"签到成功 +{format_points(points)} 积分{streak_text}\n⭐ 当前积分：{format_points(balance)}"
-        )
+    # 签到消息按机器人标准自动撤回（MESSAGE_AUTO_DELETE_SECONDS）：回复和用户的「签到」都撤回
+    schedule_checkin_cleanup(context, message)
+    await message.reply_text(
+        f"📅 今日第 {today_number} 个签到\n"
+        f"签到成功 +{format_points(points)} 积分{streak_text}\n⭐ 当前积分：{format_points(balance)}"
+    )
+
+
+def schedule_checkin_cleanup(context: ContextTypes.DEFAULT_TYPE, message) -> None:
+    bot = context.bot
+    if message is None or not isinstance(bot, AutoDeleteBot):
+        return
+    try:
+        bot.schedule_delete(message.chat_id, message.message_id)
+    except Exception:  # noqa: BLE001 - 撤回失败不影响签到
+        logging.debug("Could not schedule check-in cleanup", exc_info=True)
 
 
 
@@ -12197,11 +12208,10 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     target_group_id, user_id, query.from_user.username or "",
                     query.from_user.full_name or "群成员",
                 )
-                with persistent_message():
-                    await query.message.reply_text(
-                        f"📅 今日第 {today_number} 个签到\n"
-                        f"签到成功 +{format_points(points)} 积分\n⭐ 当前积分：{format_points(balance_value)}"
-                    )
+                await query.message.reply_text(
+                    f"📅 今日第 {today_number} 个签到\n"
+                    f"签到成功 +{format_points(points)} 积分\n⭐ 当前积分：{format_points(balance_value)}"
+                )
             except ValueError as exc:
                 await query.message.reply_text(str(exc))
         elif data == "points:balance":
