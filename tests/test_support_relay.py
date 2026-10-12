@@ -186,7 +186,7 @@ if __name__ == "__main__":
 
 
 class SupportRelayExpiryTest(SupportRelayTest):
-    """10 天到期撤回：持久队列（重启不丢），删除成功后清理映射。"""
+    """47 小时到期撤回（Telegram 仅允许删除 48 小时内消息）：持久队列（重启不丢），删除成功后清理映射。"""
 
     def shift(self, seconds):
         # 假时钟：把队列里的到期时间整体提前，相当于时间过去了 seconds 秒
@@ -201,8 +201,8 @@ class SupportRelayExpiryTest(SupportRelayTest):
         await handlers.process_scheduled_deletions(SimpleNamespace(application=self.app, bot=self.app.bot))
         return {(int(p["chat_id"]), int(p["message_id"])) for a, p in self.request.calls if a == "deleteMessage"}
 
-    async def test_relay_messages_deleted_after_ten_days(self):
-        self.assertEqual(self.app.bot_data["config"].support_relay_delete_seconds, 864000)
+    async def test_relay_messages_deleted_after_47_hours(self):
+        self.assertEqual(self.app.bot_data["config"].support_relay_delete_seconds, 169200)
         user_mid = await self.user_contacts()
         header = self.admin_header_id()
         admin_mid = await self.send(ADMIN, reply_to=header, text="好的")
@@ -210,15 +210,15 @@ class SupportRelayExpiryTest(SupportRelayTest):
             "SELECT message_id FROM support_relay_map WHERE chat_id=? AND kind='user'", (USER,)).fetchone()[0])
         expected = {(ADMIN, header), (USER, user_mid), (USER, delivered), (ADMIN, admin_mid)}
         queued = {(int(r[0]), int(r[1])) for r in self.store.connect().execute(
-            "SELECT chat_id, message_id FROM scheduled_message_deletions WHERE delete_at > DATETIME('now','+9 days')")}
+            "SELECT chat_id, message_id FROM scheduled_message_deletions WHERE delete_at > DATETIME('now','+46 hours')")}
         self.assertTrue(expected <= queued)
         # restart: queue is in the DB
         await self.app.shutdown()
         await self.start_app()
-        self.shift(9 * 86400)
+        self.shift(46 * 3600)
         self.assertFalse(expected & await self.run_deletions())
-        self.assertIsNotNone(self.store.support_relay(ADMIN, header))  # 到期前仍可回复
-        self.shift(86400 + 60)
+        self.assertIsNotNone(self.store.support_relay(ADMIN, header))  # 46 小时仍可回复
+        self.shift(3600 + 60)
         self.assertTrue(expected <= await self.run_deletions())
         self.assertIsNone(self.store.support_relay(ADMIN, header))
         self.assertIsNone(self.store.support_relay(USER, delivered))
