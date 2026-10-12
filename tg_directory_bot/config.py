@@ -68,6 +68,7 @@ class Config:
     storage_quota_bytes: int = 0
     price_alert_max_per_chat: int = 50
     price_alert_poll_seconds: int = 30
+    support_relay_delete_seconds: int = 864000
 
 
 def _csv(value: str | None, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -217,6 +218,8 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         lottery_poll_seconds=lottery_poll_seconds,
         price_alert_max_per_chat=int(_float_env("PRICE_ALERT_MAX_PER_CHAT", 50, 0)),
         price_alert_poll_seconds=int(_float_env("PRICE_ALERT_POLL_SECONDS", 30, 10)),
+        # 双向客服消息自动撤回（秒），0 关闭。注意 Telegram 仅允许删除 48 小时内的消息
+        support_relay_delete_seconds=int(_float_env("SUPPORT_RELAY_DELETE_SECONDS", 864000, 0)),
         message_auto_delete_seconds=message_auto_delete_seconds,
         is_clone=is_clone,
         telegram_api_id=telegram_api_id,

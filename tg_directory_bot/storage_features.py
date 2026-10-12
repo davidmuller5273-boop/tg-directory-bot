@@ -657,6 +657,21 @@ class FeatureStoreMixin:
                  int(user_id), kind),
             )
             conn.execute("DELETE FROM support_relay_map WHERE created_at<DATETIME('now','-180 days')")
+        delay = int(getattr(self, "support_relay_delete_seconds", 0) or 0)
+        if delay > 0:
+            # 双向消息到期撤回：机器人转发/送达的消息 + 对方原消息（私聊均可删）
+            self.schedule_message_deletion(int(chat_id), int(message_id), delay)  # type: ignore[attr-defined]
+            if int(peer_chat_id) > 0 and int(peer_message_id or 0) > 0:
+                self.schedule_message_deletion(  # type: ignore[attr-defined]
+                    int(peer_chat_id), int(peer_message_id), delay,
+                )
+
+    def forget_support_relay(self, chat_id: int, message_id: int) -> None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                "DELETE FROM support_relay_map WHERE chat_id=? AND message_id=?",
+                (int(chat_id), int(message_id)),
+            )
 
     def support_relay(self, chat_id: int, message_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:  # type: ignore[attr-defined]

@@ -183,3 +183,54 @@ class SupportRelayTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SupportRelayExpiryTest(SupportRelayTest):
+    """10 天到期撤回：持久队列（重启不丢），删除成功后清理映射。"""
+
+    def shift(self, seconds):
+        # 假时钟：把队列里的到期时间整体提前，相当于时间过去了 seconds 秒
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE scheduled_message_deletions SET delete_at=DATETIME(delete_at, ?)",
+                (f"-{int(seconds)} seconds",),
+            )
+
+    async def run_deletions(self):
+        from types import SimpleNamespace
+        await handlers.process_scheduled_deletions(SimpleNamespace(application=self.app, bot=self.app.bot))
+        return {(int(p["chat_id"]), int(p["message_id"])) for a, p in self.request.calls if a == "deleteMessage"}
+
+    async def test_relay_messages_deleted_after_ten_days(self):
+        self.assertEqual(self.app.bot_data["config"].support_relay_delete_seconds, 864000)
+        user_mid = await self.user_contacts()
+        header = self.admin_header_id()
+        admin_mid = await self.send(ADMIN, reply_to=header, text="好的")
+        delivered = int(self.store.connect().execute(
+            "SELECT message_id FROM support_relay_map WHERE chat_id=? AND kind='user'", (USER,)).fetchone()[0])
+        expected = {(ADMIN, header), (USER, user_mid), (USER, delivered), (ADMIN, admin_mid)}
+        queued = {(int(r[0]), int(r[1])) for r in self.store.connect().execute(
+            "SELECT chat_id, message_id FROM scheduled_message_deletions WHERE delete_at > DATETIME('now','+9 days')")}
+        self.assertTrue(expected <= queued)
+        # restart: queue is in the DB
+        await self.app.shutdown()
+        await self.start_app()
+        self.shift(9 * 86400)
+        self.assertFalse(expected & await self.run_deletions())
+        self.assertIsNotNone(self.store.support_relay(ADMIN, header))  # 到期前仍可回复
+        self.shift(86400 + 60)
+        self.assertTrue(expected <= await self.run_deletions())
+        self.assertIsNone(self.store.support_relay(ADMIN, header))
+        self.assertIsNone(self.store.support_relay(USER, delivered))
+
+    async def test_disabled_when_zero(self):
+        self.store.support_relay_delete_seconds = 0
+        await self.user_contacts()
+        header = self.admin_header_id()
+        row = self.store.connect().execute(
+            "SELECT 1 FROM scheduled_message_deletions WHERE chat_id=? AND message_id=?", (ADMIN, header)).fetchone()
+        self.assertIsNone(row)
+
+
+for _name in [n for n in dir(SupportRelayTest) if n.startswith("test_")]:
+    setattr(SupportRelayExpiryTest, _name, None)

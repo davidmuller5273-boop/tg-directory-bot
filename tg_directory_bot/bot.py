@@ -3814,12 +3814,14 @@ async def process_scheduled_deletions(context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             await context.bot.delete_message(int(row["chat_id"]), int(row["message_id"]))
         except TelegramError as exc:
+            logging.debug("Scheduled deletion %s/%s failed: %s", row["chat_id"], row["message_id"], exc)
             if int(row["attempts"]) >= 2:
                 store.finish_message_deletion(int(row["id"]))
             else:
                 store.finish_message_deletion(int(row["id"]), str(exc))
         else:
             store.finish_message_deletion(int(row["id"]))
+            store.forget_support_relay(int(row["chat_id"]), int(row["message_id"]))
 
 
 async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13570,6 +13572,7 @@ def build_application(config: Config) -> Application:
     object.__setattr__(bot, "media_ad_sender", media_ad_sender)
     object.__setattr__(bot, "markup_decorator", markup_decorator)
     object.__setattr__(bot, "deletion_recorder", store.schedule_message_deletion)
+    store.support_relay_delete_seconds = max(0, int(getattr(config, "support_relay_delete_seconds", 0) or 0))
 
     application.add_handler(
         CallbackQueryHandler(refresh_callback_cleanup), group=-2
