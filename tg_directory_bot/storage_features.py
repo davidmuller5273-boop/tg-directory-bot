@@ -105,6 +105,20 @@ class FeatureStoreMixin:
         ensure(conn, "group_points_config", "self_boost_points", "REAL NOT NULL DEFAULT 0")
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS support_relay_map (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                peer_chat_id INTEGER NOT NULL,
+                peer_message_id INTEGER NOT NULL DEFAULT 0,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(chat_id, message_id)
+            );
+            """
+        )
+        conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS self_boost_rewards (
                 chat_id INTEGER NOT NULL,
                 boost_id TEXT NOT NULL,
@@ -623,3 +637,30 @@ class FeatureStoreMixin:
                 allow_negative=True,
             )
             return row, points, balance
+
+
+    # ---- 双向联系：消息映射（点回复即可回复） --------------------------------
+
+    def map_support_relay(self, chat_id: int, message_id: int, peer_chat_id: int,
+                          peer_message_id: int, user_id: int, kind: str) -> None:
+        """kind='admin': the message sits in an admin's chat and stands for the
+        user's message; kind='user': it sits in the user's chat and stands for
+        the admin's reply."""
+        if kind not in {"admin", "user"}:
+            raise ValueError("invalid relay kind")
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                """INSERT OR REPLACE INTO support_relay_map
+                   (chat_id, message_id, peer_chat_id, peer_message_id, user_id, kind)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (int(chat_id), int(message_id), int(peer_chat_id), int(peer_message_id or 0),
+                 int(user_id), kind),
+            )
+            conn.execute("DELETE FROM support_relay_map WHERE created_at<DATETIME('now','-180 days')")
+
+    def support_relay(self, chat_id: int, message_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                "SELECT * FROM support_relay_map WHERE chat_id=? AND message_id=?",
+                (int(chat_id), int(message_id)),
+            ).fetchone()

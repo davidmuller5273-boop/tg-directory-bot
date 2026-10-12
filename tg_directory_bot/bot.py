@@ -22,7 +22,7 @@ from telegram import (
     InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo,
     InlineQueryResultCachedVoice, InlineQueryResultCachedSticker,
     InputMediaPhoto, InputMediaVideo,
-    InputTextMessageContent, KeyboardButton, MessageEntity, ReplyKeyboardMarkup, Update,
+    InputTextMessageContent, KeyboardButton, MessageEntity, ReplyKeyboardMarkup, ReplyParameters, Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest as TelegramBadRequest, Forbidden, TelegramError
@@ -4382,45 +4382,154 @@ async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_support(update, context, text)
 
 
-async def save_support(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+SUPPORT_REPLIED_TEXT = "✅ 已回复"
+SUPPORT_CONFIRM_SECONDS = 10
+
+
+def support_message_summary(message) -> str:
+    """Text for logs/notification; media gets a short label."""
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    labels = (
+        ("photo", "图片"), ("video", "视频"), ("animation", "动图"), ("document", "文件"),
+        ("audio", "音频"), ("voice", "语音"), ("video_note", "视频消息"), ("sticker", "贴纸"),
+    )
+    kind = next((label for attr, label in labels if getattr(message, attr, None)), "")
+    if kind:
+        return f"[{kind}] {text}".strip()
+    return text
+
+
+def support_has_media(message) -> bool:
+    return getattr(message, "text", None) is None
+
+
+async def save_support(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
+                       reply_to_admin=None) -> None:
+    """User → admin. ``reply_to_admin`` is the relay-map row when the user used
+    Telegram's reply on an admin's message (continue that thread)."""
     store: DirectoryStore = context.application.bot_data["store"]
     if store.get_settings().get("support_enabled") != "1":
         await update.effective_message.reply_text("客服功能目前已关闭。")
         return
     user = update.effective_user
+    message = update.effective_message
     target_admin_id = int(context.user_data.get("support_target_id") or 0)
     support_button_id = int(context.user_data.get("support_button_id") or 0)
+    if reply_to_admin is not None:
+        target_admin_id = int(reply_to_admin["peer_chat_id"])
     store.add_support_message(
-        user.id, "incoming", text,
-        telegram_message_id=update.effective_message.message_id,
+        user.id, "incoming", text or support_message_summary(message),
+        telegram_message_id=message.message_id,
         target_admin_id=target_admin_id,
         support_button_id=support_button_id,
     )
     store.audit(f"tg:{user.id}", "support.incoming", str(user.id))
     context.user_data["support_mode"] = True
-    context.user_data["preserve_incoming_message_id"] = update.effective_message.message_id
+    context.user_data["preserve_incoming_message_id"] = message.message_id
     acknowledgement = store.get_settings().get(
         "support_ack_text", "消息已转给管理员，回复会直接发到这里。"
     )
     with persistent_message():
-        await update.effective_message.reply_text(
+        await message.reply_text(
             acknowledgement,
             reply_markup=main_keyboard_for(context, user.id if user else None),
         )
     recipients = [target_admin_id] if target_admin_id else all_super_admin_ids(context)
+    media = support_has_media(message)
+    body = support_message_summary(message) if media else (text or "")
     for admin_id in recipients:
+        quote = None
+        if reply_to_admin is not None and int(reply_to_admin["peer_chat_id"]) == admin_id:
+            quote = int(reply_to_admin["peer_message_id"] or 0) or None
         try:
             with persistent_message():
-                await context.bot.send_message(
+                header = await context.bot.send_message(
                     admin_id,
-                    f"新客服消息\n用户：<code>{user.id}</code>"
+                    ("用户回复" if quote else "新客服消息")
+                    + f"\n用户：<code>{user.id}</code>"
                     + (f" @{html.escape(user.username)}" if user.username else "")
-                    + f"\n\n{html.escape(text)}\n\n"
-                    + f"回复：<code>/reply {user.id} 内容</code>",
+                    + f"\n\n{html.escape(body)}\n\n"
+                    + "↩️ 直接回复本消息即可回复用户（支持文字、图片、视频、文件、贴纸、语音）"
+                    + f"\n或：<code>/reply {user.id} 内容</code>",
                     parse_mode=ParseMode.HTML,
+                    reply_parameters=(
+                        ReplyParameters(message_id=quote, allow_sending_without_reply=True)
+                        if quote else None
+                    ),
                 )
+            store.map_support_relay(admin_id, header.message_id, user.id, message.message_id, user.id, "admin")
+            if media:
+                with persistent_message():
+                    copied = await context.bot.copy_message(
+                        admin_id, message.chat_id, message.message_id,
+                        reply_parameters=ReplyParameters(
+                            message_id=header.message_id, allow_sending_without_reply=True,
+                        ),
+                    )
+                store.map_support_relay(admin_id, copied.message_id, user.id, message.message_id, user.id, "admin")
         except TelegramError:
             logging.exception("Failed to send support notification")
+
+
+async def deliver_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, relay) -> None:
+    """Admin used Telegram's reply on a relayed message → copy it to the user."""
+    message = update.effective_message
+    store: DirectoryStore = context.application.bot_data["store"]
+    user_id = int(relay["user_id"])
+    context.user_data["preserve_incoming_message_id"] = message.message_id
+    original = int(relay["peer_message_id"] or 0)
+    try:
+        with persistent_message():
+            sent = await context.bot.copy_message(
+                user_id, message.chat_id, message.message_id,
+                reply_parameters=(
+                    ReplyParameters(message_id=original, allow_sending_without_reply=True)
+                    if original else None
+                ),
+            )
+    except Forbidden:
+        await message.reply_text("❌ 发送失败：用户已屏蔽机器人或已删除对话。")
+        return
+    except TelegramError as exc:
+        reason = str(getattr(exc, "message", "") or exc)
+        if "chat not found" in reason.lower() or "deactivated" in reason.lower():
+            reason = "用户不存在或从未私聊过机器人"
+        await message.reply_text(f"❌ 发送失败：{reason}")
+        return
+    store.map_support_relay(user_id, sent.message_id, message.chat_id, message.message_id, user_id, "user")
+    admin = update.effective_user
+    store.add_support_message(
+        user_id, "outgoing", support_message_summary(message) or "[消息]",
+        admin_name=f"tg:{admin.id if admin else message.chat_id}",
+    )
+    store.audit(f"tg:{admin.id if admin else message.chat_id}", "support.reply", str(user_id))
+    confirm = await message.reply_text(SUPPORT_REPLIED_TEXT)
+    bot = context.bot
+    if isinstance(bot, AutoDeleteBot) and confirm is not None:
+        bot.schedule_delete_after(confirm.chat_id, confirm.message_id, SUPPORT_CONFIRM_SECONDS)
+
+
+async def support_relay_hook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Private chat: route Telegram replies on relayed messages. True when handled."""
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat or chat.type != ChatType.PRIVATE:
+        return False
+    store: DirectoryStore = context.application.bot_data["store"]
+    replied = getattr(message, "reply_to_message", None)
+    if replied is not None:
+        relay = store.support_relay(chat.id, replied.message_id)
+        if relay is not None:
+            if str(relay["kind"]) == "admin":
+                await deliver_support_reply(update, context, relay)
+            else:
+                text = (message.text or message.caption or "").strip()
+                await save_support(update, context, text, reply_to_admin=relay)
+            return True
+    if context.user_data.get("support_mode") and support_has_media(message):
+        await save_support(update, context, (message.caption or "").strip())
+        return True
+    return False
 
 
 async def plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4930,11 +5039,20 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     body = " ".join(context.args[1:]).strip()
     try:
         with persistent_message():
-            await context.bot.send_message(user_id, "管理员回复：\n\n" + body)
+            sent = await context.bot.send_message(user_id, "管理员回复：\n\n" + body)
+    except Forbidden:
+        await update.effective_message.reply_text("发送失败：用户已屏蔽机器人或已删除对话。")
+        return
     except TelegramError as exc:
         await update.effective_message.reply_text(f"发送失败：{exc}")
         return
     store: DirectoryStore = context.application.bot_data["store"]
+    if sent is not None and getattr(sent, "message_id", None):
+        # 用户可直接回复这条消息继续对话
+        store.map_support_relay(
+            user_id, sent.message_id, update.effective_chat.id,
+            update.effective_message.message_id, user_id, "user",
+        )
     store.add_support_message(user_id, "outgoing", body, admin_name=f"tg:{update.effective_user.id}")
     store.audit(f"tg:{update.effective_user.id}", "support.reply", str(user_id))
     await update.effective_message.reply_text("回复已发送。")
@@ -5732,6 +5850,8 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("consumed_private_message", None)
         return
     if await handle_pending_private_note(update, context):
+        return
+    if await support_relay_hook(update, context):
         return
     text = (message.text or message.caption or "").strip() if message else ""
     config: Config = context.application.bot_data["config"]
@@ -13253,6 +13373,14 @@ async def process_outbox(context: ContextTypes.DEFAULT_TYPE) -> None:
             if item["kind"] == "lottery":
                 with persistent_message():
                     await context.bot.send_message(int(item["user_id"]), prefix + str(item["body"]))
+            elif item["kind"] == "support":
+                # 后台回复：用户可直接回复这条消息，转给超级管理员
+                with persistent_message():
+                    sent = await context.bot.send_message(int(item["user_id"]), prefix + str(item["body"]))
+                if getattr(sent, "message_id", None):
+                    store.map_support_relay(
+                        int(item["user_id"]), sent.message_id, 0, 0, int(item["user_id"]), "user",
+                    )
             else:
                 await context.bot.send_message(int(item["user_id"]), prefix + str(item["body"]))
         except Forbidden as exc:
