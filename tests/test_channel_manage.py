@@ -340,6 +340,23 @@ class GroupsAndBulkTest(Base):
         self.assertEqual(len(copies), 1)
         self.assertEqual((int(copies[0]["from_chat_id"]), int(copies[0]["message_id"])), (-100999, 55))
         self.assertNotIn("reply_markup", copies[0])
+        self.assertNotIn("parse_mode", copies[0])
+        self.assertNotIn("caption", copies[0])
+        self.assertIn("机器人需要是源频道管理员", self.report())
+        # 源频道管理员 + 已设中转频道：仍优先 copy 源帖，不走中转
+        self.request.members[(-100999, BOT_ID)] = "administrator"
+        self.store.set_chm_staging_channel(SUPER, CH_B)
+        self.request.calls.clear()
+        await self.tap(f"chm:set:send:c{CH_A}")
+        await self.tap(self.button("复制"), message_id=self.panel_id())
+        await self.send(text="频道帖", forward_origin={
+            "type": "channel", "date": int(time.time()), "message_id": 56,
+            "chat": {"id": -100999, "type": "channel", "title": "源"}})
+        await self.wizard_save()
+        self.assertFalse([1 for a, p in self.request.calls if a == "forwardMessage"])
+        copies = [p for a, p in self.request.calls if a == "copyMessage"]
+        self.assertEqual([(int(p["chat_id"]), int(p["from_chat_id"]), int(p["message_id"])) for p in copies], [(CH_A, -100999, 56)])
+        self.assertNotIn("源频道", self.report())
         # 转发（显示来源），B 被移除
         self.request.no_rights.add(CH_B)
         await self.tap(f"chm:set:send:g{gid}")
@@ -463,7 +480,7 @@ class StagingRelayTest(Base):
         await self.tap(self.button("复制"), message_id=self.panel_id())
         await self.send(text="👍 hi")
         await self.wizard_save()
-        self.assertIn("未设置中转频道", self.report())
+        self.assertIn("会员表情和按钮图标会丢失", self.report())
         # 菜单 → ⚙️ 设置中转频道 → 点选
         await self.tap("chm:menu")
         await self.tap(self.button("⚙️ 设置中转频道"))
@@ -475,7 +492,12 @@ class StagingRelayTest(Base):
         await self.tap(self.button("复制"), message_id=self.panel_id())
         entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "99"}]
         await self.send(text="👍 会员表情", entities=entities)
-        await self.wizard_save()
+        with self.assertLogs(level="INFO") as logs:
+            await self.wizard_save()
+        joined = "\n".join(logs.output)
+        self.assertIn("chm-send source:", joined)
+        self.assertIn("chm-send call: forwardMessage", joined)
+        self.assertIn("chm-send call: copyMessage", joined)
         fwd = [p for a, p in self.request.calls if a == "forwardMessage"]
         self.assertEqual(len(fwd), 1)
         self.assertEqual((int(fwd[0]["chat_id"]), int(fwd[0]["from_chat_id"])), (STG, SUPER))

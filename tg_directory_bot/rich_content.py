@@ -194,6 +194,10 @@ def forward_channel_source(message) -> tuple[int, int] | None:
     message = getattr(message, "original_message", message)
     origin = getattr(message, "forward_origin", None)
     if origin is None:
+        legacy = getattr(message, "forward_from_chat", None)
+        legacy_id = getattr(message, "forward_from_message_id", None)
+        if legacy is not None and legacy_id and getattr(legacy, "type", "") == "channel":
+            return int(legacy.id), int(legacy_id)
         return None
     try:
         from telegram import MessageOriginChannel

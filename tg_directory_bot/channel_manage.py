@@ -42,7 +42,9 @@ settings_wizard.FLOWS.update({
     "chm_photo": ("修改频道头像", [Question("新头像", "请发送一张图片（作为照片发送）。", "media")]),
     "chm_send": ("发送内容到频道", [
         Question("发送方式", "复制：像机器人自己发的，保留按钮；转发：显示来源。", choices=("复制", "转发")),
-        Question("内容", "发送或转发要发出的消息（文字、图片、视频、文件等，带按钮的频道帖也可以）。", "content"),
+        Question("内容", "发送或转发要发出的消息（文字、图片、视频、文件等，带按钮的频道帖也可以）。\n"
+                 "💡 想完整保留会员表情和按钮图标，请先在自己频道发好，再把那条频道帖子转发给机器人"
+                 "（机器人需要是源频道管理员）。直接发给机器人的消息，发到频道时会员表情和按钮图标会丢失。", "content"),
     ]),
     "chm_groupadd": ("新建频道分组", [Question("分组名称", "例如：主频道、备用频道")]),
     "chm_grouprename": ("重命名频道分组", [Question("新名称")]),
@@ -402,6 +404,13 @@ async def handle_callback(update: Update, context) -> None:
         await query.answer("未知操作。")
 
 
+def _trace(method: str, **params) -> None:
+    """服务器日志：journalctl -u tg-directory-bot | grep chm-send"""
+    if "reply_markup" in params and params["reply_markup"] is not None:
+        params["reply_markup"] = params["reply_markup"].to_dict()
+    logging.info("chm-send call: %s %s", method, params)
+
+
 async def original_content_sender(bot, original, staging_chat_id: int = 0):
     """「复制」= 原样复制（不显示来源）。
 
@@ -433,7 +442,21 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
     row = _Row(text=text, file_id=file_id, file_type=file_type,
                file_name=file_name, entities_json=entities_json)
 
+    logging.info(
+        "chm-send source: chat_id=%s message_id=%s text=%r entities=%s has_buttons=%s forward_source=%s media=%s",
+        original.chat_id, original.message_id, text, entities_json, bool(markup), source, file_type or "-",
+    )
     staged = {"id": 0}
+    src_state = {"failed": False, "error": ""}
+    if source:
+        try:
+            member = await bot.get_chat_member(source[0], bot.id)
+            if member.status not in ADMIN_STATUSES:
+                src_state["error"] = "机器人不是源频道管理员"
+        except RetryAfter:
+            raise
+        except TelegramError as exc:
+            src_state["error"] = f"无法访问源频道：{exc}"
 
     async def stage():
         """把用户私聊消息转发到中转频道（转发能完整保留会员表情）。"""
@@ -443,6 +466,7 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
             return staged["id"]
         try:
             with persistent_message():
+                _trace("forwardMessage", chat_id=staging_chat_id, from_chat_id=original.chat_id, message_id=original.message_id)
                 msg = await bot.forward_message(staging_chat_id, original.chat_id, original.message_id)
             staged["id"] = int(msg.message_id)
         except RetryAfter:
@@ -460,6 +484,7 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
             staged_id = await stage()
             if staged_id:
                 try:
+                    _trace("copyMessage", chat_id=chat_id, from_chat_id=staging_chat_id, message_id=staged_id, **copy_kwargs)
                     return await bot.copy_message(chat_id, staging_chat_id, staged_id, **copy_kwargs)
                 except RetryAfter:
                     raise
@@ -467,12 +492,16 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
                     logging.info("chm: copy from staging failed: %s", exc)
             if source:
                 try:
+                    _trace("copyMessage", chat_id=chat_id, from_chat_id=source[0], message_id=source[1])
                     return await bot.copy_message(chat_id, source[0], source[1])
                 except RetryAfter:
                     raise
                 except TelegramError as exc:
                     logging.info("chm: copy from channel source failed: %s", exc)
+                    src_state["failed"] = True
+                    src_state["error"] = src_state["error"] or str(exc)
             try:
+                _trace("copyMessage", chat_id=chat_id, from_chat_id=original.chat_id, message_id=original.message_id, **copy_kwargs)
                 return await bot.copy_message(chat_id, original.chat_id, original.message_id, **copy_kwargs)
             except RetryAfter:
                 raise
@@ -480,6 +509,7 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
                 logging.info("chm: copy of private message failed, rebuilding: %s", exc)
                 if not (text or file_id):
                     raise
+            _trace("send_content(sendMessage/sendPhoto…)", chat_id=chat_id, text=text, entities=entities_json, file_type=file_type, reply_markup=markup)
             return await send_content(bot, chat_id, row, markup)
 
     async def cleanup():
@@ -491,6 +521,9 @@ async def original_content_sender(bot, original, staging_chat_id: int = 0):
 
     send.cleanup = cleanup
     send.staging_failed = lambda: staged["id"] < 0
+    send.source = source
+    send.source_failed = lambda: src_state["failed"]
+    send.source_error = lambda: src_state["error"]
     return send
 
 
@@ -593,6 +626,7 @@ async def commit(update: Update, context, mode: str) -> bool:
 
             async def forward_one(row):
                 with persistent_message():
+                    _trace("forwardMessage", chat_id=row["chat_id"], from_chat_id=original.chat_id, message_id=original.message_id)
                     return await bot.forward_message(int(row["chat_id"]), original.chat_id, original.message_id)
             ok, failed = await fan_out(channels, forward_one)
         else:
@@ -605,8 +639,16 @@ async def commit(update: Update, context, mode: str) -> bool:
                 ok, failed = await fan_out(channels, sender)
             finally:
                 await sender.cleanup()
-            if not staging:
-                note = "\n\n⚠️ 未设置中转频道：会员表情可能丢失。请在 📡 频道管理 → ⚙️ 设置中转频道 中设置。"
+            if sender.source:
+                if sender.source_failed():
+                    note = ("\n\n❌ 从源频道复制失败：机器人需要是源频道管理员。"
+                            f"（{sender.source_error()}）已退回普通复制，会员表情和按钮图标可能丢失。")
+                elif sender.source_error():
+                    note = f"\n\n⚠️ 机器人需要是源频道管理员（{sender.source_error()}）。"
+                else:
+                    note = ""
+            elif not staging:
+                note = "\n\n⚠️ 直接发给机器人的消息：发到频道时会员表情和按钮图标会丢失。想完整保留，请先在自己频道发好，再把那条频道帖子转发给机器人。\n（或在 📡 频道管理 → ⚙️ 设置中转频道。）"
             elif sender.staging_failed():
                 note = "\n\n⚠️ 转发到中转频道失败（检查机器人在中转频道的发消息权限），已直接复制，会员表情可能丢失。"
             else:
