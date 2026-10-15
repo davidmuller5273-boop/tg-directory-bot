@@ -362,6 +362,52 @@ async def handle_callback(update: Update, context) -> None:
         await query.answer("未知操作。")
 
 
+async def original_content_sender(bot, original):
+    """与快捷发布相同的「原内容」发送：
+
+    1. 转发自频道的帖子 → copy_message 频道原帖（文字、会员表情、媒体、按钮全部原样）；
+    2. 否则用捕获的 text/caption + entities（含 custom_emoji）+ 媒体 file_id 重建
+       （rich_content.send_content，与快捷发布一致），按钮保留 style/icon_custom_emoji_id；
+    3. 重建失败时退回 copy_message 用户发给机器人的那条消息。
+    """
+    from . import bot as botmod
+    from .rich_content import (
+        buttons_markup, capture_buttons_resolving, capture_content,
+        forward_channel_source, send_content,
+    )
+    markup = buttons_markup(await capture_buttons_resolving(bot, original, original.chat_id))
+    source = forward_channel_source(original)
+    text, entities_json = capture_content(original)
+    file_id, file_type, file_name = botmod.publishing_attachment(original)
+    row = {"text": text, "file_id": file_id, "file_type": file_type,
+           "file_name": file_name, "entities_json": entities_json}
+
+    class _Row(dict):
+        def keys(self):  # sqlite3.Row 兼容
+            return list(super().keys())
+
+    row = _Row(row)
+    copy_kwargs = {"reply_markup": markup} if markup else {}
+
+    async def send(channel_row):
+        chat_id = int(channel_row["chat_id"])
+        if source:
+            try:
+                return await bot.copy_message(chat_id, source[0], source[1], **copy_kwargs)
+            except TelegramError as exc:
+                if isinstance(exc, RetryAfter):
+                    raise
+                logging.info("chm: copy from channel source failed: %s", exc)
+        if text or file_id:
+            try:
+                return await send_content(bot, chat_id, row, markup)
+            except ValueError:
+                pass
+        return await bot.copy_message(chat_id, original.chat_id, original.message_id, **copy_kwargs)
+
+    return send
+
+
 # ---- wizard commit -----------------------------------------------------------
 
 async def _resolve_channel_input(context, message, text):
@@ -460,9 +506,7 @@ async def commit(update: Update, context, mode: str) -> bool:
             ok, failed = await fan_out(channels, lambda row: bot.forward_message(
                 int(row["chat_id"]), original.chat_id, original.message_id))
         else:
-            markup = buttons_markup(await capture_buttons_resolving(bot, original, original.chat_id))
-            ok, failed = await fan_out(channels, lambda row: bot.copy_message(
-                int(row["chat_id"]), original.chat_id, original.message_id, reply_markup=markup))
+            ok, failed = await fan_out(channels, await original_content_sender(bot, original))
         text = summary(label, "📤 " + ("转发" if forward else "复制") + "内容", ok, failed)
     else:
         raise ValueError("未知频道操作")
