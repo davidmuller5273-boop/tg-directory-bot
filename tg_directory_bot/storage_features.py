@@ -105,6 +105,30 @@ class FeatureStoreMixin:
         ensure(conn, "group_points_config", "self_boost_points", "REAL NOT NULL DEFAULT 0")
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS managed_channels (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                rights_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'active',
+                added_by INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS chm_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created_by INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS chm_group_channels (
+                group_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY(group_id, chat_id)
+            );
+            """
+        )
+        conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS support_relay_map (
                 chat_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
@@ -679,3 +703,91 @@ class FeatureStoreMixin:
                 "SELECT * FROM support_relay_map WHERE chat_id=? AND message_id=?",
                 (int(chat_id), int(message_id)),
             ).fetchone()
+
+    # ---- 📡 频道管理 -------------------------------------------------------
+    def upsert_managed_channel(self, chat_id: int, title: str = "", username: str = "",
+                               rights: dict | None = None, status: str = "active",
+                               added_by: int = 0) -> None:
+        import json as _json
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            row = conn.execute("SELECT * FROM managed_channels WHERE chat_id=?", (int(chat_id),)).fetchone()
+            if row is None:
+                conn.execute(
+                    """INSERT INTO managed_channels (chat_id, title, username, rights_json, status, added_by)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (int(chat_id), title or str(chat_id), username or "",
+                     _json.dumps(rights or {}, ensure_ascii=False), status, int(added_by or 0)),
+                )
+                return
+            conn.execute(
+                """UPDATE managed_channels SET title=?, username=?, rights_json=?, status=?,
+                   added_by=CASE WHEN added_by=0 THEN ? ELSE added_by END, updated_at=CURRENT_TIMESTAMP
+                   WHERE chat_id=?""",
+                (title or row["title"], username if username is not None else row["username"],
+                 _json.dumps(rights, ensure_ascii=False) if rights is not None else row["rights_json"],
+                 status, int(added_by or 0), int(chat_id)),
+            )
+
+    def managed_channels(self, active_only: bool = True) -> list[sqlite3.Row]:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            sql = "SELECT * FROM managed_channels"
+            if active_only:
+                sql += " WHERE status='active'"
+            return conn.execute(sql + " ORDER BY title COLLATE NOCASE, chat_id").fetchall()
+
+    def managed_channel(self, chat_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute("SELECT * FROM managed_channels WHERE chat_id=?", (int(chat_id),)).fetchone()
+
+    def set_managed_channel_title(self, chat_id: int, title: str) -> None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute("UPDATE managed_channels SET title=?, updated_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+                         (title, int(chat_id)))
+
+    def chm_groups(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                """SELECT g.*, (SELECT COUNT(*) FROM chm_group_channels c WHERE c.group_id=g.id) AS size
+                   FROM chm_groups g ORDER BY g.id"""
+            ).fetchall()
+
+    def chm_group(self, group_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute("SELECT * FROM chm_groups WHERE id=?", (int(group_id),)).fetchone()
+
+    def add_chm_group(self, name: str, created_by: int) -> int:
+        name = str(name or "").strip()[:40]
+        if not name:
+            raise ValueError("分组名称不能为空")
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            if int(conn.execute("SELECT COUNT(*) FROM chm_groups").fetchone()[0]) >= 50:
+                raise ValueError("最多 50 个分组")
+            return int(conn.execute("INSERT INTO chm_groups (name, created_by) VALUES (?, ?)",
+                                    (name, int(created_by))).lastrowid)
+
+    def rename_chm_group(self, group_id: int, name: str) -> bool:
+        name = str(name or "").strip()[:40]
+        if not name:
+            raise ValueError("分组名称不能为空")
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return conn.execute("UPDATE chm_groups SET name=? WHERE id=?", (name, int(group_id))).rowcount > 0
+
+    def delete_chm_group(self, group_id: int) -> bool:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            conn.execute("DELETE FROM chm_group_channels WHERE group_id=?", (int(group_id),))
+            return conn.execute("DELETE FROM chm_groups WHERE id=?", (int(group_id),)).rowcount > 0
+
+    def chm_group_channel_ids(self, group_id: int) -> list[int]:
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            return [int(r[0]) for r in conn.execute(
+                "SELECT chat_id FROM chm_group_channels WHERE group_id=? ORDER BY chat_id", (int(group_id),))]
+
+    def toggle_chm_group_channel(self, group_id: int, chat_id: int) -> bool:
+        """Return True if now in the group."""
+        with self.connect() as conn:  # type: ignore[attr-defined]
+            if conn.execute("DELETE FROM chm_group_channels WHERE group_id=? AND chat_id=?",
+                            (int(group_id), int(chat_id))).rowcount:
+                return False
+            conn.execute("INSERT INTO chm_group_channels (group_id, chat_id) VALUES (?, ?)",
+                         (int(group_id), int(chat_id)))
+            return True

@@ -67,6 +67,7 @@ from .storage import (
 )
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
 from . import quick_buttons
+from . import channel_manage
 from . import crypto_alert, crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
@@ -90,7 +91,7 @@ URL, TITLE, CATEGORY, DESCRIPTION = range(4)
 # run.py 用于母机器人和所有子机器人：成员变动、助推/取消助推都需要显式订阅。
 ALLOWED_UPDATES = [
     "message", "callback_query", "inline_query", "chat_member",
-    "chat_boost", "removed_chat_boost",
+    "chat_boost", "removed_chat_boost", "my_chat_member", "channel_post",
 ]
 
 GROUP_PERMISSIONS = {
@@ -194,7 +195,8 @@ HELP_TEXT = """📖 使用帮助
 • /life 或发送“人生指南”：📖 人生指南
 
 🛡 权限
-• 超级管理员：管理本机器人、管理员，审核收录
+• 超级管理员：管理本机器人、管理员，审核收录，可用全部管理功能（私人笔记除外）
+• 📡 频道管理（私聊）：频道分组，批量改名称/头像/简介，复制或转发内容到多个频道；机器人需是频道管理员
 • 群管理员默认无功能权限，由超级管理员分配
 
 🤖 克隆机器人
@@ -240,7 +242,17 @@ def is_developer_user(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -
 
 
 def has_developer_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
-    """Developer-only features: they exist only on the mother bot."""
+    """母机器人上的高级功能（克隆审核、子机器人管理、使用人员、监控统计、搜索统计…）。
+
+    开发者和超级管理员都能用；子机器人上一律隐藏。私人笔记另见 has_notes_access。"""
+    config: Config = context.application.bot_data["config"]
+    if config.is_clone:
+        return False
+    return is_developer_user(context, user_id) or has_super_admin_access(context, user_id)
+
+
+def has_notes_access(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    """📝 私人笔记：仅母机器人开发者。"""
     config: Config = context.application.bot_data["config"]
     if config.is_clone:
         return False
@@ -336,7 +348,7 @@ def all_developer_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
 
 def main_keyboard(
     is_admin: bool = False, is_super: bool = False, show_clone: bool = True,
-    is_developer: bool = False,
+    is_developer: bool = False, show_notes: bool | None = None,
 ) -> InlineKeyboardMarkup:
     """Main menu grouped by category; every older entry stays reachable inside."""
     rows = [
@@ -362,11 +374,15 @@ def main_keyboard(
     ]
     if is_admin:
         rows[-1].append(InlineKeyboardButton("🛡 管理员", callback_data="nav:admin"))
+    if show_notes is None:
+        show_notes = is_developer
+    if is_developer or is_super:
+        rows.append([InlineKeyboardButton("📡 频道管理", callback_data="chm:menu")])
     if is_developer:
-        rows.append([
-            InlineKeyboardButton("📝 私人笔记", callback_data="admin:notes"),
-            InlineKeyboardButton("🌳 子机器人", callback_data="cat:clone"),
-        ])
+        dev_row = [InlineKeyboardButton("🌳 子机器人", callback_data="cat:clone")]
+        if show_notes:
+            dev_row.insert(0, InlineKeyboardButton("📝 私人笔记", callback_data="admin:notes"))
+        rows.append(dev_row)
     rows.append([
         InlineKeyboardButton("👤 联系开发者", url="https://t.me/xinyuan188"),
         InlineKeyboardButton("📖 帮助教程", callback_data="menu:help"),
@@ -387,6 +403,7 @@ def main_keyboard_for(
     return main_keyboard(
         has_admin_access(context, user_id), has_super_admin_access(context, user_id),
         clone_available(context), has_developer_access(context, user_id),
+        has_notes_access(context, user_id),
     )
 
 
@@ -814,8 +831,10 @@ def group_permission_editor_view(
 
 
 def admin_menu_keyboard(
-    is_super: bool = False, is_developer: bool = False
+    is_super: bool = False, is_developer: bool = False, show_notes: bool | None = None,
 ) -> InlineKeyboardMarkup:
+    if show_notes is None:
+        show_notes = is_developer
     rows = [[InlineKeyboardButton("🚫 违规词管理", callback_data="admin:badwords")]]
     if is_super:
         rows.extend([
@@ -832,15 +851,18 @@ def admin_menu_keyboard(
         rows.insert(1, [InlineKeyboardButton("📥 待审核收录", callback_data="admin:pending")])
     if is_developer:
         # 以下为开发者功能，只在母机器人显示（子机器人 has_developer_access 恒为 False）
-        rows.insert(2, [InlineKeyboardButton("🗒 私人笔记", callback_data="admin:notes")])
-        rows.insert(3, [
+        offset = 0
+        if show_notes:
+            rows.insert(2, [InlineKeyboardButton("🗒 私人笔记", callback_data="admin:notes")])
+            offset = 1
+        rows.insert(2 + offset, [
             InlineKeyboardButton("🤖 克隆审核记录", callback_data="admin:clones"),
             InlineKeyboardButton("🌳 子机器人管理", callback_data="clonetree:0"),
         ])
-        rows.insert(4, [
+        rows.insert(3 + offset, [
             InlineKeyboardButton("👤 机器人使用人员", callback_data="admin:usage:0")
         ])
-        rows.insert(5, [
+        rows.insert(4 + offset, [
             InlineKeyboardButton("⏰ 波场监控统计", callback_data="admin:tronmonitors:0")
         ])
     rows.append([InlineKeyboardButton("⬅️ 返回主菜单", callback_data="nav:main")])
@@ -5660,7 +5682,7 @@ async def handle_pending_private_note(
         )
         return False
     user = update.effective_user
-    if not has_developer_access(context, user.id if user else None):
+    if not has_notes_access(context, user.id if user else None):
         context.user_data.pop("pending_private_note", None)
         return False
     text = str(message.text or "").strip() if getattr(message, "text", None) else ""
@@ -5828,7 +5850,7 @@ async def note_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.effective_chat or update.effective_chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text("私人笔记只能私聊机器人使用。")
         return
-    if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
+    if not has_notes_access(context, update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text(developer_only_text(context))
         return
     keyword = context.args[0] if context.args else ""
@@ -5840,7 +5862,7 @@ async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.effective_chat or update.effective_chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text("私人笔记只能私聊机器人使用。")
         return
-    if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
+    if not has_notes_access(context, update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text(developer_only_text(context))
         return
     await send_private_notes(update, context, context.args[0] if context.args else "")
@@ -5935,7 +5957,7 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     note_command = None if config.is_clone else parse_private_note_command(text)
     if note_command:
-        if not has_developer_access(context, update.effective_user.id if update.effective_user else None):
+        if not has_notes_access(context, update.effective_user.id if update.effective_user else None):
             await message.reply_text(developer_only_text(context))
             return
         action, keyword, body = note_command
@@ -5957,7 +5979,7 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     normalized_note_keyword = " ".join(text.split())
     if (
         normalized_note_keyword
-        and has_developer_access(context, update.effective_user.id)
+        and has_notes_access(context, update.effective_user.id)
         and store.private_notes(normalized_note_keyword, limit=1)
     ):
         await send_private_notes(update, context, normalized_note_keyword)
@@ -5983,13 +6005,18 @@ async def process_menu_input(
     message = update.effective_message
     user = update.effective_user
     store: DirectoryStore = context.application.bot_data["store"]
+    if mode.startswith("chm_"):
+        try:
+            return await channel_manage.commit(update, context, mode)
+        except TelegramError as exc:
+            raise ValueError(str(getattr(exc, "message", "") or exc)) from exc
     if not text:
         await menu_input_error(
             context, message, mode, "请输入文字内容，或发送 /cancel 取消。"
         )
         return True
     if mode == "private_note_query":
-        if not has_developer_access(context, user.id if user else None):
+        if not has_notes_access(context, user.id if user else None):
             context.user_data.pop("menu_mode", None)
             await message.reply_text(developer_only_text(context))
             return True
@@ -10923,6 +10950,8 @@ async def schedule_incoming_cleanup(
     message = update.effective_message
     chat = update.effective_chat
     bot = context.bot
+    if not chat or chat.type != ChatType.PRIVATE or context.user_data is None:
+        return  # 频道帖等没有用户上下文
     preserve_id = context.user_data.pop("preserve_incoming_message_id", None)
     if (
         message and chat and chat.type == ChatType.PRIVATE
@@ -11273,6 +11302,9 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         and not data.startswith("verify:")
     ):
         schedule_setting_cleanup(context, query.message)
+    if data.startswith("chm:"):
+        await channel_manage.handle_callback(update, context)
+        return
     user_id = query.from_user.id
     is_admin_user = has_admin_access(context, user_id)
     is_super_user = has_super_admin_access(context, user_id)
@@ -11311,7 +11343,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             settings.get("welcome_text", "欢迎使用。"),
             reply_markup=main_keyboard(
                 is_admin_user, is_super_user, clone_available(context),
-                has_developer_access(context, user_id),
+                has_developer_access(context, user_id), has_notes_access(context, user_id),
             ),
         )
         return
@@ -11757,7 +11789,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             "🛡 管理员功能\n\n请选择管理项目。",
             reply_markup=admin_menu_keyboard(
-                is_super_user, has_developer_access(context, user_id)
+                is_super_user, has_developer_access(context, user_id),
+                has_notes_access(context, user_id),
             ),
         )
         return
@@ -12014,7 +12047,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             HELP_TEXT, reply_markup=main_keyboard(
                 is_admin_user, is_super_user, clone_available(context),
-                has_developer_access(context, user_id),
+                has_developer_access(context, user_id), has_notes_access(context, user_id),
             )
         )
         return
@@ -13298,7 +13331,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
     if data.startswith("privnote:"):
-        if not has_developer_access(context, user_id):
+        if not has_notes_access(context, user_id):
             await query.answer(developer_only_text(context), show_alert=True)
             return
         parts = data.split(":", 1)
@@ -13326,7 +13359,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await send_private_note_media(context, query.message.chat_id, media_items)
         return
     if data == "admin:notes":
-        if not has_developer_access(context, user_id):
+        if not has_notes_access(context, user_id):
             await query.answer(developer_only_text(context), show_alert=True)
             return
         context.user_data["menu_mode"] = "private_note_query"
@@ -13337,7 +13370,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "查询：直接发送关键词（一次显示 10 条，可翻页）\n"
             "每次显示最近5条，最多保留99条，保存9个月。\n"
             "查询消息和结果连续3分钟没有点击按钮后撤回。",
-            reply_markup=admin_menu_keyboard(True, True),
+            reply_markup=admin_menu_keyboard(True, True, has_notes_access(context, user_id)),
         )
         return
     if data.startswith("admin:usage:"):
@@ -13395,7 +13428,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"{key}: {value}" for key, value in stats_data.items()
             ) + "\n\n" + storage_usage_text(context),
             reply_markup=admin_menu_keyboard(
-                True, has_developer_access(context, user_id)
+                True, has_developer_access(context, user_id),
+                has_notes_access(context, user_id),
             ),
         )
         return
@@ -13877,6 +13911,10 @@ def build_application(config: Config) -> Application:
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(InlineQueryHandler(quick_post_inline))
     application.add_handler(ChatMemberHandler(track_personal_invite, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(ChatMemberHandler(channel_manage.track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(
+        MessageHandler(filters.UpdateType.CHANNEL_POST, channel_manage.track_channel_post), group=3,
+    )
     application.add_handler(ChatBoostHandler(track_chat_boost, ChatBoostHandler.CHAT_BOOST))
     application.add_handler(ChatBoostHandler(track_removed_chat_boost, ChatBoostHandler.REMOVED_CHAT_BOOST))
     application.add_handler(

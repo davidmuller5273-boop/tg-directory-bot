@@ -261,7 +261,7 @@ class Draft:
     def view(self, error=""):
         title, questions = FLOWS[self.mode]
         lines = ["正在设置：" + (self.action_title or title)]
-        if self.group_id and self.mode != "price_alert":
+        if self.group_id and self.mode != "price_alert" and not self.mode.startswith("chm_"):
             lines.append(f"群组ID：{self.group_id}")
         lines.append(f"第 {min(self.step + 1, len(questions))}/{len(questions)} 步" if self.step < len(questions) else "确认设置（尚未保存）")
         for question, answer in zip(questions, self.answers):
