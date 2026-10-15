@@ -134,7 +134,7 @@ class QuickButtonWizardTest(gw.GroupWizardSaveTest):
         for label in ("⬅️ 加在它前面", "➡️ 加在它后面", "⬆️ 上方新一行", "⬇️ 下方新一行", "✏️ 修改", "🗑 删除"):
             self.assertIn(label, labels)
         await self.add(f"quickpost:set:at:before:{ids['客服']}", "频道 - https://c.com")
-        self.assert_saved_cleanly("快捷发布设置已保存。")
+        self.assert_saved_cleanly("✅ 按钮已添加")
         self.assertEqual(self.names(), [["官网", "频道", "客服"]])
         await self.add(f"quickpost:set:at:above:{ids['官网']}", "置顶 - https://top.com - 绿色")
         self.assertEqual(self.names(), [["置顶"], ["官网", "频道", "客服"]])
@@ -165,6 +165,72 @@ class QuickButtonWizardTest(gw.GroupWizardSaveTest):
         self.assertEqual(int(sent[0][0]["chat_id"]), gw.GROUP)
         self.assertEqual(sent[0][1][0][0]["url"], "https://top.com")
         self.assertEqual(sent[0][1][0][0].get("style"), "success")
+
+
+    async def qa_add(self, callback, label, url, color, bad_url=None):
+        await self.tap(callback)
+        await self.send(label)
+        texts_before = len(self.texts())
+        if bad_url:
+            await self.send(bad_url)
+            self.assertTrue(any("链接无效" in t for t in self.texts()[texts_before:]), self.texts())
+        await self.send(url)
+        data, mid = self.button(color)
+        self.request.calls.clear()
+        await self.tap(data, mid)  # 选颜色即保存
+
+    def continue_buttons(self):
+        for api, p, kb in reversed(self.keyboards()):
+            labels = {b["text"]: b.get("callback_data") for r in kb for b in r}
+            if "✅ 完成" in labels:
+                return p, labels
+        self.fail("no continue panel")
+
+    async def _qa_flow(self):
+        await self.tap("quickpost:menu")
+        await self.tap("quickpost:view:buttons")
+        await self.qa_add("quickpost:set:button", "官网", "https://a.com", "蓝色", bad_url="a.com")
+        self.assertEqual(self.names(), [["官网"]])
+        first = self.store.quick_post_buttons(self.post)[0]
+        self.assertEqual((first["url"], first["color"]), ("https://a.com", "primary"))
+        panel, labels = self.continue_buttons()
+        self.assertIn("✅ 按钮已添加", panel["text"])
+        self.assertIn("第1行：[#", panel["text"])
+        self.assertIn("➕ 同一行继续加", labels)
+        self.assertIn("⬇️ 新一行继续加", labels)
+        self.assertIn("官网", labels)  # 预览键盘
+        await self.qa_add(labels["➕ 同一行继续加"], "客服", "tg://resolve?domain=x", "默认")
+        self.assertEqual(self.names(), [["官网", "客服"]])
+        _, labels = self.continue_buttons()
+        await self.qa_add(labels["⬇️ 新一行继续加"], "频道", "http://c.com", "绿色")
+        self.assertEqual(self.names(), [["官网", "客服"], ["频道"]])
+        _, labels = self.continue_buttons()
+        # 新一行之后再同一行继续
+        await self.qa_add(labels["➕ 同一行继续加"], "群组", "https://d.com", "红色")
+        self.assertEqual(self.names(), [["官网", "客服"], ["频道", "群组"]])
+        _, labels = self.continue_buttons()
+        await self.tap(labels["✅ 完成"])
+        self.assertNotIn("menu_mode", self.user_data())
+        # 📍 指定位置也是同样的问答
+        ids = {b["text"]: int(b["id"]) for b in self.store.quick_post_buttons(self.post)}
+        await self.qa_add(f"quickpost:set:at:before:{ids['官网']}", "置顶", "https://top.com", "默认")
+        self.assertEqual(self.names(), [["置顶", "官网", "客服"], ["频道", "群组"]])
+
+    async def test_qa_in_group(self):
+        await self._qa_flow()
+
+    async def test_qa_in_private(self):
+        self.private = True
+        self.app.user_data[gw.ADMIN]["selected_group_id"] = gw.GROUP
+        await self._qa_flow()
+
+    async def test_three_bad_links_cancel_without_saving(self):
+        await self.tap("quickpost:set:button")
+        await self.send("官网")
+        for bad in ("ftp://x", "x", "www.x.com"):
+            await self.send(bad)
+        self.assertTrue(any("连续3次" in t for t in self.texts()))
+        self.assertEqual(self.names(), [])
 
 
 for _name in [n for n in dir(gw.GroupWizardSaveTest) if n.startswith("test_")]:

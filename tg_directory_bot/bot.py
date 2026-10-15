@@ -180,7 +180,7 @@ HELP_TEXT = """📖 使用帮助
 👥 群组管理
 • 主菜单按分类进入：🎁 抽奖、⭐ 积分、🎲 骰子、📢 广告、⚙️ 群设置
 • 在私聊选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接、快捷发布
-• 快捷发布按钮：按钮文字 - 链接，| 同行、换行新行；📍 指定位置可点选已有按钮加在它前后或上下
+• 快捷发布按钮：按步骤填 文字→链接→颜色，可同一行或新一行继续加；📍 指定位置可点选已有按钮加在它前后或上下
 • /link：生成个人邀请链接
 
 🧰 其他
@@ -6526,6 +6526,26 @@ async def import_quick_post_message_buttons(context, store: DirectoryStore, post
     return sum(len(r) for r in rows)
 
 
+def quick_post_continue_view(store: DirectoryStore, row, last_button_id: int):
+    """保存一个按钮后：显示最新键盘预览，并询问是否继续。"""
+    layout = store.quick_post_button_rows(int(row["id"]))
+    rows = [[
+        InlineKeyboardButton(str(b["text"]).strip()[:30] or f"#{b['id']}", callback_data=f"quickpost:pick:{b['id']}")
+        for b in line
+    ] for line in layout]
+    rows.append([
+        InlineKeyboardButton("➕ 同一行继续加", callback_data=f"quickpost:set:at:after:{last_button_id}"),
+        InlineKeyboardButton("⬇️ 新一行继续加", callback_data=f"quickpost:set:at:below:{last_button_id}"),
+    ])
+    rows.append([InlineKeyboardButton("✅ 完成", callback_data="quickpost:view:buttons")])
+    text = (
+        "✅ 按钮已添加。下面是当前按钮预览（点按钮可修改/删除/移动）：\n"
+        + "\n".join(quick_buttons.layout_text(layout))
+        + "\n\n继续添加还是完成？"
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
 def quick_post_picker_view(store: DirectoryStore, row, moving=None):
     """当前按钮键盘的可点选预览：点一个按钮作为参照。"""
     layout = store.quick_post_button_rows(int(row["id"]))
@@ -7493,6 +7513,7 @@ async def commit_group_menu_input(
                 current = store.quick_post(chat_id)
                 selected_id = int(current["id"])
             parts = settings_wizard.input_parts(message, text, 1)
+            last_button_id = 0
             if action == "add":
                 new_row = store.create_quick_post(chat_id, parts[0], user.id)
                 raw_text, entities_json = capture_content(message)
@@ -7529,7 +7550,8 @@ async def commit_group_menu_input(
                 anchor = context.user_data.pop("quickpost_anchor", None)
                 if action == "buttonat" and anchor:
                     where = ("anchor", int(anchor[0]), str(anchor[1]))
-                store.insert_quick_post_buttons(int(current["id"]), rows, where)
+                created = store.insert_quick_post_buttons(int(current["id"]), rows, where)
+                last_button_id = created[-1] if created else 0
             elif action == "buttonedit1":
                 parts = settings_wizard.input_parts(message, text)
                 anchor = context.user_data.pop("quickpost_anchor", None)
@@ -7582,6 +7604,8 @@ async def commit_group_menu_input(
                 store, row, str(context.application.bot_data.get("bot_username") or "")
             )
             markup = quick_post_menu_keyboard(store, row)
+            if action in {"button", "buttonat"} and last_button_id:
+                result, markup = quick_post_continue_view(store, row, last_button_id)
             store.audit(f"tg:{user.id}", f"quickpost.{action}", str(chat_id))
         elif mode == "invite_query":
             store: DirectoryStore = context.application.bot_data["store"]
@@ -11174,9 +11198,16 @@ async def commit_settings_draft(update, context, draft):
     if mode.startswith("admin_manage_"):
         answers[0] = answers[0].lstrip("#")
     if mode in {"quickpost_button", "quickpost_buttonat"}:
-        context.user_data["quickpost_button_rows"] = quick_buttons.parse_buttons(
-            answers[0], getattr(draft.messages[0], "entities", None),
-        )
+        if answers[1] == settings_wizard.QB_BULK_MARK:
+            rows = quick_buttons.parse_buttons(answers[0], getattr(draft.messages[0], "entities", None))
+        else:
+            label, custom = button_content(draft.messages[0])
+            colors = {"默认": "default", "蓝色": "primary", "绿色": "success", "红色": "danger"}
+            rows = [[{
+                "text": label, "url": answers[1].strip(),
+                "color": colors.get(answers[2], "default"), "custom_emoji_id": custom,
+            }]]
+        context.user_data["quickpost_button_rows"] = rows
     if mode in {"quickpost_buttonedit", "quickpost_buttonedit1"}:
         index = 1 if mode == "quickpost_buttonedit" else 0
         answers[index], custom = button_content(draft.messages[index])
@@ -12112,7 +12143,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "add": "请设置新快捷发布消息。",
             "text": "请发送帖子文字内容。",
             "media": "请发送图片、视频、动画、音频或文件。",
-            "button": "请发送按钮（按钮文字 - https://链接）。",
+            "button": "请按步骤添加按钮：按钮文字 → 链接 → 颜色。",
 
             "buttonedit": "请选择按钮并修改内容、链接、颜色和长短类型。",
             "buttondel": "请发送要删除的按钮编号。",
@@ -12161,7 +12192,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if parts[2] == "at":
                 context.user_data["quickpost_anchor"] = (int(parts[4]), parts[3])
                 context.user_data["menu_mode"] = "quickpost_buttonat"
-                prompt = f"{quick_buttons.SIDES.get(parts[3], '')}：#{parts[4]}\n请发送新按钮。"
+                prompt = f"{quick_buttons.SIDES.get(parts[3], '')}：#{parts[4]}\n请按步骤添加新按钮：按钮文字 → 链接 → 颜色。"
             else:
                 context.user_data["quickpost_anchor"] = (int(parts[3]), "edit")
                 context.user_data["menu_mode"] = "quickpost_buttonedit1"

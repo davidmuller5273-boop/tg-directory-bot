@@ -35,6 +35,10 @@ POSITION_HINT = (
 )
 
 
+def looks_bulk(text: str) -> bool:
+    return bool(re.search(r"[-—－]\s*(?:https?|tg)://", str(text or "")))
+
+
 def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 

@@ -41,6 +41,14 @@ class Question:
         if self.kind == "buttons":
             from .quick_buttons import parse_buttons
             parse_buttons(text, getattr(message, "entities", None))
+        if self.kind == "qbtext":
+            from .quick_buttons import looks_bulk, parse_buttons
+            if looks_bulk(text):
+                parse_buttons(text, getattr(message, "entities", None))
+            elif len(text) > 64:
+                raise ValueError("按钮文字最多64个字。")
+        if self.kind == "qburl" and not text.lower().startswith(("https://", "http://", "tg://")):
+            raise ValueError("链接无效，请发送以 https:// 、http:// 或 tg:// 开头的完整链接。")
         if self.kind == "id" and not text.lstrip("#").isdigit():
             raise ValueError("请填写数字编号，可带 #。")
         if self.kind == "time" and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
@@ -79,6 +87,16 @@ WINNERS = number("中奖人数", "1", "1000", True)
 MINUTES = number("多久后开奖（分钟）", "1", "10080", True)
 
 # Only settings belong here. Searches and member ledgers must not be captured.
+AUTO_SAVE_MODES = {"quickpost_button", "quickpost_buttonat"}
+QB_BULK_MARK = "（批量）"
+QB_STEPS = [
+    Question("按钮文字", (
+        "例如：官网。文字最前面的会员表情会作为按钮图标。\n"
+        "快捷方式：直接发送 文字 - https://链接（| 同一行，换行新一行）可一次添加多个。"
+    ), "qbtext"),
+    Question("按钮链接", "请发送以 https:// 、http:// 或 tg:// 开头的完整链接。", "qburl"),
+    Question("按钮颜色", "选好颜色后立即保存。", choices=("默认", "蓝色", "绿色", "红色")),
+]
 QB_BUTTONS = Question("按钮", (
     "格式：按钮文字 - https://链接\n"
     "同一行多个按钮用 | 分隔，换行表示新的一行，例如：\n"
@@ -121,8 +139,8 @@ FLOWS = {
     "quickpost_text": ("快捷发布文字", [Question("帖子文字", "直接发送或转发文字，原格式和表情会保留。", "content")]),
     "quickpost_media": ("快捷发布媒体", [Question("帖子媒体", "发送或转发媒体；有说明时一起保存原说明与表情。", "media")]),
     "quickpost_add": ("添加快捷发布消息", [Question("消息名称", "例如：消息2"), CONTENT]),
-    "quickpost_button": ("添加快捷发布按钮", [QB_BUTTONS]),
-    "quickpost_buttonat": ("指定位置添加按钮", [QB_BUTTONS]),
+    "quickpost_button": ("添加快捷发布按钮", QB_STEPS),
+    "quickpost_buttonat": ("指定位置添加按钮", QB_STEPS),
     "quickpost_buttonedit1": ("修改快捷发布按钮", [
         Question("输入内容", "给什么文字和表情，按钮就显示什么。"),
         Question("按钮链接", "请发送完整的 https:// 链接。", "url"),
@@ -439,6 +457,13 @@ async def receive(update, context):
         draft.failures = 0
         draft.answers[draft.step] = value
         draft.messages[draft.step] = message
+        if question.kind == "qbtext":
+            from .quick_buttons import looks_bulk
+            if looks_bulk(value):
+                # 快捷方式：一次粘贴多个按钮，跳过链接和颜色，直接确认
+                draft.answers[1:] = [QB_BULK_MARK, "默认"]
+                draft.messages[1:] = [message, message]
+                draft.step = len(questions) - 1
         if question.kind == "secret":
             try:
                 await message.delete()
@@ -502,7 +527,12 @@ async def callback(update, context, commit):
             draft.answers[draft.step] = choice
             draft.messages[draft.step] = query.message
             draft.step += 1
-        elif action == "save":
+            if draft.mode in AUTO_SAVE_MODES and draft.step == len(questions):
+                action = "save"  # 选完最后一项直接保存
+        elif action != "save":
+            await query.answer("操作无效。")
+            return True
+        if action == "save":
             if draft.step != len(questions) or any(value is None for value in draft.answers):
                 await query.answer("请完成所有步骤。", show_alert=True)
                 return True
@@ -526,9 +556,6 @@ async def callback(update, context, commit):
                 await render(context, draft, "未保存，请根据错误提示返回修改。")
             elif not draft.action_data:
                 await query.edit_message_text("设置已完成。", reply_markup=None)
-            return True
-        else:
-            await query.answer("操作无效。")
             return True
         await query.answer()
         await render(context, draft)
