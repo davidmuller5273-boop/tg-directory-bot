@@ -125,10 +125,6 @@ class FeatureStoreMixin:
                 chat_id INTEGER NOT NULL,
                 PRIMARY KEY(group_id, chat_id)
             );
-            CREATE TABLE IF NOT EXISTS chm_user_settings (
-                user_id INTEGER PRIMARY KEY,
-                staging_chat_id INTEGER NOT NULL DEFAULT 0
-            );
             """
         )
         conn.executescript(
@@ -788,19 +784,6 @@ class FeatureStoreMixin:
         with self.connect() as conn:  # type: ignore[attr-defined]
             conn.execute("DELETE FROM chm_group_channels WHERE group_id=?", (int(group_id),))
             return conn.execute("DELETE FROM chm_groups WHERE id=?", (int(group_id),)).rowcount > 0
-
-    def chm_staging_channel(self, user_id: int) -> int:
-        with self.connect() as conn:  # type: ignore[attr-defined]
-            row = conn.execute("SELECT staging_chat_id FROM chm_user_settings WHERE user_id=?",
-                               (int(user_id),)).fetchone()
-        return int(row[0]) if row else 0
-
-    def set_chm_staging_channel(self, user_id: int, chat_id: int) -> None:
-        with self.connect() as conn:  # type: ignore[attr-defined]
-            conn.execute(
-                """INSERT INTO chm_user_settings (user_id, staging_chat_id) VALUES (?, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET staging_chat_id=excluded.staging_chat_id""",
-                (int(user_id), int(chat_id)))
 
     def chm_group_channel_ids(self, group_id: int) -> list[int]:
         with self.connect() as conn:  # type: ignore[attr-defined]
