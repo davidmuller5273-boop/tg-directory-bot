@@ -66,6 +66,7 @@ from .storage import (
     normalize_points,
 )
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
+from . import quick_buttons
 from . import crypto_alert, crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
@@ -179,6 +180,7 @@ HELP_TEXT = """📖 使用帮助
 👥 群组管理
 • 主菜单按分类进入：🎁 抽奖、⭐ 积分、🎲 骰子、📢 广告、⚙️ 群设置
 • 在私聊选择群组后设置统计、抽奖、广告、积分、欢迎验证、邀请链接、快捷发布
+• 快捷发布按钮：按钮文字 - 链接，| 同行、换行新行；📍 指定位置可点选已有按钮加在它前后或上下
 • /link：生成个人邀请链接
 
 🧰 其他
@@ -6391,34 +6393,25 @@ def quick_post_markup(store: DirectoryStore | None, row) -> InlineKeyboardMarkup
         ]])
     if not buttons:
         return None
-    rows, short_row = [], []
-    for button in buttons:
-        kwargs = {}
-        color = str(button["color"] or "default")
-        api_kwargs = {}
-        if color != "default":
-            api_kwargs["style"] = color
-        custom_emoji_id = str(button["custom_emoji_id"] or "")
-        if custom_emoji_id:
-            api_kwargs["icon_custom_emoji_id"] = custom_emoji_id
-        if api_kwargs:
-            # PTB forwards current Bot API button fields through api_kwargs.
-            kwargs["api_kwargs"] = api_kwargs
-        rendered = InlineKeyboardButton(
-            str(button["text"]), url=str(button["url"]), **kwargs,
-        )
-        if str(button["width"] or "long") == "short":
-            short_row.append(rendered)
-            if len(short_row) == 2:
-                rows.append(short_row)
-                short_row = []
-            continue
-        if short_row:
-            rows.append(short_row)
-            short_row = []
-        rows.append([rendered])
-    if short_row:
-        rows.append(short_row)
+    rows = []
+    for line in quick_buttons.layout_rows(buttons):
+        rendered_row = []
+        for button in line:
+            kwargs = {}
+            api_kwargs = {}
+            color = str(button["color"] or "default")
+            if color != "default":
+                api_kwargs["style"] = color
+            custom_emoji_id = str(button["custom_emoji_id"] or "")
+            if custom_emoji_id:
+                api_kwargs["icon_custom_emoji_id"] = custom_emoji_id
+            if api_kwargs:
+                # PTB forwards current Bot API button fields through api_kwargs.
+                kwargs["api_kwargs"] = api_kwargs
+            rendered_row.append(InlineKeyboardButton(
+                str(button["text"]), url=str(button["url"]), **kwargs,
+            ))
+        rows.append(rendered_row)
     return InlineKeyboardMarkup(rows)
 
 
@@ -6429,11 +6422,7 @@ def quick_post_menu_text(
     posts = store.quick_posts(int(row["chat_id"]))
     buttons = store.quick_post_buttons(int(row["id"]))
     schedules = store.pending_quick_post_schedules(int(row["chat_id"]))
-    button_lines = [
-        f"  #{button['id']} {button['text']}（{QUICK_BUTTON_COLORS.get(str(button['color']), '默认')}，"
-        f"{'短按钮' if str(button['width']) == 'short' else '长按钮'}）"
-        for button in buttons
-    ] or ["  暂无"]
+    button_lines = quick_buttons.layout_text(quick_buttons.layout_rows(buttons))
     schedule_lines = [
         f"  #{item['id']} {item['name']} · {format_beijing_time(item['run_at'])}"
         for item in schedules[:10]
@@ -6446,7 +6435,7 @@ def quick_post_menu_text(
         f"├链接按钮: {len(buttons)} 个\n"
         f"├文本内容: {'✅' if row['text'] else '❌'}\n"
         f"└内联分享: {inline_name}\n\n"
-        "按钮：\n" + "\n".join(button_lines) + "\n\n"
+        "按钮布局：\n" + "\n".join(button_lines) + "\n\n"
         "待发布：\n" + "\n".join(schedule_lines)
     )
 
@@ -6475,8 +6464,11 @@ def quick_post_menu_keyboard(
     elif section == "buttons":
         rows.extend([[
             InlineKeyboardButton("➕ 添加按钮", callback_data="quickpost:set:button"),
+            InlineKeyboardButton("📍 指定位置", callback_data="quickpost:picker"),
+        ], [
             InlineKeyboardButton("✏️ 修改按钮", callback_data="quickpost:set:buttonedit"),
-        ], [InlineKeyboardButton("➖ 删除按钮", callback_data="quickpost:set:buttondel")]])
+            InlineKeyboardButton("➖ 删除按钮", callback_data="quickpost:set:buttondel"),
+        ], [InlineKeyboardButton("👁 预览", callback_data="quickpost:preview")]])
     elif section == "publish":
         rows.extend([[
             InlineKeyboardButton("📤 立即发布", callback_data="quickpost:publish"),
@@ -6495,6 +6487,92 @@ def quick_post_menu_keyboard(
     else:
         rows.append([InlineKeyboardButton("⬅️ 返回群组管理", callback_data="nav:group")])
     return InlineKeyboardMarkup(rows)
+
+
+async def import_quick_post_message_buttons(context, store: DirectoryStore, post_id: int, message) -> int:
+    """Copy URL buttons of the captured content into the post (skip ones already present)."""
+    try:
+        scratch_chat_id = int(getattr(message, "chat_id", 0) or getattr(getattr(message, "chat", None), "id", 0) or 0)
+        raw = await capture_buttons_resolving(context.bot, message, scratch_chat_id)
+        data = json.loads(raw or "[]")
+    except Exception:  # noqa: BLE001 - 按钮读取失败不影响内容保存
+        logging.debug("quick post button import failed", exc_info=True)
+        return 0
+    existing = {(str(b["text"]), str(b["url"])) for b in store.quick_post_buttons(post_id)}
+    rows = []
+    for line in data if isinstance(data, list) else []:
+        new_row = []
+        for item in line if isinstance(line, list) else []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            key = (str(item.get("text") or "").strip() or " ", str(item["url"]))
+            if key in existing:
+                continue
+            existing.add(key)
+            style = str(item.get("style") or "default")
+            new_row.append({
+                "text": key[0], "url": key[1],
+                "color": style if style in QUICK_BUTTON_COLORS else "default",
+                "custom_emoji_id": str(item.get("icon_custom_emoji_id") or ""),
+            })
+        if new_row:
+            rows.append(new_row[:quick_buttons.MAX_PER_ROW])
+    if not rows:
+        return 0
+    try:
+        store.insert_quick_post_buttons(post_id, rows, ("bottom",))
+    except ValueError:
+        return 0
+    return sum(len(r) for r in rows)
+
+
+def quick_post_picker_view(store: DirectoryStore, row, moving=None):
+    """当前按钮键盘的可点选预览：点一个按钮作为参照。"""
+    layout = store.quick_post_button_rows(int(row["id"]))
+    rows = [[
+        InlineKeyboardButton(
+            ("📦 " if moving and int(b["id"]) == int(moving) else "") + str(b["text"]).strip()[:30] or f"#{b['id']}",
+            callback_data=f"quickpost:pick:{b['id']}",
+        ) for b in line
+    ] for line in layout]
+    if not rows:
+        rows.append([InlineKeyboardButton("➕ 添加按钮", callback_data="quickpost:set:button")])
+    rows.append([InlineKeyboardButton("⬅️ 返回按钮管理", callback_data="quickpost:view:buttons")])
+    title = (
+        f"↕️ 正在移动按钮 #{moving}：请点选目标按钮" if moving
+        else "📍 指定位置：点选一个按钮，再选择加在它前面/后面/上方/下方，也可修改或删除它"
+    )
+    return f"{title}\n下面就是当前按钮键盘的预览。", InlineKeyboardMarkup(rows)
+
+
+def quick_post_anchor_view(button, moving=None):
+    bid = int(button["id"])
+    name = f"#{bid} {button['text']}"
+    if moving:
+        prefix = "quickpost:mv"
+        rows = [[
+            InlineKeyboardButton("⬅️ 移到它前面", callback_data=f"{prefix}:before:{bid}"),
+            InlineKeyboardButton("➡️ 移到它后面", callback_data=f"{prefix}:after:{bid}"),
+        ], [
+            InlineKeyboardButton("⬆️ 移到上方新一行", callback_data=f"{prefix}:above:{bid}"),
+            InlineKeyboardButton("⬇️ 移到下方新一行", callback_data=f"{prefix}:below:{bid}"),
+        ]]
+        text = f"把按钮 #{moving} 移到 {name} 的："
+    else:
+        rows = [[
+            InlineKeyboardButton(quick_buttons.SIDES["before"], callback_data=f"quickpost:set:at:before:{bid}"),
+            InlineKeyboardButton(quick_buttons.SIDES["after"], callback_data=f"quickpost:set:at:after:{bid}"),
+        ], [
+            InlineKeyboardButton(quick_buttons.SIDES["above"], callback_data=f"quickpost:set:at:above:{bid}"),
+            InlineKeyboardButton(quick_buttons.SIDES["below"], callback_data=f"quickpost:set:at:below:{bid}"),
+        ], [
+            InlineKeyboardButton("✏️ 修改", callback_data=f"quickpost:set:bedit:{bid}"),
+            InlineKeyboardButton("🗑 删除", callback_data=f"quickpost:bdel:{bid}"),
+            InlineKeyboardButton("↕️ 移动", callback_data=f"quickpost:bmove:{bid}"),
+        ]]
+        text = f"已选择按钮 {name}\n{button['url']}\n\n新按钮放在哪里？"
+    rows.append([InlineKeyboardButton("⬅️ 重新选择", callback_data="quickpost:picker")])
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def send_quick_post(
@@ -7442,15 +7520,28 @@ async def commit_group_menu_input(
                     chat_id, user.id, int(current["id"]), file_id=file_id, file_type=file_type,
                     file_name=file_name, text=raw_text, entities_json=entities_json,
                 )
-            elif action == "button":
+            elif action in {"button", "buttonat"}:
                 parts = settings_wizard.input_parts(message, text)
+                rows = context.user_data.pop("quickpost_button_rows", None)
+                if not rows:
+                    rows = quick_buttons.parse_buttons(parts[0])
+                where = ("bottom",)
+                anchor = context.user_data.pop("quickpost_anchor", None)
+                if action == "buttonat" and anchor:
+                    where = ("anchor", int(anchor[0]), str(anchor[1]))
+                store.insert_quick_post_buttons(int(current["id"]), rows, where)
+            elif action == "buttonedit1":
+                parts = settings_wizard.input_parts(message, text)
+                anchor = context.user_data.pop("quickpost_anchor", None)
+                button_id = int(anchor[0]) if anchor else 0
+                old = next((b for b in store.quick_post_buttons(int(current["id"])) if int(b["id"]) == button_id), None)
                 colors = {"默认": "default", "蓝色": "primary", "绿色": "success", "红色": "danger"}
-                widths = {"长按钮": "long", "短按钮": "short"}
-                store.add_quick_post_button(
-                    int(current["id"]), parts[0], parts[1],
-                    colors.get(parts[2], "default"), widths.get(parts[3], "long"),
+                if old is None or not store.update_quick_post_button(
+                    int(current["id"]), button_id, parts[0], parts[1],
+                    colors.get(parts[2], "default"), str(old["width"] or "long"),
                     str(context.user_data.pop("quickpost_button_emoji_id", "")),
-                )
+                ):
+                    raise ValueError("这个按钮已不存在")
             elif action == "buttondel":
                 button_id = int(parts[0].lstrip("#"))
                 if not store.delete_quick_post_button(int(current["id"]), button_id):
@@ -7475,8 +7566,19 @@ async def commit_group_menu_input(
                     raise ValueError("没有找到这个待发布任务编号")
             else:
                 raise ValueError("未知快捷发布设置")
+            if action in {"add", "text", "media"}:
+                # 内容自带的链接按钮（如转发的频道帖）一并保留
+                imported = await import_quick_post_message_buttons(
+                    context, store, selected_id or int(current["id"]), message,
+                )
+                if imported:
+                    result_note = f"\n已保留原消息的 {imported} 个链接按钮。"
+                else:
+                    result_note = ""
+            else:
+                result_note = ""
             row = store.quick_post(chat_id, selected_id or int(current["id"]))
-            result = "快捷发布设置已保存。\n\n" + quick_post_menu_text(
+            result = "快捷发布设置已保存。" + result_note + "\n\n" + quick_post_menu_text(
                 store, row, str(context.application.bot_data.get("bot_username") or "")
             )
             markup = quick_post_menu_keyboard(store, row)
@@ -11071,9 +11173,13 @@ async def commit_settings_draft(update, context, draft):
         answers[1] = ",".join(aliases.get(item.strip(), item.strip()) for item in answers[1].replace("，", ",").replace("、", ",").split(","))
     if mode.startswith("admin_manage_"):
         answers[0] = answers[0].lstrip("#")
-    if mode in {"quickpost_button", "quickpost_buttonedit"}:
-        label_index = 0 if mode == "quickpost_button" else 1
-        answers[label_index], custom = button_content(draft.messages[label_index])
+    if mode in {"quickpost_button", "quickpost_buttonat"}:
+        context.user_data["quickpost_button_rows"] = quick_buttons.parse_buttons(
+            answers[0], getattr(draft.messages[0], "entities", None),
+        )
+    if mode in {"quickpost_buttonedit", "quickpost_buttonedit1"}:
+        index = 1 if mode == "quickpost_buttonedit" else 0
+        answers[index], custom = button_content(draft.messages[index])
         context.user_data["quickpost_button_emoji_id"] = custom
     context.user_data["menu_mode"] = mode
     message = settings_wizard.MessageInput(draft.messages[-1], " | ".join(answers), answers)
@@ -11995,7 +12101,7 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             reply_markup=quick_post_menu_keyboard(store, row, "messages"),
         )
         return
-    if data.startswith("quickpost:set:"):
+    if data.startswith("quickpost:set:") and not data.startswith(("quickpost:set:at:", "quickpost:set:bedit:")):
         if target_group_id is None or not await is_chat_admin(
             context, target_group_id, user_id
         ):
@@ -12006,7 +12112,8 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "add": "请设置新快捷发布消息。",
             "text": "请发送帖子文字内容。",
             "media": "请发送图片、视频、动画、音频或文件。",
-            "button": "请设置按钮文字、链接和颜色。",
+            "button": "请发送按钮（按钮文字 - https://链接）。",
+
             "buttonedit": "请选择按钮并修改内容、链接、颜色和长短类型。",
             "buttondel": "请发送要删除的按钮编号。",
             "schedule": "请选择消息并设置发布时间。",
@@ -12018,6 +12125,95 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["menu_mode"] = f"quickpost_{action}"
         await query.answer()
         await query.edit_message_text(prompts[action] + "\n\n发送 /cancel 取消。")
+        return
+    if data == "quickpost:picker" or data.startswith((
+        "quickpost:pick:", "quickpost:bdel:", "quickpost:bmove:", "quickpost:mv:",
+        "quickpost:set:at:", "quickpost:set:bedit:",
+    )):
+        if target_group_id is None or not await is_chat_admin(context, target_group_id, user_id):
+            await query.answer("只有群管理员可以设置。", show_alert=True)
+            return
+        selected_id = int(context.user_data.get(f"quickpost_selected:{target_group_id}") or 0)
+        row = store.quick_post(target_group_id, selected_id or None)
+        post_id = int(row["id"])
+        by_id = {int(b["id"]): b for b in store.quick_post_buttons(post_id)}
+        parts = data.split(":")
+        if data == "quickpost:picker":
+            context.user_data.pop("quickpost_moving", None)
+            if not by_id:
+                # 还没有按钮：直接添加
+                context.user_data["menu_mode"] = "quickpost_button"
+                await query.answer()
+                await query.edit_message_text("还没有按钮，直接添加。\n\n发送 /cancel 取消。")
+                return
+        elif parts[1] == "pick":
+            target = int(parts[2])
+            if target not in by_id:
+                await query.answer("这个按钮已不存在。", show_alert=True)
+            else:
+                moving = context.user_data.get("quickpost_moving")
+                await query.answer()
+                text, markup = quick_post_anchor_view(by_id[target], moving if moving in by_id else None)
+                await query.edit_message_text(text, reply_markup=markup)
+                return
+        elif parts[1] == "set":
+            # quickpost:set:at:<side>:<id>  /  quickpost:set:bedit:<id>
+            if parts[2] == "at":
+                context.user_data["quickpost_anchor"] = (int(parts[4]), parts[3])
+                context.user_data["menu_mode"] = "quickpost_buttonat"
+                prompt = f"{quick_buttons.SIDES.get(parts[3], '')}：#{parts[4]}\n请发送新按钮。"
+            else:
+                context.user_data["quickpost_anchor"] = (int(parts[3]), "edit")
+                context.user_data["menu_mode"] = "quickpost_buttonedit1"
+                prompt = f"修改按钮 #{parts[3]}。"
+            await query.answer()
+            await query.edit_message_text(prompt + "\n\n发送 /cancel 取消。")
+            return
+        elif parts[1] == "bdel":
+            if store.delete_quick_post_button(post_id, int(parts[2])):
+                store.audit(f"tg:{user_id}", "quickpost.buttondel", str(target_group_id))
+                await query.answer("已删除。")
+            else:
+                await query.answer("这个按钮已不存在。", show_alert=True)
+        elif parts[1] == "bmove":
+            context.user_data["quickpost_moving"] = int(parts[2])
+            await query.answer("请点选目标按钮。")
+        elif parts[1] == "mv":
+            moving = int(context.user_data.pop("quickpost_moving", 0) or 0)
+            try:
+                if not store.move_quick_post_button(post_id, moving, ("anchor", int(parts[3]), parts[2])):
+                    raise ValueError("要移动的按钮已不存在")
+            except ValueError as exc:
+                await query.answer(str(exc), show_alert=True)
+            else:
+                store.audit(f"tg:{user_id}", "quickpost.buttonmove", str(target_group_id))
+                await query.answer("已移动。")
+        text, markup = quick_post_picker_view(store, row, context.user_data.get("quickpost_moving"))
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+    if data == "quickpost:preview":
+        if target_group_id is None or not await is_chat_admin(context, target_group_id, user_id):
+            await query.answer("只有群管理员可以预览。", show_alert=True)
+            return
+        selected_id = int(context.user_data.get(f"quickpost_selected:{target_group_id}") or 0)
+        row = store.quick_post(target_group_id, selected_id or None)
+        layout = quick_buttons.layout_text(store.quick_post_button_rows(int(row["id"])))
+        try:
+            if row["text"] or row["file_id"]:
+                await send_quick_post(context.bot, query.message.chat_id, row, store)
+            else:
+                await context.bot.send_message(
+                    query.message.chat_id, "👁 按钮预览（尚未设置内容）",
+                    reply_markup=quick_post_markup(store, row),
+                )
+        except (ValueError, TelegramError) as exc:
+            await query.answer(str(exc)[:180], show_alert=True)
+            return
+        await query.answer("预览已发送，仅你可见，尚未发布。")
+        await context.bot.send_message(
+            query.message.chat_id, "👁 预览（未发布）\n按钮布局：\n" + "\n".join(layout),
+            reply_markup=quick_post_menu_keyboard(store, row, "buttons"),
+        )
         return
     if data == "quickpost:publish":
         if target_group_id is None or not await is_chat_admin(

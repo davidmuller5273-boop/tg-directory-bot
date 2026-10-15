@@ -38,6 +38,9 @@ class Question:
             raise ValueError("请选择：" + "、".join(self.choices))
         if self.kind == "url" and not text.lower().startswith(("https://", "http://")):
             raise ValueError("请发送以 https:// 或 http:// 开头的完整链接。")
+        if self.kind == "buttons":
+            from .quick_buttons import parse_buttons
+            parse_buttons(text, getattr(message, "entities", None))
         if self.kind == "id" and not text.lstrip("#").isdigit():
             raise ValueError("请填写数字编号，可带 #。")
         if self.kind == "time" and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
@@ -76,6 +79,13 @@ WINNERS = number("中奖人数", "1", "1000", True)
 MINUTES = number("多久后开奖（分钟）", "1", "10080", True)
 
 # Only settings belong here. Searches and member ledgers must not be captured.
+QB_BUTTONS = Question("按钮", (
+    "格式：按钮文字 - https://链接\n"
+    "同一行多个按钮用 | 分隔，换行表示新的一行，例如：\n"
+    "官网 - https://example.com | 客服 - https://t.me/xxx\n"
+    "频道 - https://t.me/yyy - 绿色\n"
+    "可选颜色：蓝色/绿色/红色；按钮文字最前面的会员表情会作为图标。"
+), "buttons")
 FLOWS = {
     "confirm_action": ("操作确认", [Question("是否执行此修改", choices=("确认", "取消"))]),
     "clone_token": ("申请机器人克隆", [Question("机器人Token", "请发送你自己机器人的Token；不会在确认页面显示。", "secret")]),
@@ -111,11 +121,12 @@ FLOWS = {
     "quickpost_text": ("快捷发布文字", [Question("帖子文字", "直接发送或转发文字，原格式和表情会保留。", "content")]),
     "quickpost_media": ("快捷发布媒体", [Question("帖子媒体", "发送或转发媒体；有说明时一起保存原说明与表情。", "media")]),
     "quickpost_add": ("添加快捷发布消息", [Question("消息名称", "例如：消息2"), CONTENT]),
-    "quickpost_button": ("添加快捷发布按钮", [
-        Question("按钮文字"),
+    "quickpost_button": ("添加快捷发布按钮", [QB_BUTTONS]),
+    "quickpost_buttonat": ("指定位置添加按钮", [QB_BUTTONS]),
+    "quickpost_buttonedit1": ("修改快捷发布按钮", [
+        Question("输入内容", "给什么文字和表情，按钮就显示什么。"),
         Question("按钮链接", "请发送完整的 https:// 链接。", "url"),
         Question("按钮颜色", choices=("默认", "蓝色", "绿色", "红色")),
-        Question("按钮类型", "长按钮独占一行；短按钮每行并排两个。", choices=("长按钮", "短按钮")),
     ]),
     "quickpost_buttondel": ("删除快捷发布按钮", [Question("按钮编号", "例如 #3。", "id")]),
     "quickpost_buttonedit": ("修改快捷发布按钮", [

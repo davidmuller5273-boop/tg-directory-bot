@@ -917,6 +917,10 @@ class DirectoryStore(FeatureStoreMixin):
             self._ensure_column(
                 conn, "quick_post_buttons", "custom_emoji_id", "TEXT NOT NULL DEFAULT ''"
             )
+            # 指定位置：-1 表示旧的长/短按钮自动排版
+            self._ensure_column(
+                conn, "quick_post_buttons", "row_no", "INTEGER NOT NULL DEFAULT -1"
+            )
             self._ensure_column(conn, "auto_replies", "scope", "TEXT NOT NULL DEFAULT 'private'")
             self._ensure_column(conn, "group_activity_users", "username", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "group_activity_users", "display_name", "TEXT NOT NULL DEFAULT ''")
@@ -3686,16 +3690,79 @@ class DirectoryStore(FeatureStoreMixin):
             count = int(conn.execute(
                 "SELECT COUNT(*) FROM quick_post_buttons WHERE post_id=?", (post_id,)
             ).fetchone()[0])
-            if count >= 12:
-                raise ValueError("每条消息最多添加12个按钮")
+            if count >= 100:
+                raise ValueError("每条消息最多添加100个按钮")
+            top = conn.execute(
+                "SELECT COALESCE(MAX(position), -1), COALESCE(MAX(row_no), -1) FROM quick_post_buttons WHERE post_id=?",
+                (post_id,),
+            ).fetchone()
+            row_no = int(top[1]) + 1 if int(top[1]) >= 0 else -1
             cursor = conn.execute(
                 """INSERT INTO quick_post_buttons
-                   (post_id, position, text, url, color, width, custom_emoji_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (post_id, count, text, url.strip(), color, width,
-                 custom_emoji_id.strip()[:100]),
+                   (post_id, position, text, url, color, width, custom_emoji_id, row_no)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (post_id, int(top[0]) + 1, text, url.strip(), color, width,
+                 custom_emoji_id.strip()[:100], row_no),
             )
             return int(cursor.lastrowid)
+
+    def quick_post_button_rows(self, post_id: int) -> list[list[sqlite3.Row]]:
+        from .quick_buttons import layout_rows
+        return layout_rows(self.quick_post_buttons(post_id))
+
+    def _write_quick_post_layout(self, conn, post_id: int, rows: list[list]) -> list[int]:
+        """rows: lists of existing button ids (int) or new specs (dict). Returns new ids."""
+        conn.execute(
+            "UPDATE quick_post_buttons SET position=-id-1000000 WHERE post_id=?", (post_id,)
+        )
+        keep = {item for row in rows for item in row if isinstance(item, int)}
+        existing = {int(r[0]) for r in conn.execute(
+            "SELECT id FROM quick_post_buttons WHERE post_id=?", (post_id,))}
+        for stale in existing - keep:
+            conn.execute("DELETE FROM quick_post_buttons WHERE post_id=? AND id=?", (post_id, stale))
+        created, position = [], 0
+        for row_no, row in enumerate(rows):
+            for item in row:
+                if isinstance(item, int):
+                    conn.execute(
+                        "UPDATE quick_post_buttons SET position=?, row_no=? WHERE post_id=? AND id=?",
+                        (position, row_no, post_id, item),
+                    )
+                else:
+                    color = str(item.get("color") or "default")
+                    if color not in {"default", "primary", "success", "danger"}:
+                        raise ValueError("按钮颜色无效")
+                    cursor = conn.execute(
+                        """INSERT INTO quick_post_buttons
+                           (post_id, position, text, url, color, width, custom_emoji_id, row_no)
+                           VALUES (?, ?, ?, ?, ?, 'long', ?, ?)""",
+                        (post_id, position, str(item["text"])[:64], str(item["url"]).strip(),
+                         color, str(item.get("custom_emoji_id") or "")[:100], row_no),
+                    )
+                    created.append(int(cursor.lastrowid))
+                position += 1
+        return created
+
+    def insert_quick_post_buttons(self, post_id: int, new_rows: list[list[dict]], where: tuple = ("bottom",)) -> list[int]:
+        from .quick_buttons import insert_rows
+        current = [[int(b["id"]) for b in row] for row in self.quick_post_button_rows(post_id)]
+        layout = insert_rows(current, new_rows, where)
+        with self.connect() as conn:
+            return self._write_quick_post_layout(conn, post_id, layout)
+
+    def move_quick_post_button(self, post_id: int, button_id: int, where: tuple) -> bool:
+        from .quick_buttons import insert_rows
+        current = [[int(b["id"]) for b in row] for row in self.quick_post_button_rows(post_id)]
+        if not any(button_id in row for row in current):
+            return False
+        # 行号按移动前的布局理解（空出来的行先占位），插入后再去掉空行
+        if where and where[0] == "anchor" and int(where[1]) == int(button_id):
+            raise ValueError("请选择另一个按钮作为参照")
+        stripped = [[i for i in row if i != button_id] for row in current]
+        layout = [row for row in insert_rows(stripped, [[button_id]], where) if row]
+        with self.connect() as conn:
+            self._write_quick_post_layout(conn, post_id, layout)
+        return True
 
     def delete_quick_post_button(self, post_id: int, button_id: int) -> bool:
         with self.connect() as conn:
