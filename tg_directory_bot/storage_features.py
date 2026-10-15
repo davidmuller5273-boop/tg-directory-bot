@@ -744,15 +744,22 @@ class FeatureStoreMixin:
             conn.execute("UPDATE managed_channels SET title=?, updated_at=CURRENT_TIMESTAMP WHERE chat_id=?",
                          (title, int(chat_id)))
 
-    def chm_groups(self) -> list[sqlite3.Row]:
+    def chm_groups(self, owner_id: int | None = None) -> list[sqlite3.Row]:
+        """频道分组；传 owner_id 时只返回该用户自己的分组（按用户隔离）。"""
+        sql = """SELECT g.*, (SELECT COUNT(*) FROM chm_group_channels c WHERE c.group_id=g.id) AS size
+                   FROM chm_groups g"""
+        args: tuple = ()
+        if owner_id is not None:
+            sql += " WHERE g.created_by=?"
+            args = (int(owner_id),)
         with self.connect() as conn:  # type: ignore[attr-defined]
-            return conn.execute(
-                """SELECT g.*, (SELECT COUNT(*) FROM chm_group_channels c WHERE c.group_id=g.id) AS size
-                   FROM chm_groups g ORDER BY g.id"""
-            ).fetchall()
+            return conn.execute(sql + " ORDER BY g.id", args).fetchall()
 
-    def chm_group(self, group_id: int) -> sqlite3.Row | None:
+    def chm_group(self, group_id: int, owner_id: int | None = None) -> sqlite3.Row | None:
         with self.connect() as conn:  # type: ignore[attr-defined]
+            if owner_id is not None:
+                return conn.execute("SELECT * FROM chm_groups WHERE id=? AND created_by=?",
+                                    (int(group_id), int(owner_id))).fetchone()
             return conn.execute("SELECT * FROM chm_groups WHERE id=?", (int(group_id),)).fetchone()
 
     def add_chm_group(self, name: str, created_by: int) -> int:
@@ -760,7 +767,8 @@ class FeatureStoreMixin:
         if not name:
             raise ValueError("分组名称不能为空")
         with self.connect() as conn:  # type: ignore[attr-defined]
-            if int(conn.execute("SELECT COUNT(*) FROM chm_groups").fetchone()[0]) >= 50:
+            if int(conn.execute("SELECT COUNT(*) FROM chm_groups WHERE created_by=?",
+                                (int(created_by),)).fetchone()[0]) >= 50:
                 raise ValueError("最多 50 个分组")
             return int(conn.execute("INSERT INTO chm_groups (name, created_by) VALUES (?, ?)",
                                     (name, int(created_by))).lastrowid)

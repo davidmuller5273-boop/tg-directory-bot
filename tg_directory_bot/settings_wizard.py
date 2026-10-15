@@ -195,6 +195,8 @@ FLOWS = {
     "groupperm_set": ("分配群管理员权限", [TARGET, Question("权限", "用逗号分隔：统计、抽奖、开奖、群投票、广告、积分、欢迎、快捷发布、邀请链接、近期操作、管理处罚、骰子赔率；全部权限填 all。")]),
     "groupperm_reset": ("重置群管理员权限", [TARGET]),
     "admin_manage_add": ("添加管理员", [Question("管理员数字ID", "请发送 Telegram 数字ID。", "id")]),
+    "admin_manage_addsuper": ("添加超级管理员", [Question("用户", "请发送对方 Telegram 数字ID、@用户名，或直接转发一条对方的消息。")]),
+    "admin_manage_delsuper": ("移除超级管理员", [Question("用户", "请发送对方 Telegram 数字ID、@用户名，或转发一条对方的消息。")]),
     "admin_manage_delete": ("删除管理员", [Question("管理员数字ID", kind="id")]),
     "admin_manage_reset": ("重置管理员权限", [Question("管理员数字ID", kind="id")]),
     "admin_manage_permissions": ("分配管理员权限", [Question("管理员数字ID", kind="id"), Question("权限", "用逗号分隔：管理处罚、群组管理、双向客服、统计。")]),

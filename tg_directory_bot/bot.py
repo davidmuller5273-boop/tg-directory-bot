@@ -196,7 +196,7 @@ HELP_TEXT = """📖 使用帮助
 
 🛡 权限
 • 超级管理员：管理本机器人、管理员，审核收录，可用全部管理功能（私人笔记除外）
-• 📡 频道管理（私聊）：频道分组，批量改名称/头像/简介，复制或转发内容到多个频道；机器人需是频道管理员
+• 📡 频道管理（私聊，所有用户可用，只显示你和机器人都是管理员的频道）：频道分组，批量改名称/头像/简介，复制或转发内容到多个频道；机器人需是频道管理员
 • 群管理员默认无功能权限，由超级管理员分配
 
 🤖 克隆机器人
@@ -301,6 +301,26 @@ def has_permission(
     return permission in store.bot_admin_permissions(user_id)
 
 
+def resolve_admin_target(store: DirectoryStore, message, text: str) -> int:
+    """从数字ID、@用户名或转发的消息中解析目标用户 ID。"""
+    original = getattr(message, "original_message", None) or message
+    origin = getattr(original, "forward_origin", None)
+    sender = getattr(origin, "sender_user", None) or getattr(original, "forward_from", None)
+    if sender is not None:
+        return int(sender.id)
+    if origin is not None and getattr(origin, "sender_user_name", None):
+        raise ValueError("对方隐藏了转发来源，请改发数字ID或 @用户名")
+    raw = str(text or "").strip().lstrip("#")
+    if raw.isdigit():
+        return int(raw)
+    if raw.startswith("@") and len(raw) > 1:
+        row = store.find_known_user(raw)
+        if row is None:
+            raise ValueError("找不到该用户名，请让对方先私聊机器人 /start，或改发数字ID")
+        return int(row["user_id"])
+    raise ValueError("请发送数字ID、@用户名，或转发对方的一条消息")
+
+
 def can_manage_bot_admin(
     context: ContextTypes.DEFAULT_TYPE, viewer_id: int, target_id: int
 ) -> bool:
@@ -376,8 +396,8 @@ def main_keyboard(
         rows[-1].append(InlineKeyboardButton("🛡 管理员", callback_data="nav:admin"))
     if show_notes is None:
         show_notes = is_developer
-    if is_developer or is_super:
-        rows.append([InlineKeyboardButton("📡 频道管理", callback_data="chm:menu")])
+    # 📡 频道管理对所有用户开放（私聊使用，数据按用户隔离）
+    rows.append([InlineKeyboardButton("📡 频道管理", callback_data="chm:menu")])
     if is_developer:
         dev_row = [InlineKeyboardButton("🌳 子机器人", callback_data="cat:clone")]
         if show_notes:
@@ -6150,6 +6170,36 @@ async def process_menu_input(
                     )
             except TelegramError:
                 logging.exception("Failed to send clone approval request")
+        return True
+    if mode in {"admin_manage_addsuper", "admin_manage_delsuper"}:
+        context.user_data.pop("menu_mode", None)
+        if not is_developer_user(context, user.id if user else None):
+            await message.reply_text("仅开发者可添加/移除超级管理员。")
+            return True
+        try:
+            target_id = resolve_admin_target(store, message, text)
+            config: Config = context.application.bot_data["config"]
+            if mode == "admin_manage_addsuper":
+                if target_id in config.developer_ids or store.is_developer(target_id):
+                    raise ValueError("对方已是开发者")
+                store.add_bot_admin(target_id, "super", user.id)
+                store.audit(f"tg:{user.id}", "admin.add_super", str(target_id))
+                result = f"✅ 已添加超级管理员：{target_id}"
+            else:
+                if target_id in config.developer_ids or store.is_developer(target_id):
+                    raise ValueError("不能移除开发者")
+                if target_id in config.super_admin_ids:
+                    raise ValueError("该超级管理员写在 .env 的 SUPER_ADMIN_IDS 中，需先修改配置并重启")
+                if not store.is_super_admin(target_id) or not store.remove_bot_admin(target_id):
+                    raise ValueError("对方不是数据库中的超级管理员")
+                store.audit(f"tg:{user.id}", "admin.delete_super", str(target_id))
+                result = f"✅ 已移除超级管理员：{target_id}"
+        except ValueError as exc:
+            await menu_input_error(context, message, mode, str(exc))
+            return True
+        await message.reply_text(result, reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ 返回管理员管理", callback_data="admin:admins")
+        ]]))
         return True
     if mode in {
         "admin_manage_add", "admin_manage_delete",
@@ -13289,6 +13339,9 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ),
             "reset": ("admin_manage_reset", "发送要重置权限的管理员 Telegram 数字ID。"),
         }
+        if is_developer_user(context, user_id):
+            prompts["addsuper"] = ("admin_manage_addsuper", "发送对方 Telegram 数字ID、@用户名，或转发一条对方的消息。")
+            prompts["delsuper"] = ("admin_manage_delsuper", "发送要移除的超级管理员数字ID、@用户名，或转发其消息。")
         if action not in prompts:
             await query.answer("操作无效。", show_alert=True)
             return
@@ -13326,6 +13379,10 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     InlineKeyboardButton("🔐 分配权限", callback_data="admin:manage:permissions"),
                     InlineKeyboardButton("♻️ 重置权限", callback_data="admin:manage:reset"),
                 ],
+                *([[
+                    InlineKeyboardButton("➕ 添加超级管理员", callback_data="admin:manage:addsuper"),
+                    InlineKeyboardButton("➖ 移除超级管理员", callback_data="admin:manage:delsuper"),
+                ]] if is_developer_user(context, user_id) else []),
                 [InlineKeyboardButton("⬅️ 返回管理员", callback_data="nav:admin")],
             ])
         )

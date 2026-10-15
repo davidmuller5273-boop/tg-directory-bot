@@ -194,9 +194,9 @@ class TrackingTest(Base):
         labels = [b["text"] for b in self.last_keyboard()]
         self.assertIn("频道A", labels)
         self.assertNotIn("频道B", labels)
-        # 非超级管理员不能打开
-        await self.tap("chm:menu", uid=OTHER)
-        self.assertNotIn("📡 频道管理", self.texts()[-1])
+        # 普通用户也能打开，但只看到自己是管理员的频道（此时 0 个）
+        await self.tap("chm:refresh", uid=OTHER)
+        self.assertIn("你和机器人都是管理员的频道：0 个", self.texts()[-1])
         # 添加更早加入的频道：@用户名
         self.request.members[(CH_C, BOT_ID)] = "administrator"
         self.request.members[(CH_C, SUPER)] = "administrator"
@@ -319,8 +319,8 @@ class SuperAdminParityTest(Base):
         self.assertTrue(handlers.has_developer_access(ctx, SUPER))
         await self.tap("admin:notes", uid=SUPER)
         self.assertNotIn("🗒 私人笔记", "\n".join(self.texts()[-1:]))
-        # 普通用户看不到
-        self.assertNotIn("chm:menu", self.callbacks(handlers.main_keyboard_for(ctx, OTHER)))
+        # 普通用户也能看到 📡 频道管理
+        self.assertIn("chm:menu", self.callbacks(handlers.main_keyboard_for(ctx, OTHER)))
 
     async def test_child_bot_hides_developer_features(self):
         ctx = self.ctx()
@@ -330,3 +330,59 @@ class SuperAdminParityTest(Base):
         self.assertNotIn("cat:clone", sup_main)
         self.assertNotIn("admin:notes", sup_main)
         self.assertIn("chm:menu", sup_main)
+
+
+class OpenToAllTest(Base):
+    async def test_ordinary_user_isolated_channels_and_groups(self):
+        await self.setup_channels()
+        self.request.members[(CH_B, OTHER)] = "administrator"
+        await self.tap("chm:refresh", uid=OTHER)
+        self.assertIn("你和机器人都是管理员的频道：1 个", self.texts()[-1])
+        await self.tap("chm:list", uid=OTHER)
+        labels = [b["text"] for b in self.last_keyboard()]
+        self.assertIn("频道B", labels)
+        self.assertNotIn("频道A", labels)
+        # 分组按用户隔离
+        g_super = self.store.add_chm_group("超管分组", SUPER)
+        g_other = self.store.add_chm_group("我的分组", OTHER)
+        await self.tap("chm:groups", uid=OTHER)
+        labels = [b["text"] for b in self.last_keyboard()]
+        self.assertTrue(any("我的分组" in t for t in labels))
+        self.assertFalse(any("超管分组" in t for t in labels))
+        await self.tap(f"chm:g:{g_super}", uid=OTHER)
+        await self.tap(f"chm:gdel:{g_super}", uid=OTHER)
+        self.assertIsNotNone(self.store.chm_group(g_super))
+        # 不能操作自己不是管理员的频道 A
+        await self.tap(f"chm:gtog:{g_other}:{CH_A}", uid=OTHER)
+        self.assertEqual(self.store.chm_group_channel_ids(g_other), [])
+        # 执行前重新校验：被撤销管理员后不能再改名
+        self.request.members[(CH_B, OTHER)] = "left"
+        self.request.calls.clear()
+        await self.tap(f"chm:set:title:c{CH_B}", uid=OTHER)
+        self.assertFalse([1 for a, _ in self.request.calls if a == "setChatTitle"])
+
+
+class SuperAdminManageTest(Base):
+    async def test_developer_adds_and_removes_super_admin(self):
+        await self.tap("admin:admins", uid=DEV)
+        data = self.button("➕ 添加超级管理员")
+        await self.tap(data, uid=DEV)
+        await self.send(uid=DEV, text="4242")
+        await self.tap(self.button("确认保存"), uid=DEV, message_id=self.panel_id())
+        self.assertTrue(self.store.is_super_admin(4242))
+        # 转发消息添加
+        await self.tap("admin:manage:addsuper", uid=DEV)
+        await self.send(uid=DEV, text="hi", forward_origin={
+            "type": "user", "date": int(time.time()),
+            "sender_user": {"id": 5151, "is_bot": False, "first_name": "F"}})
+        await self.tap(self.button("确认保存"), uid=DEV, message_id=self.panel_id())
+        self.assertTrue(self.store.is_super_admin(5151))
+        await self.tap("admin:manage:delsuper", uid=DEV)
+        await self.send(uid=DEV, text="4242")
+        await self.tap(self.button("确认保存"), uid=DEV, message_id=self.panel_id())
+        self.assertFalse(self.store.is_super_admin(4242))
+        # 超级管理员看不到也不能使用
+        await self.tap("admin:admins", uid=SUPER)
+        self.assertNotIn("admin:manage:addsuper", [b.get("callback_data") for b in self.last_keyboard()])
+        await self.tap("admin:manage:addsuper", uid=SUPER)
+        self.assertFalse(self.store.is_super_admin(4242))

@@ -58,8 +58,8 @@ def _store(context):
 
 
 def _allowed(context, user_id) -> bool:
-    from . import bot as botmod
-    return botmod.has_super_admin_access(context, user_id)
+    """频道管理对所有用户开放（私聊）；每个用户只能看到/操作自己和机器人都是管理员的频道。"""
+    return user_id is not None
 
 
 def rights_of(member) -> dict:
@@ -130,7 +130,9 @@ async def visible_channels(context, user_id: int, refresh: bool = False) -> list
     return [rows[cid] for cid in ids if cid in rows]
 
 
-async def resolve_targets(context, user_id: int, target: str) -> tuple[str, list]:
+async def resolve_targets(context, user_id: int, target: str, fresh: bool = False) -> tuple[str, list]:
+    if fresh:
+        context.user_data.pop("chm_visible", None)
     visible = await visible_channels(context, user_id)
     by_id = {int(r["chat_id"]): r for r in visible}
     kind, raw = target[0], target[1:]
@@ -138,7 +140,7 @@ async def resolve_targets(context, user_id: int, target: str) -> tuple[str, list
         row = by_id.get(int(raw))
         return (channel_name(row) if row else "频道", [row] if row else [])
     if kind == "g":
-        group = _store(context).chm_group(int(raw))
+        group = _store(context).chm_group(int(raw), user_id)
         ids = _store(context).chm_group_channel_ids(int(raw)) if group else []
         return (f"分组「{group['name']}」" if group else "分组", [by_id[i] for i in ids if i in by_id])
     return ("全部频道", visible)
@@ -230,9 +232,9 @@ def list_view(visible) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(rows)
 
 
-def channel_view(store, row) -> tuple[str, InlineKeyboardMarkup]:
+def channel_view(store, row, user_id=None) -> tuple[str, InlineKeyboardMarkup]:
     rights = json.loads(row["rights_json"] or "{}")
-    groups = [g["name"] for g in store.chm_groups() if int(row["chat_id"]) in store.chm_group_channel_ids(int(g["id"]))]
+    groups = [g["name"] for g in store.chm_groups(user_id) if int(row["chat_id"]) in store.chm_group_channel_ids(int(g["id"]))]
     text = (
         f"📺 {channel_name(row)}\nID：{row['chat_id']}\n"
         f"发消息权限：{'✅' if rights.get('can_post_messages') else '❔'}  "
@@ -244,8 +246,8 @@ def channel_view(store, row) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(rows)
 
 
-def groups_view(store) -> tuple[str, InlineKeyboardMarkup]:
-    groups = store.chm_groups()
+def groups_view(store, user_id) -> tuple[str, InlineKeyboardMarkup]:
+    groups = store.chm_groups(user_id)
     rows = [[_btn(f"🗂 {g['name']}（{g['size']}）", f"chm:g:{g['id']}")] for g in groups]
     rows.append([_btn("➕ 新建分组", "chm:set:groupadd:a0")])
     rows.append([_btn("⬅️ 返回频道管理", "chm:menu")])
@@ -282,7 +284,7 @@ async def handle_callback(update: Update, context) -> None:
     user_id = query.from_user.id
     store = _store(context)
     if not _allowed(context, user_id):
-        await query.answer("仅超级管理员可用。", show_alert=True)
+        await query.answer("无法识别用户。", show_alert=True)
         return
     if update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
         await query.answer("请私聊机器人使用频道管理。", show_alert=True)
@@ -328,13 +330,13 @@ async def handle_callback(update: Update, context) -> None:
             await query.answer("你或机器人已不是该频道管理员。", show_alert=True)
             return
         await query.answer()
-        await show(channel_view(store, row))
+        await show(channel_view(store, row, user_id))
         return
     if action == "groups":
         await query.answer()
-        await show(groups_view(store))
+        await show(groups_view(store, user_id))
         return
-    group = store.chm_group(int(parts[2])) if len(parts) > 2 and parts[2].isdigit() else None
+    group = store.chm_group(int(parts[2]), user_id) if len(parts) > 2 and parts[2].isdigit() else None
     if group is None:
         await query.answer("分组不存在。", show_alert=True)
         return
@@ -355,7 +357,7 @@ async def handle_callback(update: Update, context) -> None:
     elif action == "gdel":
         store.delete_chm_group(int(group["id"]))
         await query.answer("分组已删除。")
-        await show(groups_view(store))
+        await show(groups_view(store, user_id))
     else:
         await query.answer("未知操作。")
 
@@ -388,7 +390,7 @@ async def commit(update: Update, context, mode: str) -> bool:
     store = _store(context)
     context.user_data.pop("menu_mode", None)
     if not _allowed(context, user.id):
-        await message.reply_text("仅超级管理员可用。")
+        await message.reply_text("无法识别用户。")
         return True
     answers = list(getattr(message, "setting_answers", None) or [])
     target = str(context.user_data.pop("chm_target", "a0"))
@@ -408,18 +410,21 @@ async def commit(update: Update, context, mode: str) -> bool:
         return True
     if op == "groupadd":
         gid = store.add_chm_group(answers[0], user.id)
-        group = store.chm_group(gid)
+        group = store.chm_group(gid, user.id)
         visible = await visible_channels(context, user.id)
         text, markup = group_pick_view(store, group, visible)
         await message.reply_text(f"✅ 分组已创建。\n\n{text}", reply_markup=markup)
         return True
     if op == "grouprename":
         gid = int(target[1:])
+        if store.chm_group(gid, user.id) is None:
+            raise ValueError("分组不存在")
         if not store.rename_chm_group(gid, answers[0]):
             raise ValueError("分组不存在")
         await message.reply_text("✅ 分组已重命名。", reply_markup=InlineKeyboardMarkup([[_btn("⬅️ 返回分组", f"chm:g:{gid}")]]))
         return True
-    label, channels = await resolve_targets(context, user.id, target)
+    # 执行前重新 getChatMember 校验用户仍是频道管理员
+    label, channels = await resolve_targets(context, user.id, target, fresh=True)
     if not channels:
         raise ValueError("没有可操作的频道（需要你和机器人都是管理员）")
     bot = context.bot
