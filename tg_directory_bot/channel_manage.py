@@ -363,47 +363,56 @@ async def handle_callback(update: Update, context) -> None:
 
 
 async def original_content_sender(bot, original):
-    """与快捷发布相同的「原内容」发送：
+    """「复制」= 原样复制（不显示来源）。
 
-    1. 转发自频道的帖子 → copy_message 频道原帖（文字、会员表情、媒体、按钮全部原样）；
-    2. 否则用捕获的 text/caption + entities（含 custom_emoji）+ 媒体 file_id 重建
-       （rich_content.send_content，与快捷发布一致），按钮保留 style/icon_custom_emoji_id；
-    3. 重建失败时退回 copy_message 用户发给机器人的那条消息。
+    根因：Bot API 9.4 起，机器人主人有 Premium 时，机器人「自己发」的消息里可以用会员表情，
+    但仅限私聊/群/超级群，**不含频道**。所以按 text+entities 重建（send_message）发到频道时，
+    会员表情会被 Telegram 降级/丢弃。copyMessage（不改按钮时）在服务端复制原消息，
+    保留文字、会员表情、格式、媒体。因此：
+    1. 转发自频道的帖子 → copy 频道原帖（原按钮随帖保留）；
+    2. 否则 copy 用户发给机器人的原消息；只有原消息本身带按钮时才附带 reply_markup；
+    3. copy 失败才退回 text/entities 重建（rich_content.send_content）。
     """
     from . import bot as botmod
+    from .auto_delete import advertisement_message, persistent_message
     from .rich_content import (
         buttons_markup, capture_buttons_resolving, capture_content,
         forward_channel_source, send_content,
     )
-    markup = buttons_markup(await capture_buttons_resolving(bot, original, original.chat_id))
     source = forward_channel_source(original)
+    raw_buttons = await capture_buttons_resolving(bot, original, original.chat_id) if not source else "[]"
+    markup = buttons_markup(raw_buttons)
+    copy_kwargs = {"reply_markup": markup} if markup else {}
     text, entities_json = capture_content(original)
     file_id, file_type, file_name = botmod.publishing_attachment(original)
-    row = {"text": text, "file_id": file_id, "file_type": file_type,
-           "file_name": file_name, "entities_json": entities_json}
 
     class _Row(dict):
         def keys(self):  # sqlite3.Row 兼容
             return list(super().keys())
 
-    row = _Row(row)
-    copy_kwargs = {"reply_markup": markup} if markup else {}
+    row = _Row(text=text, file_id=file_id, file_type=file_type,
+               file_name=file_name, entities_json=entities_json)
 
     async def send(channel_row):
         chat_id = int(channel_row["chat_id"])
-        if source:
-            try:
-                return await bot.copy_message(chat_id, source[0], source[1], **copy_kwargs)
-            except TelegramError as exc:
-                if isinstance(exc, RetryAfter):
+        # 频道帖是永久内容：不自动撤回、不插入广告
+        with persistent_message(), advertisement_message():
+            if source:
+                try:
+                    return await bot.copy_message(chat_id, source[0], source[1])
+                except RetryAfter:
                     raise
-                logging.info("chm: copy from channel source failed: %s", exc)
-        if text or file_id:
+                except TelegramError as exc:
+                    logging.info("chm: copy from channel source failed: %s", exc)
             try:
-                return await send_content(bot, chat_id, row, markup)
-            except ValueError:
-                pass
-        return await bot.copy_message(chat_id, original.chat_id, original.message_id, **copy_kwargs)
+                return await bot.copy_message(chat_id, original.chat_id, original.message_id, **copy_kwargs)
+            except RetryAfter:
+                raise
+            except TelegramError as exc:
+                logging.info("chm: copy of private message failed, rebuilding: %s", exc)
+                if not (text or file_id):
+                    raise
+            return await send_content(bot, chat_id, row, markup)
 
     return send
 
@@ -503,8 +512,12 @@ async def commit(update: Update, context, mode: str) -> bool:
         original = getattr(message, "original_message", message)
         forward = answers and answers[0] == "转发"
         if forward:
-            ok, failed = await fan_out(channels, lambda row: bot.forward_message(
-                int(row["chat_id"]), original.chat_id, original.message_id))
+            from .auto_delete import persistent_message
+
+            async def forward_one(row):
+                with persistent_message():
+                    return await bot.forward_message(int(row["chat_id"]), original.chat_id, original.message_id)
+            ok, failed = await fan_out(channels, forward_one)
         else:
             ok, failed = await fan_out(channels, await original_content_sender(bot, original))
         text = summary(label, "📤 " + ("转发" if forward else "复制") + "内容", ok, failed)

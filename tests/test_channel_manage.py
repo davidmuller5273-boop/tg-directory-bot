@@ -43,6 +43,7 @@ class ChannelRequest(FakeRequest):
         self.members = {}
         self.no_rights = set()
         self.retry_once = set()
+        self.copy_fail = set()
 
     def error(self, code, text, **extra):
         body = {"ok": False, "error_code": code, "description": text}
@@ -81,6 +82,8 @@ class ChannelRequest(FakeRequest):
                 return self.error(429, "Too Many Requests: retry after 3", parameters={"retry_after": 3})
             if chat in self.no_rights:
                 return self.error(400, "Bad Request: not enough rights to change chat title")
+            if api == "copyMessage" and chat in self.copy_fail:
+                return self.error(400, "Bad Request: message to copy not found")
             if api == "copyMessage":
                 result = {"message_id": next(self.ids)}
             elif api == "forwardMessage":
@@ -276,32 +279,29 @@ class GroupsAndBulkTest(Base):
         gid = self.store.add_chm_group("全部", SUPER)
         for ch in (CH_A, CH_B):
             self.store.toggle_chm_group_channel(gid, ch)
-        self.request.retry_once.add(("sendMessage", CH_B))
+        self.request.retry_once.add(("copyMessage", CH_B))
         await self.tap(f"chm:set:send:g{gid}")
         await self.tap(self.button("复制"), message_id=self.panel_id())
         markup = {"inline_keyboard": [[{"text": "官网", "url": "https://a.com", "style": "success",
                                         "icon_custom_emoji_id": "777"}]]}
         entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5368324170671202286"},
                     {"type": "bold", "offset": 3, "length": 4}]
-        await self.send(text="👍 广告内容", entities=entities, reply_markup=markup)
+        self.request.calls.clear()
+        await self.send(text="👍 广告内容😀", entities=entities, reply_markup=markup)
         await self.wizard_save()
-        sends = [p for a, p in self.request.calls if a == "sendMessage" and int(p["chat_id"]) < 0]
-        self.assertEqual(sorted(int(p["chat_id"]) for p in sends), sorted([CH_A, CH_B, CH_B]))
-        self.assertFalse([1 for a, _ in self.request.calls if a == "copyMessage"])
-        sent = sends[-1]
-        self.assertEqual(sent["text"], "👍 广告内容")
-        ents = sent["entities"]
-        ents = json.loads(ents) if isinstance(ents, str) else ents
-        ents = [e if isinstance(e, dict) else e.to_dict() for e in ents]
-        self.assertEqual(ents[0]["type"], "custom_emoji")
-        self.assertEqual(ents[0]["custom_emoji_id"], "5368324170671202286")
-        self.assertEqual(ents[1]["type"], "bold")
-        kb = sent["reply_markup"]
+        # 真实路径：频道里用 copyMessage 原样复制（会员表情只能这样保留），不重建文字
+        copies = [p for a, p in self.request.calls if a == "copyMessage" and int(p["chat_id"]) < 0]
+        self.assertEqual(sorted(int(p["chat_id"]) for p in copies), sorted([CH_A, CH_B, CH_B]))
+        self.assertFalse([1 for a, p in self.request.calls if a == "sendMessage" and int(p["chat_id"]) < 0])
+        self.assertTrue(all(int(p["from_chat_id"]) == SUPER for p in copies))
+        kb = copies[-1]["reply_markup"]
         kb = json.loads(kb) if isinstance(kb, str) else kb
         self.assertEqual(kb["inline_keyboard"][0][0]["url"], "https://a.com")
         self.assertEqual(kb["inline_keyboard"][0][0].get("icon_custom_emoji_id"), "777")
         self.assertIn("✅ 成功 2 个，❌ 失败 0 个", self.report())
-        # 图片 + caption 实体
+        # 频道帖不自动撤回
+        self.assertFalse([k for k in self.app.bot._delete_by_message if k[0] < 0])
+        # 无按钮：copy 不带 reply_markup（不触发重发，保留会员表情）
         self.request.calls.clear()
         await self.tap(f"chm:set:send:c{CH_A}")
         await self.tap(self.button("复制"), message_id=self.panel_id())
@@ -309,13 +309,25 @@ class GroupsAndBulkTest(Base):
                         caption="⭐ 图说", caption_entities=[{"type": "custom_emoji", "offset": 0, "length": 1,
                                                              "custom_emoji_id": "42"}])
         await self.wizard_save()
-        photo = next(p for a, p in self.request.calls if a == "sendPhoto")
-        self.assertEqual(photo["photo"], "p9")
-        self.assertEqual(photo["caption"], "⭐ 图说")
-        cents = photo["caption_entities"]
-        cents = json.loads(cents) if isinstance(cents, str) else cents
-        cents = [e if isinstance(e, dict) else e.to_dict() for e in cents]
-        self.assertEqual(cents[0]["custom_emoji_id"], "42")
+        copy = next(p for a, p in self.request.calls if a == "copyMessage" and int(p["chat_id"]) == CH_A)
+        self.assertNotIn("reply_markup", copy)
+        self.assertNotIn("caption", copy)
+        # copy 失败时退回重建：text + entities（含会员表情）原样
+        self.request.copy_fail.add(CH_A)
+        self.request.calls.clear()
+        await self.tap(f"chm:set:send:c{CH_A}")
+        await self.tap(self.button("复制"), message_id=self.panel_id())
+        await self.send(text="👍 你好🔥", entities=entities[:1])
+        await self.wizard_save()
+        sent = next(p for a, p in self.request.calls if a == "sendMessage" and int(p["chat_id"]) == CH_A)
+        self.assertEqual(sent["text"], "👍 你好🔥")
+        ents = sent["entities"]
+        ents = json.loads(ents) if isinstance(ents, str) else ents
+        ents = [e if isinstance(e, dict) else e.to_dict() for e in ents]
+        self.assertEqual(ents[0]["custom_emoji_id"], "5368324170671202286")
+        self.assertNotIn("parse_mode", sent)
+        self.assertFalse([k for k in self.app.bot._delete_by_message if k[0] < 0])
+        self.request.copy_fail.clear()
         # 转发自频道的帖子：copy 频道原帖（原样保留一切）
         self.request.calls.clear()
         await self.tap(f"chm:set:send:c{CH_A}")
@@ -327,6 +339,7 @@ class GroupsAndBulkTest(Base):
         copies = [p for a, p in self.request.calls if a == "copyMessage" and int(p["chat_id"]) == CH_A]
         self.assertEqual(len(copies), 1)
         self.assertEqual((int(copies[0]["from_chat_id"]), int(copies[0]["message_id"])), (-100999, 55))
+        self.assertNotIn("reply_markup", copies[0])
         # 转发（显示来源），B 被移除
         self.request.no_rights.add(CH_B)
         await self.tap(f"chm:set:send:g{gid}")
