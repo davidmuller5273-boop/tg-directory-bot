@@ -209,19 +209,44 @@ def ops_rows(target: str) -> list:
     ]
 
 
-def menu_view(visible) -> tuple[str, InlineKeyboardMarkup]:
+def menu_view(visible, staging_name: str = "") -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "📡 频道管理\n"
         f"你和机器人都是管理员的频道：{len(visible)} 个\n\n"
         "可按分组或单个频道批量改名称、头像、简介，或把内容复制/转发到所有频道。\n\n"
+        f"中转频道：{staging_name or '未设置（「复制」可能丢失会员表情）'}\n\n"
         "提示：" + ADD_HINT
     )
     rows = [
         [_btn("📺 频道列表", "chm:list"), _btn("🗂 分组管理", "chm:groups")],
         [_btn("📢 全部频道批量操作", "chm:all")],
         [_btn("➕ 添加频道", "chm:set:add:a0"), _btn("🔄 刷新", "chm:refresh")],
+        [_btn("⚙️ 设置中转频道", "chm:staging")],
         [_btn("⬅️ 返回主菜单", "nav:main")],
     ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def staging_label(store, user_id, visible) -> str:
+    cid = store.chm_staging_channel(user_id)
+    row = next((r for r in visible if int(r["chat_id"]) == cid), None)
+    return channel_name(row) if row else ""
+
+
+def staging_view(store, user_id, visible) -> tuple[str, InlineKeyboardMarkup]:
+    current = store.chm_staging_channel(user_id)
+    text = (
+        "⚙️ 中转频道\n\n"
+        "「复制」时，机器人先把你的消息转发到中转频道，再从那里复制到目标频道（不显示来源，"
+        "会员表情原样保留），完成后自动删除中转消息。\n"
+        "建议新建一个私密频道专门做中转，把机器人设为管理员（需发消息和删消息权限）。\n\n"
+        f"当前：{staging_label(store, user_id, visible) or '未设置'}\n点选一个频道设为中转频道："
+    )
+    rows = [[_btn(("✅ " if int(r["chat_id"]) == current else "") + str(r["title"])[:36],
+                  f"chm:stg:{r['chat_id']}")] for r in visible[:60]]
+    if current:
+        rows.append([_btn("🚫 清除中转频道", "chm:stg:0")])
+    rows.append([_btn("⬅️ 返回频道管理", "chm:menu")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -298,7 +323,22 @@ async def handle_callback(update: Update, context) -> None:
     if action in {"menu", "refresh"}:
         visible = await visible_channels(context, user_id, refresh=action == "refresh")
         await query.answer("已刷新。" if action == "refresh" else None)
-        await show(menu_view(visible))
+        await show(menu_view(visible, staging_label(store, user_id, visible)))
+        return
+    if action == "staging":
+        visible = await visible_channels(context, user_id)
+        await query.answer()
+        await show(staging_view(store, user_id, visible))
+        return
+    if action == "stg":
+        cid = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
+        visible = await visible_channels(context, user_id, refresh=True)
+        if cid and cid not in {int(r["chat_id"]) for r in visible}:
+            await query.answer("你或机器人已不是该频道管理员。", show_alert=True)
+            return
+        store.set_chm_staging_channel(user_id, cid)
+        await query.answer("中转频道已设置。" if cid else "已清除中转频道。")
+        await show(staging_view(store, user_id, visible))
         return
     if action == "set":
         # chm:set:<op>:<target>  → 进入问答（由 handle_callback 统一启动向导）
@@ -362,7 +402,7 @@ async def handle_callback(update: Update, context) -> None:
         await query.answer("未知操作。")
 
 
-async def original_content_sender(bot, original):
+async def original_content_sender(bot, original, staging_chat_id: int = 0):
     """「复制」= 原样复制（不显示来源）。
 
     根因：Bot API 9.4 起，机器人主人有 Premium 时，机器人「自己发」的消息里可以用会员表情，
@@ -393,10 +433,38 @@ async def original_content_sender(bot, original):
     row = _Row(text=text, file_id=file_id, file_type=file_type,
                file_name=file_name, entities_json=entities_json)
 
+    staged = {"id": 0}
+
+    async def stage():
+        """把用户私聊消息转发到中转频道（转发能完整保留会员表情）。"""
+        if not staging_chat_id or source or staged["id"] < 0:
+            return 0
+        if staged["id"]:
+            return staged["id"]
+        try:
+            with persistent_message():
+                msg = await bot.forward_message(staging_chat_id, original.chat_id, original.message_id)
+            staged["id"] = int(msg.message_id)
+        except RetryAfter:
+            raise
+        except TelegramError as exc:
+            logging.info("chm: staging forward failed: %s", exc)
+            staged["id"] = -1
+            return 0
+        return staged["id"]
+
     async def send(channel_row):
         chat_id = int(channel_row["chat_id"])
         # 频道帖是永久内容：不自动撤回、不插入广告
         with persistent_message(), advertisement_message():
+            staged_id = await stage()
+            if staged_id:
+                try:
+                    return await bot.copy_message(chat_id, staging_chat_id, staged_id, **copy_kwargs)
+                except RetryAfter:
+                    raise
+                except TelegramError as exc:
+                    logging.info("chm: copy from staging failed: %s", exc)
             if source:
                 try:
                     return await bot.copy_message(chat_id, source[0], source[1])
@@ -414,6 +482,15 @@ async def original_content_sender(bot, original):
                     raise
             return await send_content(bot, chat_id, row, markup)
 
+    async def cleanup():
+        if staged["id"] > 0:
+            try:
+                await bot.delete_message(staging_chat_id, staged["id"])
+            except TelegramError as exc:
+                logging.info("chm: cannot delete staging post: %s", exc)
+
+    send.cleanup = cleanup
+    send.staging_failed = lambda: staged["id"] < 0
     return send
 
 
@@ -519,8 +596,22 @@ async def commit(update: Update, context, mode: str) -> bool:
                     return await bot.forward_message(int(row["chat_id"]), original.chat_id, original.message_id)
             ok, failed = await fan_out(channels, forward_one)
         else:
-            ok, failed = await fan_out(channels, await original_content_sender(bot, original))
-        text = summary(label, "📤 " + ("转发" if forward else "复制") + "内容", ok, failed)
+            visible_ids = {int(r["chat_id"]) for r in await visible_channels(context, user.id)}
+            staging = store.chm_staging_channel(user.id)
+            if staging not in visible_ids:
+                staging = 0
+            sender = await original_content_sender(bot, original, staging)
+            try:
+                ok, failed = await fan_out(channels, sender)
+            finally:
+                await sender.cleanup()
+            if not staging:
+                note = "\n\n⚠️ 未设置中转频道：会员表情可能丢失。请在 📡 频道管理 → ⚙️ 设置中转频道 中设置。"
+            elif sender.staging_failed():
+                note = "\n\n⚠️ 转发到中转频道失败（检查机器人在中转频道的发消息权限），已直接复制，会员表情可能丢失。"
+            else:
+                note = ""
+        text = summary(label, "📤 " + ("转发" if forward else "复制") + "内容", ok, failed) + ("" if forward else note)
     else:
         raise ValueError("未知频道操作")
     store.audit(f"tg:{user.id}", f"channel.{op}", target, f"ok={len(ok)} fail={len(failed)}")
