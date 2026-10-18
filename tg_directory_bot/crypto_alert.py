@@ -6,12 +6,17 @@
   限速 20 次/2 秒，本任务默认 30 秒一次，母/子机器人各自轮询也远低于限速）。
 - 10 分钟涨跌：用每轮行情在内存里保存约 15 分钟的价格样本；刚启动或刚添加的币种
   没有 10 分钟历史时，用 1 分钟 K 线（limit=11）补齐，每轮最多补 5 个币种。
+- OKX 没有的币（如 XMR）：改查火币 / KuCoin / Gate.io / MEXC（market_sources），
+  每个币记住可用来源，每轮单独请求一次该交易所行情（最多 MAX_FALLBACK_PER_POLL 个，
+  并发 FALLBACK_CONCURRENCY）；日涨跌用该交易所北京时间 0 点开盘价，10 分钟历史同样
+  用该交易所 1 分钟 K 线补齐。OKX 整体连不上时，已知走备用源的币照常监控。
 - 涨跌都提醒（双向，按绝对值判断）。
 - 冷却：日涨跌规则每个北京时间自然日、每个方向（涨/跌）最多提醒一次；
   10 分钟规则提醒后该监控冷却 10 分钟。冷却状态写入数据库，重启后不会重复提醒。
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -19,6 +24,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from . import market_sources as ms
 from .crypto_price import BJT, FetchJson, _default_fetch, format_price, normalize_symbol
 
 TICKERS_URL = "https://www.okx.com/api/v5/market/tickers"
@@ -32,6 +38,8 @@ SEED_RETRY_SECONDS = 300
 MAX_THRESHOLD = Decimal("1000")
 DEFAULT_MAX_PER_CHAT = 50
 DEFAULT_POLL_SECONDS = 30
+MAX_FALLBACK_PER_POLL = 30
+FALLBACK_CONCURRENCY = 4
 
 # 旧语法里的方向参数：仍然接受，但一律按双向处理
 LEGACY_DIRECTION_WORDS = {
@@ -133,6 +141,7 @@ class Snapshot:
     last: Decimal
     sod_utc8: Decimal
     open24h: Decimal
+    source: str = "OKX"
 
     @property
     def daily_change(self) -> Decimal | None:
@@ -211,6 +220,14 @@ class PriceHistory:
                 added = True
         return added
 
+    def seed_points(self, symbol: str, points: Iterable[tuple[float, Decimal]]) -> bool:
+        added = False
+        for ts, price in points:
+            if price > 0:
+                self.record(symbol, float(ts), Decimal(price))
+                added = True
+        return added
+
 
 # ---- 规则判断 ---------------------------------------------------------------
 
@@ -267,7 +284,7 @@ def alert_text(symbol: str, snapshot: Snapshot, fired: list[Fired],
         lines.append(f"{FAST_LABEL}：{pct_text(fast_change)}")
     stamp = (now or datetime.now(BJT)).astimezone(BJT).strftime("%Y-%m-%d %H:%M:%S")
     lines.append(f"时间：{stamp}（北京时间）")
-    lines.append("数据来源：OKX 现货 USDT 交易对")
+    lines.append(f"数据来源：{snapshot.source} 现货 USDT 交易对")
     return "\n".join(lines)
 
 
@@ -275,23 +292,70 @@ def alert_text(symbol: str, snapshot: Snapshot, fired: list[Fired],
 
 class AlertPoller:
     def __init__(self, fetch_json: FetchJson | None = None,
-                 clock=time.time) -> None:
+                 clock=time.time, router: ms.SourceRouter | None = None) -> None:
         self.fetch_json = fetch_json or _default_fetch
         self.clock = clock
+        self.router = router or ms.SourceRouter()
         self.history = PriceHistory()
         self._seed_attempts: dict[str, float] = {}
+        self._sources: dict[str, str] = {}
+
+    async def _fallback_snapshot(self, symbol: str, okx_missing: bool,
+                                 semaphore: asyncio.Semaphore) -> tuple[str, Snapshot] | None:
+        async with semaphore:
+            try:
+                name, ticker = await self.router.fallback_ticker(self.fetch_json, symbol, okx_missing)
+            except ms.SourceError:
+                return None
+            except Exception:  # noqa: BLE001 - 单个币失败不影响其他币
+                return None
+            sod = await self.router.day_open(self.fetch_json, name, symbol)
+        snap = Snapshot(symbol, ticker.last, sod or Decimal("0"), ticker.open24h, self.router.label(name))
+        return name, snap
 
     async def snapshot(self, symbols: set[str], fast_symbols: set[str]) -> tuple[dict[str, Snapshot], dict[str, Decimal]]:
-        """One tickers request for everything; candles only to seed 10-minute history."""
+        """One OKX tickers request for everything; fallback exchanges only for
+        coins OKX doesn't list; candles only to seed 10-minute history."""
         if not symbols:
             return {}, {}
         now = self.clock()
-        payload = await self.fetch_json(TICKERS_URL, {"instType": "SPOT"})
-        tickers = parse_tickers(payload)
+        okx_error: Exception | None = None
+        try:
+            payload = await self.fetch_json(TICKERS_URL, {"instType": "SPOT"})
+            if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+                raise RuntimeError(f"OKX tickers error: {str(payload)[:200]}")
+            tickers = parse_tickers(payload)
+        except Exception as exc:  # noqa: BLE001 - 备用源的币仍可继续
+            okx_error = exc
+            tickers = {}
         result = {symbol: tickers[symbol] for symbol in symbols if symbol in tickers}
-        for symbol, snap in tickers.items():
-            if symbol in symbols:
-                self.history.record(symbol, now, snap.last)
+        source_of = {symbol: "okx" for symbol in result}
+        missing = sorted(symbols - set(result))
+        if okx_error is None:
+            candidates = missing
+        else:
+            # OKX 整体失败：只查已知走备用交易所的币
+            candidates = [symbol for symbol in missing if self.router.route(symbol)]
+        candidates = candidates[:MAX_FALLBACK_PER_POLL]
+        if candidates:
+            semaphore = asyncio.Semaphore(FALLBACK_CONCURRENCY)
+            found = await asyncio.gather(*(
+                self._fallback_snapshot(symbol, okx_error is None, semaphore) for symbol in candidates
+            ))
+            for item in found:
+                if item is not None:
+                    name, snap = item
+                    result[snap.symbol] = snap
+                    source_of[snap.symbol] = name
+        if okx_error is not None and not result:
+            raise okx_error
+        for symbol, snap in result.items():
+            # 换了来源交易所时，旧历史不可比，清掉
+            if self._sources.get(symbol) not in (None, source_of[symbol]):
+                self.history.samples.pop(symbol, None)
+                self._seed_attempts.pop(symbol, None)
+            self._sources[symbol] = source_of[symbol]
+            self.history.record(symbol, now, snap.last)
         refs: dict[str, Decimal] = {}
         seeded = 0
         for symbol in sorted(fast_symbols & set(result)):
@@ -299,11 +363,16 @@ class AlertPoller:
             if ref is None and seeded < SEED_PER_POLL and now - self._seed_attempts.get(symbol, 0) >= SEED_RETRY_SECONDS:
                 self._seed_attempts[symbol] = now
                 seeded += 1
+                name = source_of[symbol]
                 try:
-                    candles = await self.fetch_json(
-                        CANDLES_URL, {"instId": f"{symbol}-USDT", "bar": "1m", "limit": "11"},
-                    )
-                    self.history.seed_candles(symbol, candles)
+                    if name == "okx":
+                        candles = await self.fetch_json(
+                            CANDLES_URL, {"instId": f"{symbol}-USDT", "bar": "1m", "limit": "11"},
+                        )
+                        self.history.seed_candles(symbol, candles)
+                    else:
+                        points = await self.router.candles_1m(self.fetch_json, name, symbol, now)
+                        self.history.seed_points(symbol, points)
                 except Exception:  # noqa: BLE001 - 补历史失败下一轮再试
                     pass
                 ref = self.history.price_ago(symbol, now)
@@ -313,4 +382,7 @@ class AlertPoller:
         for symbol in list(self.history.samples):
             if symbol not in symbols:
                 self.history.samples.pop(symbol, None)
+        for symbol in list(self._sources):
+            if symbol not in symbols:
+                self._sources.pop(symbol, None)
         return result, refs

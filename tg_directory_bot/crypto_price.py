@@ -1,4 +1,8 @@
-"""💹 币价查询：OKX 现货 USDT 价格 + 人民币换算 + 24h 涨跌。"""
+"""💹 币价查询：OKX 现货 USDT 价格 + 人民币换算 + 24h 涨跌。
+
+OKX 没有该币的 USDT 交易对时（如 XMR），自动改查火币 / KuCoin / Gate.io / MEXC，
+见 market_sources。
+"""
 from __future__ import annotations
 
 import re
@@ -10,6 +14,8 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from . import market_sources as ms
+
 MENU_BUTTON_TEXT = "💹 币价"
 TICKER_URL = "https://www.okx.com/api/v5/market/ticker"
 FX_URL = "https://open.er-api.com/v6/latest/USD"
@@ -18,7 +24,7 @@ FX_CACHE_SECONDS = 3600
 MAX_EXTRA_SYMBOLS = 50
 SETTING_EXTRA = "price_extra_symbols"
 
-# 市值靠前的常见币种（OKX 有 USDT 现货交易对）
+# 市值靠前的常见币种（大多 OKX 有 USDT 现货交易对，没有的走备用交易所）
 DEFAULT_SYMBOLS = (
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "TON", "AVAX",
     "SHIB", "DOT", "LINK", "BCH", "LTC", "NEAR", "POL", "UNI", "ICP", "ETC",
@@ -26,6 +32,7 @@ DEFAULT_SYMBOLS = (
     "BONK", "FLOKI", "AAVE", "GRT", "ALGO", "SAND", "MANA", "AXS", "EOS", "XTZ",
     "IMX", "RENDER", "LDO", "CRV", "STX", "TIA", "JUP", "ORDI", "WLD", "FET",
     "ENS", "DYDX", "GALA", "INJ", "SEI", "USDC", "OKB", "TRUMP", "ONDO", "ENA",
+    "XMR",  # OKX 已下架，走火币等备用行情源
 )
 # 单独发送时容易和日常聊天混淆的短词：只有全大写才触发
 AMBIGUOUS = {"OP", "ONE", "GAS", "ENS", "ARB", "SAND", "MANA", "JUP", "WIF", "FET"}
@@ -113,6 +120,7 @@ class Quote:
     rate_source: str
     fetched_at: float
     sod_utc8: Decimal | None = None
+    source: str = "OKX"  # 行情来源交易所（显示名）
 
     @property
     def day_change_pct(self) -> Decimal | None:
@@ -142,10 +150,12 @@ async def _default_fetch(url: str, params: dict) -> Any:
 class PriceService:
     def __init__(self, fetch_json: FetchJson | None = None,
                  c2c_rate: RateFetcher | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 router: ms.SourceRouter | None = None) -> None:
         self.fetch_json = fetch_json or _default_fetch
         self.c2c_rate = c2c_rate
         self.clock = clock
+        self.router = router or ms.SourceRouter(clock=clock)
         self._cache: dict[str, tuple[float, Quote]] = {}
         self._fx: tuple[float, Decimal] | None = None
 
@@ -178,35 +188,69 @@ class PriceService:
         cached = self._cache.get(symbol)
         if cached and now - cached[0] < PRICE_CACHE_SECONDS:
             return cached[1]
-        try:
-            payload = await self.fetch_json(TICKER_URL, {"instId": f"{symbol}-USDT"})
-        except httpx.HTTPError as exc:
-            raise PriceError("行情服务暂时连接不上，请稍后再试。") from exc
-        except Exception as exc:  # noqa: BLE001
-            raise PriceError("行情服务暂时不可用，请稍后再试。") from exc
-        if str(payload.get("code")) != "0" or not payload.get("data"):
-            raise PriceError(f"OKX 没有 {symbol}/USDT 交易对，请检查币种代码。")
-        row = payload["data"][0]
-        rate, source = await self.cny_rate()
-        quote = Quote(
-            symbol, _decimal(row["last"]), _decimal(row.get("open24h") or row["last"]),
-            _decimal(row.get("high24h") or row["last"]), _decimal(row.get("low24h") or row["last"]),
-            rate, source, now,
-            _decimal(row["sodUtc8"]) if row.get("sodUtc8") else None,
-        )
+        row = None
+        okx_state = "missing"  # missing: OKX 明确没有；down: OKX 暂时连不上
+        if not self.router.route(symbol):
+            try:
+                payload = await self.fetch_json(TICKER_URL, {"instId": f"{symbol}-USDT"})
+            except Exception:  # noqa: BLE001 - OKX 连不上时也尝试备用交易所
+                okx_state = "down"
+            else:
+                code = str(payload.get("code")) if isinstance(payload, dict) else ""
+                if code == "0" and payload.get("data"):
+                    row = payload["data"][0]
+                elif code not in {"51001", "51000", "0"}:
+                    okx_state = "down"  # 限流（50011）等暂时性错误
+        if row is not None:
+            rate, source = await self.cny_rate()
+            quote = Quote(
+                symbol, _decimal(row["last"]), _decimal(row.get("open24h") or row["last"]),
+                _decimal(row.get("high24h") or row["last"]), _decimal(row.get("low24h") or row["last"]),
+                rate, source, now,
+                _decimal(row["sodUtc8"]) if row.get("sodUtc8") else None,
+            )
+        else:
+            quote = await self._fallback_quote(symbol, okx_state, now)
         self._cache[symbol] = (now, quote)
         if len(self._cache) > 500:
             self._cache.clear()
         return quote
 
 
+    async def _fallback_quote(self, symbol: str, okx_state: str, now: float) -> Quote:
+        try:
+            name, ticker = await self.router.fallback_ticker(
+                self.fetch_json, symbol, okx_missing=okx_state == "missing",
+            )
+        except ms.NotListed:
+            if okx_state == "down":
+                raise PriceError("行情服务暂时连接不上，请稍后再试。") from None
+            raise PriceError(
+                f"OKX 没有 {symbol}/USDT 交易对，{ms.FALLBACK_LABELS} 也都没有，请检查币种代码。"
+            ) from None
+        except ms.Unavailable:
+            if okx_state == "down":
+                raise PriceError("行情服务暂时连接不上，请稍后再试。") from None
+            raise PriceError(
+                f"OKX 没有 {symbol}/USDT 交易对，备用交易所行情暂时查不到（可能超时或限流），请稍后再试。"
+            ) from None
+        sod = await self.router.day_open(self.fetch_json, name, symbol)
+        rate, rate_source = await self.cny_rate()
+        return Quote(
+            symbol, ticker.last, ticker.open24h, ticker.high24h, ticker.low24h,
+            rate, rate_source, now, sod, self.router.label(name),
+        )
+
+
 def quote_text(quote: Quote, now: datetime | None = None) -> str:
     change = quote.change_pct
     arrow = "📈" if change > 0 else ("📉" if change < 0 else "➖")
     lines = [
-        f"💹 {quote.symbol}/USDT（OKX 现货）",
+        f"💹 {quote.symbol}/USDT（{quote.source} 现货）",
         f"最新价：{format_price(quote.last)} USDT",
     ]
+    if quote.source != "OKX":
+        lines.append(f"来源：{quote.source}")
     if quote.cny_rate:
         lines.append(
             f"折合：¥{format_price(quote.last * quote.cny_rate)}"
@@ -232,7 +276,8 @@ HELP_TEXT = (
     "💹 币价查询\n\n"
     "• 发送 /price btc，或发送「币价 btc」查询任意币种。\n"
     "• 直接发送常见币种代码（如 BTC、ETH、SOL）也会回复价格。\n"
-    "• 价格来自 OKX 现货 USDT 交易对，人民币按 OKX C2C 价格换算（失败时用美元汇率）。\n"
+    "• 价格来自 OKX 现货 USDT 交易对；OKX 没有的币（如 XMR）自动改查火币、KuCoin、Gate.io、MEXC，"
+    "结果里会注明来源。人民币按 OKX C2C 价格换算（失败时用美元汇率）。\n"
     "• 群管理员可在 群设置 → 💹 币价 中开关本群的币价回复。\n"
     "• 🔔 涨跌监控：查询结果下点「🔔 监控此币涨跌」，或 /pricealert btc 5 2"
     "（日涨跌 5%、10分钟涨跌 2% 提醒）；/pricealerts 查看，/pricealert del btc 删除。"

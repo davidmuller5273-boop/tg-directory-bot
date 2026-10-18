@@ -68,7 +68,7 @@ from .storage import (
 from .rich_content import button_content, buttons_markup, capture_buttons, capture_buttons_resolving, capture_content, content_entities, forward_channel_source, send_content, validate_content
 from . import quick_buttons
 from . import channel_manage
-from . import crypto_alert, crypto_price, life_guide, raffle_fair, raffle_parse, settings_wizard, sticker_clone
+from . import crypto_alert, crypto_price, life_guide, market_sources, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
@@ -14063,6 +14063,17 @@ RAFFLE_PARSE_WAIT_KEY = "raffle_parse_wait"
 RAFFLE_PARSE_TTL = 1800
 
 
+MARKET_ROUTER_KEY = "market_source_router"
+
+
+def market_router(bot_data: dict) -> market_sources.SourceRouter:
+    """币价查询和涨跌监控共用：记住每个币走哪个备用交易所（OKX 没有时）。"""
+    router = bot_data.get(MARKET_ROUTER_KEY)
+    if router is None:
+        router = bot_data[MARKET_ROUTER_KEY] = market_sources.SourceRouter()
+    return router
+
+
 def price_service(context: ContextTypes.DEFAULT_TYPE) -> crypto_price.PriceService:
     data = context.application.bot_data
     service = data.get(PRICE_SERVICE_KEY)
@@ -14073,7 +14084,7 @@ def price_service(context: ContextTypes.DEFAULT_TYPE) -> crypto_price.PriceServi
             async def c2c() -> Decimal:
                 quotes = await chain.okx_p2p_quotes("buy")
                 return Decimal(str(quotes[0].price))
-        service = crypto_price.PriceService(c2c_rate=c2c)
+        service = crypto_price.PriceService(c2c_rate=c2c, router=market_router(data))
         data[PRICE_SERVICE_KEY] = service
     return service
 
@@ -14905,7 +14916,7 @@ async def price_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYP
 def price_alert_poller(application: Application) -> crypto_alert.AlertPoller:
     poller = application.bot_data.get(PRICE_ALERT_POLLER_KEY)
     if poller is None:
-        poller = crypto_alert.AlertPoller()
+        poller = crypto_alert.AlertPoller(router=market_router(application.bot_data))
         application.bot_data[PRICE_ALERT_POLLER_KEY] = poller
     return poller
 
@@ -14917,7 +14928,8 @@ _ALERT_UNREACHABLE = (
 
 
 async def poll_price_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Background job: one OKX tickers request per round, only when monitors exist."""
+    """Background job: one OKX tickers request per round (plus fallback exchanges
+    for coins OKX doesn't list), only when monitors exist."""
     application = context.application
     store: DirectoryStore = application.bot_data["store"]
     rows = store.active_price_alerts()

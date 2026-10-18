@@ -164,6 +164,7 @@ tg_directory_bot/bot.py          Telegram 交互
 tg_directory_bot/web.py          Web 路由与后台业务
 tg_directory_bot/storage.py      数据模型与查询
 tg_directory_bot/chain.py        TronGrid、OKX、CoinGecko 数据源
+tg_directory_bot/market_sources.py 币价备用行情源（OKX 没有的币走火币/KuCoin/Gate.io/MEXC）
 tg_directory_bot/templates/      后台页面
 tg_directory_bot/static/         后台样式
 ~~~
