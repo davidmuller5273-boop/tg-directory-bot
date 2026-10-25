@@ -7,7 +7,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -17,6 +17,7 @@ from .chain import ChainQueryError, ChainService
 from .config import Config
 from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
+from .tron_draw import DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, parse_limit
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
 from .validation import parse_submission_payload
 
@@ -80,6 +81,51 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok", "database": str(config.db_path)}
+
+    # --- public TRON 单/双 draw statistics (no login; no admin data) ---
+    def tron_draw_payload(limit: int) -> dict:
+        rows = store.tron_draw_recent(limit)
+        cells, columns = bead_road([str(row["result"]) for row in rows])
+        singles = sum(1 for row in rows if row["result"] == SINGLE)
+        latest = rows[-1] if rows else None
+        return {
+            "limit": limit,
+            "count": len(rows),
+            "total_recorded": store.tron_draw_total(),
+            "counts": {"single": singles, "double": len(rows) - singles},
+            "columns": columns,
+            "max_rows": MAX_ROWS,
+            "cells": cells,
+            "latest": None if latest is None else int(latest["block_number"]),
+            "next_draw_block": None if latest is None else int(latest["block_number"]) + DRAW_INTERVAL,
+            "recent": [
+                {
+                    "block": int(row["block_number"]), "hash": str(row["block_hash"]),
+                    "digit": int(row["last_digit"]), "result": str(row["result"]),
+                    "ts": int(row["block_timestamp_ms"]),
+                    "time": format_beijing_timestamp_ms(row["block_timestamp_ms"])
+                    if row["block_timestamp_ms"] else "",
+                }
+                for row in reversed(rows[-20:])
+            ],
+        }
+
+    @app.get("/api/tron-draw")
+    async def tron_draw_api(limit: str = "100"):
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return JSONResponse(
+            tron_draw_payload(parse_limit(limit)), headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/tron-draw", response_class=HTMLResponse)
+    async def tron_draw_page(request: Request):
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return templates.TemplateResponse(
+            request=request, name="tron_draw.html", context={"request": request},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):

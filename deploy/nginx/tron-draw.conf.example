@@ -1,0 +1,29 @@
+# 波场 单/双 开奖走势页面：只对外开放 /tron-draw 和 /api/tron-draw，
+# 其余路径（含后台登录）一律 404。把 example.com 换成你自己的域名。
+server {
+    listen 80;
+    listen [::]:80;
+    server_name example.com;   # <-- 换成你的域名
+
+    location = / { return 302 /tron-draw; }
+
+    location = /tron-draw {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /api/tron-draw {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / { return 404; }
+}

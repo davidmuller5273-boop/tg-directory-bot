@@ -605,6 +605,14 @@ class DirectoryStore(FeatureStoreMixin):
                     last_success_at TEXT,
                     last_error TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS tron_draws (
+                    block_number INTEGER PRIMARY KEY,
+                    block_hash TEXT NOT NULL,
+                    last_digit INTEGER NOT NULL,
+                    result TEXT NOT NULL,
+                    block_timestamp_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS tron_monitors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     owner_id INTEGER NOT NULL,
@@ -2146,6 +2154,57 @@ class DirectoryStore(FeatureStoreMixin):
     def list_broadcasts(self, limit: int = 50) -> list[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    # --- TRON block-hash 单/双 draw history (permanent, never pruned) ---
+
+    def record_tron_draw(self, block_number: int, block_hash: str, timestamp_ms: int = 0) -> bool:
+        """Store one draw block; False when invalid or already recorded."""
+        from .tron_draw import draw_result, is_draw_block
+
+        parsed = draw_result(block_hash)
+        if parsed is None or not is_draw_block(block_number):
+            return False
+        digit, result = parsed
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO tron_draws
+                   (block_number, block_hash, last_digit, result, block_timestamp_ms)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (int(block_number), str(block_hash).strip().casefold(), digit, result,
+                 int(timestamp_ms or 0)),
+            )
+            return cursor.rowcount > 0
+
+    def tron_draw_existing(self, low: int, high: int) -> set[int]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT block_number FROM tron_draws WHERE block_number BETWEEN ? AND ?",
+                (int(low), int(high)),
+            ).fetchall()
+        return {int(row["block_number"]) for row in rows}
+
+    def tron_draw_recent(self, limit: int) -> list[sqlite3.Row]:
+        """Latest ``limit`` draws, oldest first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tron_draws ORDER BY block_number DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return list(reversed(rows))
+
+    def tron_draw_total(self) -> int:
+        with self.connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) AS n FROM tron_draws").fetchone()["n"])
+
+    def tron_draw_floor(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key='tron_draw_floor'"
+            ).fetchone()
+        return int(row["value"]) if row and str(row["value"]).isdigit() else 0
+
+    def set_tron_draw_floor(self, block_number: int) -> None:
+        self.set_setting("tron_draw_floor", str(int(block_number)))
 
     def get_settings(self) -> dict[str, str]:
         with self.connect() as conn:

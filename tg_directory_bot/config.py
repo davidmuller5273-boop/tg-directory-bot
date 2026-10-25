@@ -37,6 +37,11 @@ class Config:
     tron_cache_seconds: float = 5.0
     tron_fallback_nodes: tuple[str, ...] | None = None
     tron_block_scan: bool = True
+    tron_draw_stats: bool = True
+    tron_draw_confirmations: int = 20
+    tron_draw_initial_backfill: int = 500
+    tron_draw_max_backfill: int = 20000
+    tron_draw_backfill_per_step: int = 3
     tron_scan_lag_blocks: int = 1
     tron_scan_max_catchup_blocks: int = 1200
     tron_reconcile_seconds: int = 300
@@ -183,6 +188,12 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         ),
         tron_block_scan=os.getenv("TRON_BLOCK_SCAN", "1").strip().casefold()
         not in {"0", "false", "no", "off"},
+        tron_draw_stats=os.getenv("TRON_DRAW_STATS", "1").strip().casefold()
+        not in {"0", "false", "no", "off"},
+        tron_draw_confirmations=int(_float_env("TRON_DRAW_CONFIRMATIONS", 20, 1)),
+        tron_draw_initial_backfill=int(_float_env("TRON_DRAW_INITIAL_BACKFILL", 500, 1)),
+        tron_draw_max_backfill=int(_float_env("TRON_DRAW_MAX_BACKFILL", 20000, 1)),
+        tron_draw_backfill_per_step=int(_float_env("TRON_DRAW_BACKFILL_PER_STEP", 3, 1)),
         tron_scan_lag_blocks=int(_float_env("TRON_SCAN_LAG_BLOCKS", 1, 0)),
         tron_scan_max_catchup_blocks=int(_float_env("TRON_SCAN_MAX_CATCHUP_BLOCKS", 1200, 20)),
         tron_reconcile_seconds=int(_float_env("TRON_RECONCILE_SECONDS", 300, 30)),

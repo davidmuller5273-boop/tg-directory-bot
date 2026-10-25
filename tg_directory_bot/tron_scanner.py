@@ -382,6 +382,8 @@ class TronBlockScanner:
         self.head = 0
         self.head_ts = 0
         self._next_head_check = 0.0
+        # optional TronDrawRecorder (单/双 statistics), driven by step_draws()
+        self.draws = None
         self.stats = {"blocks": 0, "matches": 0, "requests": 0, "skipped": 0}
 
     async def _refresh_head(self, force: bool = False) -> None:
@@ -480,3 +482,14 @@ class TronBlockScanner:
         self.db.set("heartbeat", time.time())
         self.db.set("head", self.head)
         return scanned
+
+    async def step_draws(self) -> int:
+        """Record draw blocks (number % 20 == 0) with the scanner's head tracking.
+
+        Independent of the address watch list: runs even when nothing is
+        monitored. Shares the head request (at most one per ~3 s block).
+        """
+        if self.draws is None:
+            return 0
+        await self._refresh_head(force=not self.head)
+        return await self.draws.step(self.head)

@@ -278,6 +278,8 @@ sudo certbot --nginx -d 你的后台域名
 
 后台地址：https://你的后台域名/login
 
+波场 单/双 开奖走势页面（公开页 /tron-draw）及其独立域名/HTTPS 配置，见 `TRON_DRAW_CN.md`。
+
 ## 5. 备份
 
 后台“备份管理”页面可以立即创建并下载备份。命令行方式：

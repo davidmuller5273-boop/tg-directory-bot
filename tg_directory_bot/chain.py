@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import asyncio
 import hashlib
 import random
@@ -910,6 +911,22 @@ class ChainService:
         if is_busy_error(last_error):
             raise ChainQueryError(BUSY_MESSAGE)
         return {}
+
+    async def tron_block_header(self, number: int) -> tuple[str, int]:
+        """(block hash, timestamp ms) of block ``number`` — header only (~0.5 KB)."""
+        with fresh_requests():
+            async with self._http(timeout=10) as client:
+                payload = await self._node_post(
+                    client, "/wallet/getblock",
+                    {"id_or_num": str(int(number)), "detail": False}, prefer_public=True,
+                )
+        header = (payload.get("block_header") or {}).get("raw_data") or {}
+        block_hash = str(payload.get("blockID") or "").strip().casefold()
+        if int(header.get("number") or -1) != int(number) or not re.fullmatch(
+            r"[0-9a-f]{64}", block_hash
+        ):
+            raise ChainQueryError(f"节点尚无区块 {number}")
+        return block_hash, int(header.get("timestamp") or 0)
 
     async def tron_block_txinfo(self, number: int) -> list[dict]:
         """All transaction receipts/logs of block ``number`` (USDT Transfer logs).

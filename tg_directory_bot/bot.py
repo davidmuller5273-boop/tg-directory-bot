@@ -70,6 +70,7 @@ from . import quick_buttons
 from . import channel_manage
 from . import crypto_alert, crypto_price, life_guide, market_sources, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
+from .tron_draw import TronDrawRecorder
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
     beijing_now, beijing_now_text,
@@ -3750,6 +3751,12 @@ async def scan_tron_blocks(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.info("TRON block scanner waiting: %s", exc)
     except Exception:
         logging.exception("TRON block scanner step failed")
+    try:
+        await scanner.step_draws()
+    except ChainQueryError as exc:
+        logging.info("TRON draw recorder waiting: %s", exc)
+    except Exception:
+        logging.exception("TRON draw recorder step failed")
 
 
 async def sync_tron_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13834,6 +13841,15 @@ def setup_tron_monitoring(application: Application, config: Config, chain: Chain
             max_catchup=getattr(config, "tron_scan_max_catchup_blocks", 1200),
             use_events=bool(chain.governor.keys),
         )
+        if getattr(config, "tron_draw_stats", True):
+            application.bot_data["tron_scanner"].draws = TronDrawRecorder(
+                chain, application.bot_data["store"],
+                confirmations=getattr(config, "tron_draw_confirmations", 20),
+                initial_backfill=getattr(config, "tron_draw_initial_backfill", 500),
+                max_backfill=getattr(config, "tron_draw_max_backfill", 20000),
+                per_step=getattr(config, "tron_draw_backfill_per_step", 3),
+            )
+            logging.info("TRON 单/双 draw statistics enabled")
         logging.info(
             "TRON block scanner enabled (lag=%s blocks, max catch-up=%s blocks, "
             "USDT source=%s, db=%s)", getattr(config, "tron_scan_lag_blocks", 1),

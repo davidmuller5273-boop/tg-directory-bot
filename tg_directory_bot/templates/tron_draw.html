@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>开奖走势</title>
+<style>
+:root{--single:#12b886;--double:#f03e3e;--bg:#f4f6f8;--card:#fff;--text:#1f2933;--muted:#7b8794;--line:#e4e7eb}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:12px}
+.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+h1{font-size:18px;margin:0}
+.counts{font-size:16px;font-weight:600}
+.counts .s{color:var(--single)}.counts .d{color:var(--double)}
+.tabs{display:flex;gap:18px;border-bottom:1px solid var(--line);margin:12px 0 10px}
+.tab{padding:6px 2px;color:var(--muted);cursor:pointer;border:0;background:none;font-size:15px;border-bottom:2px solid transparent}
+.tab.on{color:var(--text);font-weight:600;border-bottom-color:var(--single)}
+.periods{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.periods button{border:1px solid var(--line);background:#fff;border-radius:16px;padding:4px 14px;font-size:14px;cursor:pointer}
+.periods button.on{background:var(--single);border-color:var(--single);color:#fff}
+.periods input{width:84px;padding:4px 8px;border:1px solid var(--line);border-radius:16px;font-size:14px}
+.road{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:6px}
+.grid{display:grid;grid-auto-flow:column;gap:4px;width:max-content}
+.cell{width:26px;height:26px}
+.bead{width:26px;height:26px;border-radius:50%;color:#fff;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center}
+.bead.s{background:var(--single)}.bead.d{background:var(--double)}
+.muted{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
+.hash{font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.hash b{color:var(--text);text-decoration:underline}
+.res.s{color:var(--single);font-weight:600}.res.d{color:var(--double);font-weight:600}
+.rule{font-size:12px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <div class="card">
+  <div class="head"><h1>开奖走势</h1><div class="counts"><span class="s">单 <span id="cs">-</span></span> / <span class="d">双 <span id="cd">-</span></span></div></div>
+  <div class="tabs"><button class="tab on" data-tab="block">区块走势</button><button class="tab" data-tab="mine">我的走势</button></div>
+  <div id="pane-block">
+   <div class="periods" id="periods">
+    <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+    <input id="custom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
+   </div>
+   <div class="road" id="road"><div class="grid" id="grid"></div></div>
+   <div class="muted" id="meta"></div>
+  </div>
+  <div id="pane-mine" hidden><p class="muted">暂无个人数据。</p></div>
+ </div>
+ <div class="card">
+  <strong>最近开奖</strong>
+  <table><thead><tr><th>区块</th><th>哈希（末位数字加粗）</th><th>结果</th></tr></thead><tbody id="recent"></tbody></table>
+ </div>
+ <div class="rule">规则：每 20 个区块开奖一次，区块高度以 00/20/40/60/80 结尾的区块为开奖块；取该区块哈希，忽略字母，取最后一位数字：1/3/5/7/9 为单，0/2/4/6/8 为双。数据每 10 秒自动刷新。</div>
+</div>
+<script>
+(function(){
+var limit=parseInt(localStorage.getItem("trondraw.limit")||"100",10)||100;
+var busy=false;
+function $(id){return document.getElementById(id)}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function hashHtml(h,d){var i=h.lastIndexOf(String(d));return esc(h.slice(0,i))+"<b>"+esc(h.charAt(i))+"</b>"+esc(h.slice(i+1))}
+function mark(){
+  var btns=document.querySelectorAll("#periods button[data-n]");
+  for(var i=0;i<btns.length;i++){btns[i].className=(parseInt(btns[i].getAttribute("data-n"),10)===limit)?"on":""}
+}
+function render(d){
+  $("cs").textContent=d.counts.single;$("cd").textContent=d.counts.double;
+  var g=$("grid");g.innerHTML="";
+  g.style.gridTemplateRows="repeat("+d.max_rows+",26px)";
+  g.style.gridTemplateColumns="repeat("+Math.max(d.columns,1)+",26px)";
+  d.cells.forEach(function(c){
+    var e=document.createElement("div");e.className="bead "+(c.v==="单"?"s":"d");e.textContent=c.v;
+    e.style.gridColumn=c.c+1;e.style.gridRow=c.r+1;g.appendChild(e);
+  });
+  var road=$("road");road.scrollLeft=road.scrollWidth;
+  $("meta").textContent="近 "+d.count+" 期（已记录 "+d.total_recorded+" 期）"+(d.latest?" · 最新开奖块 #"+d.latest:"")+(d.next_draw_block?" · 下一开奖块 #"+d.next_draw_block:"");
+  $("recent").innerHTML=d.recent.map(function(r){
+    return "<tr><td>#"+r.block+"<div class=muted>"+esc(r.time)+"</div></td><td class=hash>"+hashHtml(r.hash,r.digit)+"</td><td class='res "+(r.result==="单"?"s":"d")+"'>"+r.result+"</td></tr>"
+  }).join("")||"<tr><td colspan=3 class=muted>暂无数据，等待下一个开奖块。</td></tr>";
+}
+function load(){
+  if(busy)return;busy=true;
+  fetch("/api/tron-draw?limit="+limit,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
+}
+function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark();load()}
+document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(parseInt(b.getAttribute("data-n"),10))}});
+$("go").onclick=function(){var v=parseInt($("custom").value,10);if(v>0)setLimit(v)};
+$("custom").onkeydown=function(e){if(e.key==="Enter")$("go").onclick()};
+document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){
+  document.querySelectorAll(".tab").forEach(function(x){x.className="tab"});t.className="tab on";
+  $("pane-block").hidden=t.getAttribute("data-tab")!=="block";$("pane-mine").hidden=t.getAttribute("data-tab")!=="mine";
+}});
+mark();load();setInterval(load,10000);
+})();
+</script>
+</body>
+</html>
