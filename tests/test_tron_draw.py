@@ -224,12 +224,13 @@ class WebTest(unittest.TestCase):
                 self.assertEqual(len(data["cells"]), 10)
                 self.assertEqual(data["recent"][0]["block"], 600)
                 ref = data["reference"]
-                self.assertEqual(set(ref["algorithms"]), {"trend", "dragon", "ratio"})
+                self.assertEqual(set(ref["algorithms"]), {"trend", "dragon", "ratio", "minority"})
+                self.assertEqual(ref["algorithms"]["minority"]["total"], 10)
                 self.assertIn("统计仅供参考", ref["note"])
-                self.assertEqual(ref["params"], {"streak_n": 3, "recent_m": 20, "mode": "follow"})
+                self.assertEqual(ref["params"], {"streak_n": 3, "recent_m": 20, "mode": "follow", "minority_m": 10})
                 self.assertEqual(ref["algorithms"]["trend"]["total"], 10)  # prior history feeds window
-                tuned = client.get("/api/tron-draw?limit=10&streak_n=2&recent_m=5&mode=cut").json()
-                self.assertEqual(tuned["reference"]["params"], {"streak_n": 2, "recent_m": 5, "mode": "cut"})
+                tuned = client.get("/api/tron-draw?limit=10&streak_n=2&recent_m=5&mode=cut&minority_m=7").json()
+                self.assertEqual(tuned["reference"]["params"], {"streak_n": 2, "recent_m": 5, "mode": "cut", "minority_m": 7})
                 self.assertEqual(tuned["count"], 10)
                 self.assertEqual(client.get("/api/tron-draw?limit=500").json()["count"], 30)
                 self.assertEqual(client.get("/api/tron-draw?limit=zzz").json()["limit"], 100)
@@ -293,6 +294,33 @@ class ReferenceTest(unittest.TestCase):
         # only the last M periods count
         self.assertEqual(td.reference_pick("ratio", seq("ddddsss"), recent_m=3), S)
 
+    def test_minority_picks_less_frequent_side(self):
+        self.assertEqual(td.reference_pick("minority", seq("ssdsd"), minority_m=5), D)  # 3单2双
+        self.assertEqual(td.reference_pick("minority", seq("dddss"), minority_m=5), S)  # 3双2单
+        self.assertEqual(td.reference_pick("minority", seq("ssdd"), minority_m=4), D)  # tie -> last
+        self.assertEqual(td.reference_pick("minority", seq("ddss"), minority_m=4), S)
+        # only the last M periods count (older 单 ignored)
+        self.assertEqual(td.reference_pick("minority", seq("ssssdds"), minority_m=3), S)
+        self.assertEqual(td.reference_pick("minority", seq("sssddds"), minority_m=3), S)
+        self.assertEqual(td.reference_pick("minority", seq("dsssdd"), minority_m=3), S)
+        self.assertIsNone(td.reference_pick("minority", []))
+        # exactly the opposite of 近期占比 unless tied
+        for text in ("sdsssd", "ddsdsd", "sssdd"):
+            r = seq(text)
+            a = td.reference_pick("ratio", r, recent_m=5)
+            b = td.reference_pick("minority", r, minority_m=5)
+            window = r[-5:]
+            if window.count(S) != window.count(D):
+                self.assertNotEqual(a, b)
+            else:
+                self.assertEqual(a, b)
+
+    def test_minority_backtest(self):
+        # m=2 on s s d d s d: idx2 window(ss)->d hit; idx3 (sd tie)->last d hit;
+        # idx4 (dd)->s hit; idx5 (ds tie)->last s miss(d)  => 3/4 (idx1: window s -> d vs s miss)
+        r = seq("ssddsd")
+        self.assertEqual(td.backtest("minority", r, minority_m=2), {"hits": 3, "total": 5, "rate": 60.0})
+
     def test_backtest_counts(self):
         # trend on s s d d s: picks for idx1..4 = s,s,d,d vs s,d,d,s -> hits 2/4
         self.assertEqual(td.backtest("trend", seq("ssdds")), {"hits": 2, "total": 4, "rate": 50.0})
@@ -302,9 +330,10 @@ class ReferenceTest(unittest.TestCase):
 
     def test_backtest_has_no_look_ahead(self):
         base = seq("sdssdddsdsssddsd")
+        self.assertIn("minority", td.ALGORITHMS)
         for algo in td.ALGORITHMS:
-            for params in ({"streak_n": 2, "recent_m": 4, "mode": "cut"},
-                           {"streak_n": 3, "recent_m": 7, "mode": "follow"}):
+            for params in ({"streak_n": 2, "recent_m": 4, "mode": "cut", "minority_m": 3},
+                           {"streak_n": 3, "recent_m": 7, "mode": "follow", "minority_m": 6}):
                 for i in range(1, len(base)):
                     picks = td.reference_pick(algo, base, i, **params)
                     # changing the judged period and anything after it must not change the pick
@@ -312,17 +341,21 @@ class ReferenceTest(unittest.TestCase):
                     self.assertEqual(picks, td.reference_pick(algo, altered, i, **params))
                     self.assertEqual(picks, td.reference_pick(algo, base[:i], **params))
         # whole-backtest equivalence: flipping the final result only changes the last judgement
-        a = td.backtest("ratio", base, recent_m=5)
         flipped = base[:-1] + [S if base[-1] == D else D]
-        b = td.backtest("ratio", flipped, recent_m=5)
-        self.assertEqual(a["total"], b["total"])
-        self.assertEqual(abs(a["hits"] - b["hits"]), 1)
+        for algo, kw in (("ratio", {"recent_m": 5}), ("minority", {"minority_m": 5})):
+            a = td.backtest(algo, base, **kw)
+            b = td.backtest(algo, flipped, **kw)
+            self.assertEqual(a["total"], b["total"])
+            self.assertEqual(abs(a["hits"] - b["hits"]), 1)
 
     def test_panel_window_uses_prior_lookback(self):
         r = seq("sssddsdsd")
         panel = td.reference_panel(r, 4, streak_n=3, recent_m=5, mode="cut")
         # window = last 4 (d s d s? -> "sdsd"); all 4 judged from earlier history
         self.assertEqual(panel["algorithms"]["trend"]["total"], 4)
+        self.assertEqual(panel["algorithms"]["minority"]["total"], 4)
+        self.assertIn(panel["algorithms"]["minority"]["next"], (S, D))
+        self.assertEqual(panel["params"]["minority_m"], 10)
         self.assertEqual(panel["current_streak"], 1)
         self.assertEqual(panel["longest_streak"], 1)
         self.assertEqual(panel["ratio"], {"single": 50.0, "double": 50.0})
@@ -334,9 +367,10 @@ class ReferenceTest(unittest.TestCase):
         self.assertEqual(empty["algorithms"]["trend"]["total"], 0)
 
     def test_param_parsing(self):
-        self.assertEqual(td.parse_reference_params("", "", ""), (3, 20, "follow"))
-        self.assertEqual(td.parse_reference_params("5", "999", "CUT"), (5, 200, "cut"))
-        self.assertEqual(td.parse_reference_params("x", "0", "bad"), (3, 1, "follow"))
+        self.assertEqual(td.parse_reference_params("", "", ""), (3, 20, "follow", 10))
+        self.assertEqual(td.parse_reference_params("5", "999", "CUT", "7"), (5, 200, "cut", 7))
+        self.assertEqual(td.parse_reference_params("x", "0", "bad", "999"), (3, 1, "follow", 200))
+        self.assertEqual(td.parse_reference_params("x", "0", "bad", "z"), (3, 1, "follow", 10))
 
 
 class WiringTest(unittest.TestCase):

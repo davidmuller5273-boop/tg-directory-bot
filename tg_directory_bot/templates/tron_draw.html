@@ -65,18 +65,19 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
  <div class="card ref">
   <div class="head"><strong>参考</strong><span class="muted" id="refnext">下一期参考方向</span></div>
   <div class="algos" id="algos">
-   <button data-a="trend">顺势</button><button data-a="dragon">跟龙/斩龙</button><button data-a="ratio">近期占比</button>
+   <button data-a="trend">顺势</button><button data-a="dragon">跟龙/斩龙</button><button data-a="ratio">近期占比</button><button data-a="minority">近期少数方</button>
   </div>
   <div class="set">
    <label>龙长≥N <input id="setn" type="number" min="2" max="50" inputmode="numeric"></label>
    <label>模式 <select id="setmode"><option value="follow">跟龙</option><option value="cut">斩龙</option></select></label>
    <label>近M期 <input id="setm" type="number" min="1" max="200" inputmode="numeric"></label>
+   <label>少数方M <input id="setmn" type="number" min="1" max="200" inputmode="numeric"></label>
   </div>
   <div class="big" id="refbig">-</div>
   <div class="muted" id="refrate"></div>
   <table><thead><tr><th>算法</th><th>参考</th><th>回测命中（所选期数）</th></tr></thead><tbody id="reftable"></tbody></table>
   <div class="stats" id="refstats"></div>
-  <div class="note">开奖为哈希末位，单双各约50%，统计仅供参考。</div>
+  <div class="note">开奖为哈希末位，单双各约50%，各算法命中率理论上也约50%，统计仅供参考。</div>
  </div>
  <div class="card">
   <strong>最近开奖</strong>
@@ -88,8 +89,9 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 (function(){
 var limit=parseInt(localStorage.getItem("trondraw.limit")||"100",10)||100;
 var busy=false;
-var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比"};
+var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比",minority:"近期少数方"};
 var cfg={n:clamp(localStorage.getItem("trondraw.n"),3,2,50),m:clamp(localStorage.getItem("trondraw.m"),20,1,200),
+ mn:clamp(localStorage.getItem("trondraw.mn"),10,1,200),
  mode:localStorage.getItem("trondraw.mode")==="cut"?"cut":"follow",algo:localStorage.getItem("trondraw.algo")||"trend"};
 if(!ALG[cfg.algo])cfg.algo="trend";
 function clamp(v,d,lo,hi){v=parseInt(v,10);if(isNaN(v))v=d;return Math.max(lo,Math.min(hi,v))}
@@ -110,7 +112,7 @@ function renderRef(r){
   $("refrate").textContent=a.total?("回测命中 "+a.hits+"/"+a.total+"（"+a.rate+"%）"):"数据不足，暂无回测";
   $("reftable").innerHTML=Object.keys(ALG).map(function(k){
     var x=r.algorithms[k];
-    return "<tr><td>"+(k==="dragon"?(cfg.mode==="cut"?"斩龙(N="+cfg.n+")":"跟龙(N="+cfg.n+")"):k==="ratio"?"近期占比(M="+cfg.m+")":ALG[k])+"</td><td class='res "+(x.next?cls(x.next):"")+"'>"+(x.next||"-")+"</td><td>"+(x.total?x.hits+"/"+x.total+"（"+x.rate+"%）":"-")+"</td></tr>"
+    return "<tr><td>"+(k==="dragon"?(cfg.mode==="cut"?"斩龙(N="+cfg.n+")":"跟龙(N="+cfg.n+")"):k==="ratio"?"近期占比(M="+cfg.m+")":k==="minority"?"近期少数方(M="+cfg.mn+")":ALG[k])+"</td><td class='res "+(x.next?cls(x.next):"")+"'>"+(x.next||"-")+"</td><td>"+(x.total?x.hits+"/"+x.total+"（"+x.rate+"%）":"-")+"</td></tr>"
   }).join("");
   var sv=r.current_value?(r.current_streak+" 连"+r.current_value):"-";
   $("refstats").innerHTML="<div><span>当前连续：</span>"+sv+"</div><div><span>最长连续：</span>"+r.longest_streak+"</div>"+
@@ -139,7 +141,7 @@ function render(d){
 }
 function load(){
   if(busy)return;busy=true;
-  fetch("/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
+  fetch("/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
 }
 function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark();load()}
 document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(parseInt(b.getAttribute("data-n"),10))}});
@@ -150,12 +152,12 @@ document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){
   $("pane-block").hidden=t.getAttribute("data-tab")!=="block";$("pane-mine").hidden=t.getAttribute("data-tab")!=="mine";
 }});
 function saveCfg(){
-  cfg.n=clamp($("setn").value,3,2,50);cfg.m=clamp($("setm").value,20,1,200);cfg.mode=$("setmode").value==="cut"?"cut":"follow";
-  localStorage.setItem("trondraw.n",cfg.n);localStorage.setItem("trondraw.m",cfg.m);localStorage.setItem("trondraw.mode",cfg.mode);localStorage.setItem("trondraw.algo",cfg.algo);
+  cfg.n=clamp($("setn").value,3,2,50);cfg.m=clamp($("setm").value,20,1,200);cfg.mn=clamp($("setmn").value,10,1,200);cfg.mode=$("setmode").value==="cut"?"cut":"follow";
+  localStorage.setItem("trondraw.n",cfg.n);localStorage.setItem("trondraw.m",cfg.m);localStorage.setItem("trondraw.mn",cfg.mn);localStorage.setItem("trondraw.mode",cfg.mode);localStorage.setItem("trondraw.algo",cfg.algo);
   load();
 }
-$("setn").value=cfg.n;$("setm").value=cfg.m;$("setmode").value=cfg.mode;
-$("setn").onchange=$("setm").onchange=$("setmode").onchange=saveCfg;
+$("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;
+$("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;
 document.querySelectorAll("#algos button").forEach(function(b){b.onclick=function(){cfg.algo=b.getAttribute("data-a");markAlgo();saveCfg()}});
 markAlgo();
 mark();load();setInterval(load,10000);

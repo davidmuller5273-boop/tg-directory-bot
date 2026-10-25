@@ -88,13 +88,14 @@ def create_app(config: Config) -> FastAPI:
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
     def tron_draw_payload(
         limit: int, streak_n: int = 3, recent_m: int = 20, mode: str = "follow",
+        minority_m: int = 10,
     ) -> dict:
-        extra = lookback_needed(streak_n, recent_m)
+        extra = lookback_needed(streak_n, recent_m, minority_m)
         all_rows = store.tron_draw_recent(limit + extra)
         rows = all_rows[-limit:]
         reference = reference_panel(
             [str(row["result"]) for row in all_rows], limit,
-            streak_n=streak_n, recent_m=recent_m, mode=mode,
+            streak_n=streak_n, recent_m=recent_m, mode=mode, minority_m=minority_m,
         )
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
@@ -125,12 +126,13 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/tron-draw")
     async def tron_draw_api(
         limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
+        minority_m: str = "",
     ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
         return JSONResponse(
             tron_draw_payload(
-                parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode),
+                parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
             ),
             headers={"Cache-Control": "no-store"},
         )

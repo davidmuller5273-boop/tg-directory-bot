@@ -84,9 +84,10 @@ def parse_limit(raw, default: int = 100, maximum: int = 5000) -> int:
 
 DEFAULT_STREAK_N = 3
 DEFAULT_RECENT_M = 20
+DEFAULT_MINORITY_M = 10
 MODE_FOLLOW = "follow"  # 跟龙
 MODE_CUT = "cut"  # 斩龙
-ALGORITHMS = ("trend", "dragon", "ratio")  # 顺势 / 跟龙·斩龙 / 近期占比
+ALGORITHMS = ("trend", "dragon", "ratio", "minority")  # 顺势 / 跟龙·斩龙 / 近期占比 / 近期少数方
 REFERENCE_NOTE = "开奖为哈希末位，单双各约50%，统计仅供参考"
 
 
@@ -109,7 +110,7 @@ def streak_at(results: list[str], end: int | None = None) -> int:
 def reference_pick(
     algorithm: str, results: list[str], end: int | None = None, *,
     streak_n: int = DEFAULT_STREAK_N, recent_m: int = DEFAULT_RECENT_M,
-    mode: str = MODE_FOLLOW,
+    mode: str = MODE_FOLLOW, minority_m: int = DEFAULT_MINORITY_M,
 ) -> str | None:
     """Reference direction for the period after ``results[:end]``.
 
@@ -133,6 +134,13 @@ def reference_pick(
         if singles == doubles:
             return last
         return SINGLE if singles > doubles else DOUBLE
+    if algorithm == "minority":  # 近期少数方
+        window = results[max(0, end - minority_m):end]
+        singles = sum(1 for value in window if value == SINGLE)
+        doubles = len(window) - singles
+        if singles == doubles:
+            return last
+        return SINGLE if singles < doubles else DOUBLE
     raise ValueError(f"unknown algorithm: {algorithm}")
 
 
@@ -171,13 +179,14 @@ def omissions(results: list[str]) -> dict:
     return out
 
 
-def lookback_needed(streak_n: int, recent_m: int) -> int:
-    return max(1, int(streak_n), int(recent_m))
+def lookback_needed(streak_n: int, recent_m: int, minority_m: int = DEFAULT_MINORITY_M) -> int:
+    return max(1, int(streak_n), int(recent_m), int(minority_m))
 
 
 def reference_panel(
     results: list[str], limit: int, *, streak_n: int = DEFAULT_STREAK_N,
     recent_m: int = DEFAULT_RECENT_M, mode: str = MODE_FOLLOW,
+    minority_m: int = DEFAULT_MINORITY_M,
 ) -> dict:
     """``results``: oldest first, ideally ``limit`` + lookback_needed() entries.
 
@@ -186,7 +195,9 @@ def reference_panel(
     """
     window_start = max(0, len(results) - int(limit))
     window = results[window_start:]
-    params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode}
+    params = {
+        "streak_n": streak_n, "recent_m": recent_m, "mode": mode, "minority_m": minority_m,
+    }
     singles = sum(1 for value in window if value == SINGLE)
     total = len(window)
     algorithms = {}
@@ -209,11 +220,15 @@ def reference_panel(
     }
 
 
-def parse_reference_params(streak_n, recent_m, mode) -> tuple[int, int, str]:
+def parse_reference_params(
+    streak_n, recent_m, mode, minority_m="",
+) -> tuple[int, int, str, int]:
     return (
         parse_limit(streak_n, DEFAULT_STREAK_N, 50) if str(streak_n).strip() else DEFAULT_STREAK_N,
         parse_limit(recent_m, DEFAULT_RECENT_M, 200) if str(recent_m).strip() else DEFAULT_RECENT_M,
         MODE_CUT if str(mode).strip().casefold() == MODE_CUT else MODE_FOLLOW,
+        parse_limit(minority_m, DEFAULT_MINORITY_M, 200)
+        if str(minority_m).strip() else DEFAULT_MINORITY_M,
     )
 
 
