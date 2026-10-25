@@ -17,7 +17,10 @@ from .chain import ChainQueryError, ChainService
 from .config import Config
 from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
-from .tron_draw import DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, parse_limit
+from .tron_draw import (
+    DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, lookback_needed, parse_limit,
+    parse_reference_params, reference_panel,
+)
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
 from .validation import parse_submission_payload
 
@@ -83,8 +86,16 @@ def create_app(config: Config) -> FastAPI:
         return {"status": "ok", "database": str(config.db_path)}
 
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
-    def tron_draw_payload(limit: int) -> dict:
-        rows = store.tron_draw_recent(limit)
+    def tron_draw_payload(
+        limit: int, streak_n: int = 3, recent_m: int = 20, mode: str = "follow",
+    ) -> dict:
+        extra = lookback_needed(streak_n, recent_m)
+        all_rows = store.tron_draw_recent(limit + extra)
+        rows = all_rows[-limit:]
+        reference = reference_panel(
+            [str(row["result"]) for row in all_rows], limit,
+            streak_n=streak_n, recent_m=recent_m, mode=mode,
+        )
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
         latest = rows[-1] if rows else None
@@ -96,6 +107,7 @@ def create_app(config: Config) -> FastAPI:
             "columns": columns,
             "max_rows": MAX_ROWS,
             "cells": cells,
+            "reference": reference,
             "latest": None if latest is None else int(latest["block_number"]),
             "next_draw_block": None if latest is None else int(latest["block_number"]) + DRAW_INTERVAL,
             "recent": [
@@ -111,11 +123,16 @@ def create_app(config: Config) -> FastAPI:
         }
 
     @app.get("/api/tron-draw")
-    async def tron_draw_api(limit: str = "100"):
+    async def tron_draw_api(
+        limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
+    ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
         return JSONResponse(
-            tron_draw_payload(parse_limit(limit)), headers={"Cache-Control": "no-store"},
+            tron_draw_payload(
+                parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode),
+            ),
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/tron-draw", response_class=HTMLResponse)

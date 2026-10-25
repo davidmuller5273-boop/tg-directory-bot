@@ -80,6 +80,143 @@ def parse_limit(raw, default: int = 100, maximum: int = 5000) -> int:
     return max(1, min(maximum, value))
 
 
+# --- 参考方向 (fixed algorithms, pure history statistics, no look-ahead) ---
+
+DEFAULT_STREAK_N = 3
+DEFAULT_RECENT_M = 20
+MODE_FOLLOW = "follow"  # 跟龙
+MODE_CUT = "cut"  # 斩龙
+ALGORITHMS = ("trend", "dragon", "ratio")  # 顺势 / 跟龙·斩龙 / 近期占比
+REFERENCE_NOTE = "开奖为哈希末位，单双各约50%，统计仅供参考"
+
+
+def _opposite(value: str) -> str:
+    return DOUBLE if value == SINGLE else SINGLE
+
+
+def streak_at(results: list[str], end: int | None = None) -> int:
+    """Length of the streak that ends at ``results[end - 1]`` (0 if empty)."""
+    end = len(results) if end is None else end
+    if end <= 0:
+        return 0
+    last = results[end - 1]
+    n = 1
+    while end - 1 - n >= 0 and results[end - 1 - n] == last:
+        n += 1
+    return n
+
+
+def reference_pick(
+    algorithm: str, results: list[str], end: int | None = None, *,
+    streak_n: int = DEFAULT_STREAK_N, recent_m: int = DEFAULT_RECENT_M,
+    mode: str = MODE_FOLLOW,
+) -> str | None:
+    """Reference direction for the period after ``results[:end]``.
+
+    Only ``results[:end]`` is read, so a backtest at index ``end`` can never
+    see the result it is judged against.
+    """
+    end = len(results) if end is None else end
+    if end <= 0:
+        return None
+    last = results[end - 1]
+    if algorithm == "trend":  # 顺势
+        return last
+    if algorithm == "dragon":  # 跟龙/斩龙
+        if streak_at(results, end) >= streak_n and mode == MODE_CUT:
+            return _opposite(last)
+        return last
+    if algorithm == "ratio":  # 近期占比
+        window = results[max(0, end - recent_m):end]
+        singles = sum(1 for value in window if value == SINGLE)
+        doubles = len(window) - singles
+        if singles == doubles:
+            return last
+        return SINGLE if singles > doubles else DOUBLE
+    raise ValueError(f"unknown algorithm: {algorithm}")
+
+
+def backtest(
+    algorithm: str, results: list[str], start: int = 1, **params,
+) -> dict:
+    """Simulate on every index >= ``start`` using only earlier results."""
+    hits = total = 0
+    for index in range(max(1, start), len(results)):
+        pick = reference_pick(algorithm, results, index, **params)
+        total += 1
+        hits += pick == results[index]
+    return {"hits": hits, "total": total, "rate": round(hits * 100 / total, 1) if total else None}
+
+
+def longest_streak(results: list[str]) -> int:
+    best = run = 0
+    previous = None
+    for value in results:
+        run = run + 1 if value == previous else 1
+        best = max(best, run)
+        previous = value
+    return best
+
+
+def omissions(results: list[str]) -> dict:
+    """Periods since 单 / 双 last appeared (0 = the latest period)."""
+    out = {}
+    for key, label in (("single", SINGLE), ("double", DOUBLE)):
+        gap = 0
+        for value in reversed(results):
+            if value == label:
+                break
+            gap += 1
+        out[key] = gap
+    return out
+
+
+def lookback_needed(streak_n: int, recent_m: int) -> int:
+    return max(1, int(streak_n), int(recent_m))
+
+
+def reference_panel(
+    results: list[str], limit: int, *, streak_n: int = DEFAULT_STREAK_N,
+    recent_m: int = DEFAULT_RECENT_M, mode: str = MODE_FOLLOW,
+) -> dict:
+    """``results``: oldest first, ideally ``limit`` + lookback_needed() entries.
+
+    Stats are for the last ``limit`` results; every backtested period in that
+    window is predicted from all results before it (extra lookback included).
+    """
+    window_start = max(0, len(results) - int(limit))
+    window = results[window_start:]
+    params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode}
+    singles = sum(1 for value in window if value == SINGLE)
+    total = len(window)
+    algorithms = {}
+    for name in ALGORITHMS:
+        result = backtest(name, results, window_start, **params)
+        result["next"] = reference_pick(name, results, **params)
+        algorithms[name] = result
+    return {
+        "note": REFERENCE_NOTE,
+        "params": params,
+        "current_streak": streak_at(window),
+        "current_value": window[-1] if window else None,
+        "longest_streak": longest_streak(window),
+        "ratio": {
+            "single": round(singles * 100 / total, 1) if total else None,
+            "double": round((total - singles) * 100 / total, 1) if total else None,
+        },
+        "omission": omissions(window),
+        "algorithms": algorithms,
+    }
+
+
+def parse_reference_params(streak_n, recent_m, mode) -> tuple[int, int, str]:
+    return (
+        parse_limit(streak_n, DEFAULT_STREAK_N, 50) if str(streak_n).strip() else DEFAULT_STREAK_N,
+        parse_limit(recent_m, DEFAULT_RECENT_M, 200) if str(recent_m).strip() else DEFAULT_RECENT_M,
+        MODE_CUT if str(mode).strip().casefold() == MODE_CUT else MODE_FOLLOW,
+    )
+
+
 class TronDrawRecorder:
     """Records draw blocks; back-fills the ones missed while the bot was down."""
 

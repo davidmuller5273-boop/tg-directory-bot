@@ -33,6 +33,17 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .hash{font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
 .hash b{color:var(--text);text-decoration:underline}
 .res.s{color:var(--single);font-weight:600}.res.d{color:var(--double);font-weight:600}
+.ref .big{font-size:34px;font-weight:700;line-height:1.2}
+.ref .big.s{color:var(--single)}.ref .big.d{color:var(--double)}
+.algos{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.algos button{border:1px solid var(--line);background:#fff;border-radius:16px;padding:4px 12px;font-size:14px;cursor:pointer}
+.algos button.on{background:#364fc7;border-color:#364fc7;color:#fff}
+.set{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;color:var(--muted);margin:6px 0}
+.set input,.set select{padding:3px 6px;border:1px solid var(--line);border-radius:8px;font-size:13px;width:64px}
+.set select{width:auto}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 12px;font-size:13px;margin-top:8px}
+.stats div span{color:var(--muted)}
+.note{background:#fff9db;color:#8a6d00;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
 .rule{font-size:12px;color:var(--muted);line-height:1.6}
 </style>
 </head>
@@ -51,6 +62,22 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   </div>
   <div id="pane-mine" hidden><p class="muted">暂无个人数据。</p></div>
  </div>
+ <div class="card ref">
+  <div class="head"><strong>参考</strong><span class="muted" id="refnext">下一期参考方向</span></div>
+  <div class="algos" id="algos">
+   <button data-a="trend">顺势</button><button data-a="dragon">跟龙/斩龙</button><button data-a="ratio">近期占比</button>
+  </div>
+  <div class="set">
+   <label>龙长≥N <input id="setn" type="number" min="2" max="50" inputmode="numeric"></label>
+   <label>模式 <select id="setmode"><option value="follow">跟龙</option><option value="cut">斩龙</option></select></label>
+   <label>近M期 <input id="setm" type="number" min="1" max="200" inputmode="numeric"></label>
+  </div>
+  <div class="big" id="refbig">-</div>
+  <div class="muted" id="refrate"></div>
+  <table><thead><tr><th>算法</th><th>参考</th><th>回测命中（所选期数）</th></tr></thead><tbody id="reftable"></tbody></table>
+  <div class="stats" id="refstats"></div>
+  <div class="note">开奖为哈希末位，单双各约50%，统计仅供参考。</div>
+ </div>
  <div class="card">
   <strong>最近开奖</strong>
   <table><thead><tr><th>区块</th><th>哈希（末位数字加粗）</th><th>结果</th></tr></thead><tbody id="recent"></tbody></table>
@@ -61,6 +88,11 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 (function(){
 var limit=parseInt(localStorage.getItem("trondraw.limit")||"100",10)||100;
 var busy=false;
+var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比"};
+var cfg={n:clamp(localStorage.getItem("trondraw.n"),3,2,50),m:clamp(localStorage.getItem("trondraw.m"),20,1,200),
+ mode:localStorage.getItem("trondraw.mode")==="cut"?"cut":"follow",algo:localStorage.getItem("trondraw.algo")||"trend"};
+if(!ALG[cfg.algo])cfg.algo="trend";
+function clamp(v,d,lo,hi){v=parseInt(v,10);if(isNaN(v))v=d;return Math.max(lo,Math.min(hi,v))}
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 function hashHtml(h,d){var i=h.lastIndexOf(String(d));return esc(h.slice(0,i))+"<b>"+esc(h.charAt(i))+"</b>"+esc(h.slice(i+1))}
@@ -68,7 +100,29 @@ function mark(){
   var btns=document.querySelectorAll("#periods button[data-n]");
   for(var i=0;i<btns.length;i++){btns[i].className=(parseInt(btns[i].getAttribute("data-n"),10)===limit)?"on":""}
 }
+function cls(v){return v==="单"?"s":"d"}
+function renderRef(r){
+  var name=cfg.algo==="dragon"?(cfg.mode==="cut"?"斩龙":"跟龙"):ALG[cfg.algo];
+  var a=r.algorithms[cfg.algo];
+  var big=$("refbig");
+  big.textContent=a.next||"-";big.className="big "+(a.next?cls(a.next):"");
+  $("refnext").textContent="下一期参考方向 · "+name;
+  $("refrate").textContent=a.total?("回测命中 "+a.hits+"/"+a.total+"（"+a.rate+"%）"):"数据不足，暂无回测";
+  $("reftable").innerHTML=Object.keys(ALG).map(function(k){
+    var x=r.algorithms[k];
+    return "<tr><td>"+(k==="dragon"?(cfg.mode==="cut"?"斩龙(N="+cfg.n+")":"跟龙(N="+cfg.n+")"):k==="ratio"?"近期占比(M="+cfg.m+")":ALG[k])+"</td><td class='res "+(x.next?cls(x.next):"")+"'>"+(x.next||"-")+"</td><td>"+(x.total?x.hits+"/"+x.total+"（"+x.rate+"%）":"-")+"</td></tr>"
+  }).join("");
+  var sv=r.current_value?(r.current_streak+" 连"+r.current_value):"-";
+  $("refstats").innerHTML="<div><span>当前连续：</span>"+sv+"</div><div><span>最长连续：</span>"+r.longest_streak+"</div>"+
+   "<div><span>单占比：</span>"+(r.ratio.single===null?"-":r.ratio.single+"%")+"</div><div><span>双占比：</span>"+(r.ratio.double===null?"-":r.ratio.double+"%")+"</div>"+
+   "<div><span>单遗漏：</span>"+r.omission.single+" 期</div><div><span>双遗漏：</span>"+r.omission.double+" 期</div>";
+}
+function markAlgo(){
+  var b=document.querySelectorAll("#algos button");
+  for(var i=0;i<b.length;i++)b[i].className=b[i].getAttribute("data-a")===cfg.algo?"on":"";
+}
 function render(d){
+  renderRef(d.reference);
   $("cs").textContent=d.counts.single;$("cd").textContent=d.counts.double;
   var g=$("grid");g.innerHTML="";
   g.style.gridTemplateRows="repeat("+d.max_rows+",26px)";
@@ -85,7 +139,7 @@ function render(d){
 }
 function load(){
   if(busy)return;busy=true;
-  fetch("/api/tron-draw?limit="+limit,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
+  fetch("/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
 }
 function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark();load()}
 document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(parseInt(b.getAttribute("data-n"),10))}});
@@ -95,6 +149,15 @@ document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){
   document.querySelectorAll(".tab").forEach(function(x){x.className="tab"});t.className="tab on";
   $("pane-block").hidden=t.getAttribute("data-tab")!=="block";$("pane-mine").hidden=t.getAttribute("data-tab")!=="mine";
 }});
+function saveCfg(){
+  cfg.n=clamp($("setn").value,3,2,50);cfg.m=clamp($("setm").value,20,1,200);cfg.mode=$("setmode").value==="cut"?"cut":"follow";
+  localStorage.setItem("trondraw.n",cfg.n);localStorage.setItem("trondraw.m",cfg.m);localStorage.setItem("trondraw.mode",cfg.mode);localStorage.setItem("trondraw.algo",cfg.algo);
+  load();
+}
+$("setn").value=cfg.n;$("setm").value=cfg.m;$("setmode").value=cfg.mode;
+$("setn").onchange=$("setm").onchange=$("setmode").onchange=saveCfg;
+document.querySelectorAll("#algos button").forEach(function(b){b.onclick=function(){cfg.algo=b.getAttribute("data-a");markAlgo();saveCfg()}});
+markAlgo();
 mark();load();setInterval(load,10000);
 })();
 </script>

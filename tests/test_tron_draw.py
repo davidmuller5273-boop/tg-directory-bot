@@ -15,6 +15,7 @@ from tg_directory_bot.storage import DirectoryStore
 from tg_directory_bot.tron_draw import (
     TronDrawRecorder, bead_road, draw_result, is_draw_block, last_digit, parse_limit,
 )
+from tg_directory_bot import tron_draw as td
 from tg_directory_bot.tron_scanner import ScanDB, TronBlockScanner
 
 
@@ -222,6 +223,14 @@ class WebTest(unittest.TestCase):
                 self.assertEqual(data["next_draw_block"], 620)
                 self.assertEqual(len(data["cells"]), 10)
                 self.assertEqual(data["recent"][0]["block"], 600)
+                ref = data["reference"]
+                self.assertEqual(set(ref["algorithms"]), {"trend", "dragon", "ratio"})
+                self.assertIn("统计仅供参考", ref["note"])
+                self.assertEqual(ref["params"], {"streak_n": 3, "recent_m": 20, "mode": "follow"})
+                self.assertEqual(ref["algorithms"]["trend"]["total"], 10)  # prior history feeds window
+                tuned = client.get("/api/tron-draw?limit=10&streak_n=2&recent_m=5&mode=cut").json()
+                self.assertEqual(tuned["reference"]["params"], {"streak_n": 2, "recent_m": 5, "mode": "cut"})
+                self.assertEqual(tuned["count"], 10)
                 self.assertEqual(client.get("/api/tron-draw?limit=500").json()["count"], 30)
                 self.assertEqual(client.get("/api/tron-draw?limit=zzz").json()["limit"], 100)
                 page = client.get("/tron-draw")
@@ -241,6 +250,93 @@ class WebTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+S, D = "单", "双"
+
+
+def seq(text):
+    return [S if c == "s" else D for c in text]
+
+
+class ReferenceTest(unittest.TestCase):
+    def test_streak_longest_omission(self):
+        r = seq("ssddds")
+        self.assertEqual(td.streak_at(r), 1)
+        self.assertEqual(td.streak_at(r, 5), 3)
+        self.assertEqual(td.streak_at([]), 0)
+        self.assertEqual(td.longest_streak(r), 3)
+        self.assertEqual(td.longest_streak([]), 0)
+        self.assertEqual(td.omissions(r), {"single": 0, "double": 1})
+        self.assertEqual(td.omissions(seq("sddd")), {"single": 3, "double": 0})
+        self.assertEqual(td.omissions(seq("ss")), {"single": 0, "double": 2})
+
+    def test_trend(self):
+        self.assertEqual(td.reference_pick("trend", seq("sd")), D)
+        self.assertEqual(td.reference_pick("trend", seq("ds")), S)
+        self.assertIsNone(td.reference_pick("trend", []))
+
+    def test_dragon_follow_and_cut(self):
+        r = seq("dsss")  # streak 3 of 单
+        self.assertEqual(td.reference_pick("dragon", r, streak_n=3, mode="follow"), S)
+        self.assertEqual(td.reference_pick("dragon", r, streak_n=3, mode="cut"), D)
+        # below threshold -> follow last in both modes
+        self.assertEqual(td.reference_pick("dragon", r, streak_n=4, mode="cut"), S)
+        self.assertEqual(td.reference_pick("dragon", seq("sdd"), streak_n=2, mode="cut"), S)
+        self.assertEqual(td.reference_pick("dragon", seq("sdd"), streak_n=3, mode="cut"), D)
+
+    def test_ratio_majority_tie_and_window(self):
+        self.assertEqual(td.reference_pick("ratio", seq("ssdsd"), recent_m=5), S)
+        self.assertEqual(td.reference_pick("ratio", seq("dddss"), recent_m=5), D)
+        self.assertEqual(td.reference_pick("ratio", seq("ssdd"), recent_m=4), D)  # tie -> last
+        self.assertEqual(td.reference_pick("ratio", seq("ddss"), recent_m=4), S)
+        # only the last M periods count
+        self.assertEqual(td.reference_pick("ratio", seq("ddddsss"), recent_m=3), S)
+
+    def test_backtest_counts(self):
+        # trend on s s d d s: picks for idx1..4 = s,s,d,d vs s,d,d,s -> hits 2/4
+        self.assertEqual(td.backtest("trend", seq("ssdds")), {"hits": 2, "total": 4, "rate": 50.0})
+        self.assertEqual(td.backtest("trend", seq("s")), {"hits": 0, "total": 0, "rate": None})
+        # window start: only indexes >= 3 are judged
+        self.assertEqual(td.backtest("trend", seq("ssdds"), 3)["total"], 2)
+
+    def test_backtest_has_no_look_ahead(self):
+        base = seq("sdssdddsdsssddsd")
+        for algo in td.ALGORITHMS:
+            for params in ({"streak_n": 2, "recent_m": 4, "mode": "cut"},
+                           {"streak_n": 3, "recent_m": 7, "mode": "follow"}):
+                for i in range(1, len(base)):
+                    picks = td.reference_pick(algo, base, i, **params)
+                    # changing the judged period and anything after it must not change the pick
+                    altered = base[:i] + [S if v == D else D for v in base[i:]]
+                    self.assertEqual(picks, td.reference_pick(algo, altered, i, **params))
+                    self.assertEqual(picks, td.reference_pick(algo, base[:i], **params))
+        # whole-backtest equivalence: flipping the final result only changes the last judgement
+        a = td.backtest("ratio", base, recent_m=5)
+        flipped = base[:-1] + [S if base[-1] == D else D]
+        b = td.backtest("ratio", flipped, recent_m=5)
+        self.assertEqual(a["total"], b["total"])
+        self.assertEqual(abs(a["hits"] - b["hits"]), 1)
+
+    def test_panel_window_uses_prior_lookback(self):
+        r = seq("sssddsdsd")
+        panel = td.reference_panel(r, 4, streak_n=3, recent_m=5, mode="cut")
+        # window = last 4 (d s d s? -> "sdsd"); all 4 judged from earlier history
+        self.assertEqual(panel["algorithms"]["trend"]["total"], 4)
+        self.assertEqual(panel["current_streak"], 1)
+        self.assertEqual(panel["longest_streak"], 1)
+        self.assertEqual(panel["ratio"], {"single": 50.0, "double": 50.0})
+        self.assertEqual(panel["omission"], {"single": 1, "double": 0})
+        self.assertEqual(panel["algorithms"]["trend"]["next"], D)
+        self.assertEqual(panel["note"], "开奖为哈希末位，单双各约50%，统计仅供参考")
+        empty = td.reference_panel([], 50)
+        self.assertIsNone(empty["algorithms"]["ratio"]["next"])
+        self.assertEqual(empty["algorithms"]["trend"]["total"], 0)
+
+    def test_param_parsing(self):
+        self.assertEqual(td.parse_reference_params("", "", ""), (3, 20, "follow"))
+        self.assertEqual(td.parse_reference_params("5", "999", "CUT"), (5, 200, "cut"))
+        self.assertEqual(td.parse_reference_params("x", "0", "bad"), (3, 1, "follow"))
 
 
 class WiringTest(unittest.TestCase):
