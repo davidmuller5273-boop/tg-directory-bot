@@ -116,6 +116,7 @@ def create_app(config: Config) -> FastAPI:
                     "block": int(row["block_number"]), "hash": str(row["block_hash"]),
                     "digit": int(row["last_digit"]), "result": str(row["result"]),
                     "ts": int(row["block_timestamp_ms"]),
+                    "verified": bool(row["verified"]),
                     "time": format_beijing_timestamp_ms(row["block_timestamp_ms"])
                     if row["block_timestamp_ms"] else "",
                 }

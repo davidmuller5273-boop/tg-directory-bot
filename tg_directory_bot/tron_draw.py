@@ -27,8 +27,12 @@ MAX_ROWS = 6
 _DIGIT = re.compile(r"[0-9]")
 
 
-def is_draw_block(number: int) -> bool:
-    return int(number) > 0 and int(number) % DRAW_INTERVAL == 0
+VERIFY_BLOCKS = 20  # ~1 min: a TRON block this deep is solidified (no more forks)
+
+
+def is_draw_block(number: int, offset: int = 0) -> bool:
+    """height % 20 == offset (offset 0 = the 00/20/40/60/80 rule)."""
+    return int(number) > 0 and int(number) % DRAW_INTERVAL == int(offset) % DRAW_INTERVAL
 
 
 def last_digit(block_hash: str) -> int | None:
@@ -236,12 +240,13 @@ class TronDrawRecorder:
     """Records draw blocks; back-fills the ones missed while the bot was down."""
 
     def __init__(
-        self, chain, store, *, confirmations: int = 20, initial_backfill: int = 500,
-        max_backfill: int = 20000, per_step: int = 3,
+        self, chain, store, *, confirmations: int = 0, initial_backfill: int = 500,
+        max_backfill: int = 20000, per_step: int = 3, block_offset: int = 0,
     ):
         self.chain = chain
         self.store = store
-        self.confirmations = max(1, int(confirmations))
+        self.confirmations = max(0, int(confirmations))
+        self.offset = int(block_offset) % DRAW_INTERVAL
         self.initial_backfill = max(1, int(initial_backfill))
         self.max_backfill = max(1, int(max_backfill))
         self.per_step = max(1, int(per_step))
@@ -252,7 +257,10 @@ class TronDrawRecorder:
 
     def latest_draw(self, head: int) -> int:
         target = int(head) - self.confirmations
-        return target - target % DRAW_INTERVAL if target > 0 else 0
+        if target <= 0:
+            return 0
+        latest = target - (target - self.offset) % DRAW_INTERVAL
+        return latest if latest > 0 else 0
 
     def plan(self, head: int) -> list[int]:
         """Missing draw blocks (newest first) in the window we promise to cover."""
@@ -260,10 +268,14 @@ class TronDrawRecorder:
         if latest <= 0:
             return []
         floor = self.store.tron_draw_floor()
-        if floor <= 0 or floor % DRAW_INTERVAL:
-            floor = max(DRAW_INTERVAL, latest - DRAW_INTERVAL * (self.initial_backfill - 1))
+        if floor <= 0 or floor % DRAW_INTERVAL != self.offset:
+            floor = max(
+                DRAW_INTERVAL + self.offset, latest - DRAW_INTERVAL * (self.initial_backfill - 1),
+            )
             self.store.set_tron_draw_floor(floor)
-        floor = max(floor, latest - DRAW_INTERVAL * (self.max_backfill - 1), DRAW_INTERVAL)
+        floor = max(
+            floor, latest - DRAW_INTERVAL * (self.max_backfill - 1), DRAW_INTERVAL + self.offset,
+        )
         have = self.store.tron_draw_existing(floor, latest)
         return [n for n in range(latest, floor - 1, -DRAW_INTERVAL) if n not in have]
 
@@ -275,9 +287,9 @@ class TronDrawRecorder:
         if latest != self._planned_for:
             self._pending = self.plan(head)
             self._planned_for = latest
+        recorded = await self._verify(head)
         if not self._pending or time.monotonic() < self._retry_at:
-            return 0
-        recorded = 0
+            return recorded
         for _ in range(self.per_step):
             if not self._pending:
                 break
@@ -288,10 +300,42 @@ class TronDrawRecorder:
             except ChainQueryError as exc:
                 self.stats["errors"] += 1
                 logger.info("TRON draw block %s not recorded yet: %s", number, exc)
-                self._retry_at = time.monotonic() + 15
+                # a just-produced block may not be visible on every node yet:
+                # retry quickly; the 3 s block time makes 2 s cheap and fast
+                self._retry_at = time.monotonic() + 2
                 break
-            if self.store.record_tron_draw(number, block_hash, timestamp_ms):
+            if self.store.record_tron_draw(
+                number, block_hash, timestamp_ms,
+                verified=number <= int(head) - VERIFY_BLOCKS, offset=self.offset,
+            ):
                 recorded += 1
                 self.stats["recorded"] += 1
             self._pending.pop(0)
         return recorded
+
+    async def _verify(self, head: int) -> int:
+        """Re-check hashes recorded from young blocks once they are solidified.
+
+        Draws are recorded as soon as the block exists (fast); on a rare fork
+        the stored hash/result is corrected here. Returns the corrections made.
+        """
+        corrected = 0
+        for row in self.store.tron_draw_unverified(int(head) - VERIFY_BLOCKS, 2):
+            number = int(row["block_number"])
+            try:
+                block_hash, timestamp_ms = await self.chain.tron_block_header(number)
+                self.stats["requests"] += 1
+            except ChainQueryError:
+                break
+            if block_hash == str(row["block_hash"]):
+                self.store.tron_draw_mark_verified(number)
+            elif self.store.tron_draw_correct(number, block_hash, timestamp_ms):
+                corrected += 1
+                self.stats["corrected"] = self.stats.get("corrected", 0) + 1
+                logger.warning(
+                    "TRON draw block %s hash changed after fork: %s -> %s",
+                    number, row["block_hash"], block_hash,
+                )
+            else:
+                self.store.tron_draw_mark_verified(number)
+        return corrected

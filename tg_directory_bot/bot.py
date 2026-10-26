@@ -3745,18 +3745,19 @@ async def scan_tron_blocks(context: ContextTypes.DEFAULT_TYPE) -> None:
     scanner: TronBlockScanner | None = context.application.bot_data.get("tron_scanner")
     if scanner is None:
         return
-    try:
-        await scanner.step()
-    except ChainQueryError as exc:
-        logging.info("TRON block scanner waiting: %s", exc)
-    except Exception:
-        logging.exception("TRON block scanner step failed")
+    # draws first: a long address catch-up step must never delay a draw result
     try:
         await scanner.step_draws()
     except ChainQueryError as exc:
         logging.info("TRON draw recorder waiting: %s", exc)
     except Exception:
         logging.exception("TRON draw recorder step failed")
+    try:
+        await scanner.step()
+    except ChainQueryError as exc:
+        logging.info("TRON block scanner waiting: %s", exc)
+    except Exception:
+        logging.exception("TRON block scanner step failed")
 
 
 async def sync_tron_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13844,7 +13845,8 @@ def setup_tron_monitoring(application: Application, config: Config, chain: Chain
         if getattr(config, "tron_draw_stats", True):
             application.bot_data["tron_scanner"].draws = TronDrawRecorder(
                 chain, application.bot_data["store"],
-                confirmations=getattr(config, "tron_draw_confirmations", 20),
+                confirmations=getattr(config, "tron_draw_confirmations", 0),
+                block_offset=getattr(config, "tron_draw_block_offset", 0),
                 initial_backfill=getattr(config, "tron_draw_initial_backfill", 500),
                 max_backfill=getattr(config, "tron_draw_max_backfill", 20000),
                 per_step=getattr(config, "tron_draw_backfill_per_step", 3),

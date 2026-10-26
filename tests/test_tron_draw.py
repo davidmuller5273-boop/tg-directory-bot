@@ -147,24 +147,24 @@ class RecorderTest(unittest.TestCase):
 
     def test_backfills_gap_after_downtime_without_refetching(self):
         chain = FakeChain(head=400)
-        rec = TronDrawRecorder(chain, self.store, initial_backfill=3, per_step=10)
+        rec = TronDrawRecorder(chain, self.store, confirmations=20, initial_backfill=3, per_step=10)
         self.run_steps(rec, 400, 3)
         self.assertEqual(sorted(self.store.tron_draw_existing(0, 10**9)), [340, 360, 380])
         # bot down for a while, restarts with a fresh recorder
         chain2 = FakeChain(head=600)
-        rec2 = TronDrawRecorder(chain2, self.store, initial_backfill=3, per_step=10)
+        rec2 = TronDrawRecorder(chain2, self.store, confirmations=20, initial_backfill=3, per_step=10)
         self.run_steps(rec2, 600, 5)
         self.assertEqual(sorted(chain2.header_calls), [400, 420, 440, 460, 480, 500, 520, 540, 560, 580])
         self.assertEqual(
             sorted(self.store.tron_draw_existing(0, 10**9)), list(range(340, 600, 20)))
         # nothing missing -> no more requests
         chain3 = FakeChain(head=600)
-        self.run_steps(TronDrawRecorder(chain3, self.store, initial_backfill=3), 600, 3)
+        self.run_steps(TronDrawRecorder(chain3, self.store, confirmations=20, initial_backfill=3), 600, 3)
         self.assertEqual(chain3.header_calls, [])
 
     def test_failed_fetch_is_retried_and_does_not_block_loop(self):
         chain = FakeChain(head=200, fail={160})
-        rec = TronDrawRecorder(chain, self.store, initial_backfill=2, per_step=3)
+        rec = TronDrawRecorder(chain, self.store, confirmations=20, initial_backfill=2, per_step=3)
         self.assertEqual(asyncio.run(rec.step(200)), 1)  # 180 stored, 160 failed
         self.assertEqual(self.store.tron_draw_existing(0, 999), {180})
         chain.fail.clear()
@@ -175,9 +175,104 @@ class RecorderTest(unittest.TestCase):
     def test_max_backfill_window(self):
         chain = FakeChain(head=100000)
         self.store.set_tron_draw_floor(20)
-        rec = TronDrawRecorder(chain, self.store, max_backfill=4, per_step=100)
+        rec = TronDrawRecorder(chain, self.store, confirmations=20, max_backfill=4, per_step=100)
         self.run_steps(rec, 100000, 2)
         self.assertEqual(len(chain.header_calls), 4)
+
+
+class FastRecordingTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = DirectoryStore(Path(self.temp.name) / "db.sqlite3")
+        self.store.init()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def row(self, block):
+        return [r for r in self.store.tron_draw_recent(50) if r["block_number"] == block][0]
+
+    def test_defaults_record_draw_block_immediately(self):
+        import os
+        from unittest.mock import patch
+        from tg_directory_bot.config import load_config
+
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("TRON_DRAW_CONFIRMATIONS", "TRON_DRAW_BLOCK_OFFSET"):
+                os.environ.pop(key, None)
+            config = load_config(None, require_bot_token=False)
+        self.assertEqual((config.tron_draw_confirmations, config.tron_draw_block_offset), (0, 0))
+        chain = FakeChain(head=1001)  # block 1000 was produced ~3 s ago
+        rec = TronDrawRecorder(chain, self.store, confirmations=config.tron_draw_confirmations,
+                               initial_backfill=1)
+        self.assertEqual(asyncio.run(rec.step(1001)), 1)
+        self.assertEqual(self.store.tron_draw_existing(0, 9999), {1000})
+        self.assertEqual(self.store.tron_draw_recent(1)[0]["verified"], 0)  # young block
+
+    def test_block_not_visible_yet_retries_within_seconds(self):
+        chain = FakeChain(head=1000, fail={1000})
+        rec = TronDrawRecorder(chain, self.store, initial_backfill=1)
+        asyncio.run(rec.step(1000))
+        self.assertEqual(self.store.tron_draw_total(), 0)
+        import time as _t
+        self.assertLess(rec._retry_at - _t.monotonic(), 2.5)
+
+    def test_young_hash_is_verified_after_solidified(self):
+        chain = FakeChain(head=1002)
+        rec = TronDrawRecorder(chain, self.store, initial_backfill=1)
+        asyncio.run(rec.step(1002))
+        self.assertEqual(self.row(1000)["verified"], 0)
+        asyncio.run(rec.step(1010))  # not deep enough yet: no re-check
+        self.assertEqual(self.row(1000)["verified"], 0)
+        asyncio.run(rec.step(1021))
+        self.assertEqual(self.row(1000)["verified"], 1)
+
+    def test_fork_corrects_stored_hash_and_result(self):
+        chain = FakeChain(head=1002, hashes={1000: make_hash(1000, "1")})  # 单
+        rec = TronDrawRecorder(chain, self.store, initial_backfill=1)
+        asyncio.run(rec.step(1002))
+        self.assertEqual(self.row(1000)["result"], "单")
+        chain.hashes[1000] = make_hash(1000, "2")  # the canonical block differs
+        asyncio.run(rec.step(1025))
+        row = self.row(1000)
+        self.assertEqual((row["result"], row["last_digit"], row["verified"]), ("双", 2, 1))
+        self.assertTrue(row["block_hash"].endswith("2"))
+
+    def test_old_blocks_are_stored_verified(self):
+        chain = FakeChain(head=1100)
+        rec = TronDrawRecorder(chain, self.store, initial_backfill=3, per_step=5)
+        asyncio.run(rec.step(1100))
+        self.assertEqual({r["verified"] for r in self.store.tron_draw_recent(10)}, {1, 0})
+        self.assertEqual(self.store.tron_draw_recent(10)[0]["verified"], 1)
+
+    def test_block_offset(self):
+        self.assertTrue(is_draw_block(92, 12))
+        self.assertFalse(is_draw_block(100, 12))
+        chain = FakeChain(head=100)
+        rec = TronDrawRecorder(chain, self.store, initial_backfill=2, block_offset=12, per_step=5)
+        self.assertEqual(rec.latest_draw(100), 92)
+        asyncio.run(rec.step(100))
+        self.assertEqual(self.store.tron_draw_existing(0, 999), {72, 92})
+        self.assertEqual(TronDrawRecorder(chain, self.store).latest_draw(100), 100)
+
+    def test_old_database_gets_verified_column(self):
+        import sqlite3
+        path = Path(self.temp.name) / "old.sqlite3"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE tron_draws (block_number INTEGER PRIMARY KEY, block_hash TEXT NOT NULL,"
+                     " last_digit INTEGER NOT NULL, result TEXT NOT NULL,"
+                     " block_timestamp_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("INSERT INTO tron_draws (block_number, block_hash, last_digit, result) VALUES (20, 'a1', 1, '单')")
+        conn.commit()
+        conn.close()
+        store = DirectoryStore(path)
+        store.init()
+        self.assertEqual(store.tron_draw_recent(1)[0]["verified"], 1)
+
+    def test_block_time_is_beijing_time(self):
+        from tg_directory_bot.time_utils import format_beijing_timestamp_ms
+        # TRON block 86276332 (user's CSV): 2026-09-15 19:39:03 UTC
+        self.assertEqual(format_beijing_timestamp_ms(1789501143000), "2026-09-16 03:39:03")
 
 
 class ScannerHookTest(unittest.TestCase):
@@ -188,7 +283,7 @@ class ScannerHookTest(unittest.TestCase):
             chain = FakeChain(head=500)
             scanner = TronBlockScanner(chain, ScanDB(Path(temp) / "scan.sqlite3"))
             self.assertEqual(asyncio.run(scanner.step_draws()), 0)  # recorder not attached
-            scanner.draws = TronDrawRecorder(chain, store, initial_backfill=2, per_step=5)
+            scanner.draws = TronDrawRecorder(chain, store, confirmations=20, initial_backfill=2, per_step=5)
             self.assertEqual(asyncio.run(scanner.step_draws()), 2)  # nothing is watched
             self.assertEqual(store.tron_draw_existing(0, 999), {460, 480})
 

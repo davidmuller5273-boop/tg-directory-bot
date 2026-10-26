@@ -916,6 +916,8 @@ class DirectoryStore(FeatureStoreMixin):
                     ON group_polls(chat_id, id DESC);
                 """
             )
+            # rows recorded before this column existed were taken >=20 blocks deep
+            self._ensure_column(conn, "tron_draws", "verified", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(conn, "reports", "status", "TEXT NOT NULL DEFAULT 'open'")
             for table in ("group_ads", "quick_posts"):
                 self._ensure_column(conn, table, "entities_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -2157,21 +2159,55 @@ class DirectoryStore(FeatureStoreMixin):
 
     # --- TRON block-hash 单/双 draw history (permanent, never pruned) ---
 
-    def record_tron_draw(self, block_number: int, block_hash: str, timestamp_ms: int = 0) -> bool:
-        """Store one draw block; False when invalid or already recorded."""
+    def record_tron_draw(
+        self, block_number: int, block_hash: str, timestamp_ms: int = 0,
+        verified: bool = True, offset: int = 0,
+    ) -> bool:
+        """Store one draw block; False when invalid or already recorded.
+
+        ``verified`` False = recorded from a young (possibly forkable) block;
+        the recorder re-checks the hash later (see ``tron_draw_correct``).
+        """
         from .tron_draw import draw_result, is_draw_block
 
         parsed = draw_result(block_hash)
-        if parsed is None or not is_draw_block(block_number):
+        if parsed is None or not is_draw_block(block_number, offset):
             return False
         digit, result = parsed
         with self.connect() as conn:
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO tron_draws
-                   (block_number, block_hash, last_digit, result, block_timestamp_ms)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (block_number, block_hash, last_digit, result, block_timestamp_ms, verified)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 (int(block_number), str(block_hash).strip().casefold(), digit, result,
-                 int(timestamp_ms or 0)),
+                 int(timestamp_ms or 0), 1 if verified else 0),
+            )
+            return cursor.rowcount > 0
+
+    def tron_draw_unverified(self, up_to_block: int, limit: int = 5) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM tron_draws WHERE verified=0 AND block_number<=? "
+                "ORDER BY block_number LIMIT ?", (int(up_to_block), int(limit)),
+            ).fetchall()
+
+    def tron_draw_mark_verified(self, block_number: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE tron_draws SET verified=1 WHERE block_number=?", (int(block_number),))
+
+    def tron_draw_correct(self, block_number: int, block_hash: str, timestamp_ms: int = 0) -> bool:
+        """The chain forked: replace the stored hash/result of a draw block."""
+        from .tron_draw import draw_result
+
+        parsed = draw_result(block_hash)
+        if parsed is None:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE tron_draws SET block_hash=?, last_digit=?, result=?,
+                   block_timestamp_ms=?, verified=1 WHERE block_number=?""",
+                (str(block_hash).strip().casefold(), parsed[0], parsed[1],
+                 int(timestamp_ms or 0), int(block_number)),
             )
             return cursor.rowcount > 0
 

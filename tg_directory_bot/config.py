@@ -38,7 +38,8 @@ class Config:
     tron_fallback_nodes: tuple[str, ...] | None = None
     tron_block_scan: bool = True
     tron_draw_stats: bool = True
-    tron_draw_confirmations: int = 20
+    tron_draw_confirmations: int = 0
+    tron_draw_block_offset: int = 0
     tron_draw_initial_backfill: int = 500
     tron_draw_max_backfill: int = 20000
     tron_draw_backfill_per_step: int = 3
@@ -190,7 +191,8 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         not in {"0", "false", "no", "off"},
         tron_draw_stats=os.getenv("TRON_DRAW_STATS", "1").strip().casefold()
         not in {"0", "false", "no", "off"},
-        tron_draw_confirmations=int(_float_env("TRON_DRAW_CONFIRMATIONS", 20, 1)),
+        tron_draw_confirmations=int(_float_env("TRON_DRAW_CONFIRMATIONS", 0, 0)),
+        tron_draw_block_offset=int(_float_env("TRON_DRAW_BLOCK_OFFSET", 0, 0)) % 20,
         tron_draw_initial_backfill=int(_float_env("TRON_DRAW_INITIAL_BACKFILL", 500, 1)),
         tron_draw_max_backfill=int(_float_env("TRON_DRAW_MAX_BACKFILL", 20000, 1)),
         tron_draw_backfill_per_step=int(_float_env("TRON_DRAW_BACKFILL_PER_STEP", 3, 1)),

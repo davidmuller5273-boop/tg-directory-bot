@@ -83,7 +83,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <strong>最近开奖</strong>
   <table><thead><tr><th>区块</th><th>哈希（末位数字加粗）</th><th>结果</th></tr></thead><tbody id="recent"></tbody></table>
  </div>
- <div class="rule">规则：每 20 个区块开奖一次，区块高度以 00/20/40/60/80 结尾的区块为开奖块；取该区块哈希，忽略字母，取最后一位数字：1/3/5/7/9 为单，0/2/4/6/8 为双。数据每 10 秒自动刷新。</div>
+ <div class="rule">规则：每 20 个区块开奖一次，区块高度以 00/20/40/60/80 结尾的区块为开奖块；取该区块哈希，忽略字母，取最后一位数字：1/3/5/7/9 为单，0/2/4/6/8 为双。数据每 4 秒自动刷新，时间为区块时间（北京时间）。</div>
 </div>
 <script>
 (function(){
@@ -160,7 +160,8 @@ $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode")
 $("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;
 document.querySelectorAll("#algos button").forEach(function(b){b.onclick=function(){cfg.algo=b.getAttribute("data-a");markAlgo();saveCfg()}});
 markAlgo();
-mark();load();setInterval(load,10000);
+mark();load();setInterval(function(){if(!document.hidden)load()},4000);
+document.addEventListener("visibilitychange",function(){if(!document.hidden)load()});
 })();
 </script>
 </body>
