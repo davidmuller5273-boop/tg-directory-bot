@@ -13,6 +13,7 @@ number with a tiny header-only request, a few per second at most.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 
@@ -433,6 +434,118 @@ def record_next_prediction(store) -> bool:
     return store.record_tron_draw_prediction(
         int(rows[-1]["block_number"]) + DRAW_INTERVAL, predicted, CANONICAL_KEY,
     )
+
+
+# --- 最佳算法: best single setting per algorithm on stored history ---
+
+BEST_MAX_PERIODS = 5000      # most recent periods searched (keeps it cheap)
+BEST_WARMUP = 200            # first periods only feed look-back windows
+BEST_MIN_PERIODS = 300       # below this the search is meaningless
+BEST_M_RANGE = range(5, 201)
+BEST_N_RANGE = range(2, 9)
+BEST_NOTE = "历史最优不代表未来更准；单双本质约 50% 随机，最优设置在新数据上通常回落到 50% 附近。"
+
+
+def _rate(hits: int, total: int) -> dict:
+    return {"hits": hits, "total": total, "rate": round(hits * 100 / total, 1) if total else None}
+
+
+def best_params(results: list[str]) -> dict:
+    """Search the parameter grid with a walk-forward backtest.
+
+    Every period ``i`` is predicted from ``results[:i]`` only. The candidate
+    with the most hits on the TRAIN segment wins; its hit rate on the later
+    HOLD-OUT segment (never used for the choice) is reported next to it.
+    Ties prefer the setting closest to the page defaults.
+    """
+    results = list(results[-BEST_MAX_PERIODS:])
+    n = len(results)
+    out = {
+        "ready": False, "periods": n, "note": BEST_NOTE, "algorithms": {},
+        "need": BEST_MIN_PERIODS,
+    }
+    if n < BEST_MIN_PERIODS:
+        return out
+    warm = min(BEST_WARMUP, n // 3)
+    holdout = max(50, min(1000, (n - warm) // 4))
+    split = n - holdout
+    bits = [1 if value == SINGLE else 0 for value in results]
+    pre = [0] * (n + 1)
+    run = [0] * (n + 1)
+    for i, bit in enumerate(bits):
+        pre[i + 1] = pre[i] + bit
+        run[i + 1] = run[i] + 1 if i > 0 and bits[i - 1] == bit else 1
+
+    def score(pick_at) -> tuple[int, int]:
+        train = hold = 0
+        for i in range(warm, n):
+            if pick_at(i) == bits[i]:
+                if i < split:
+                    train += 1
+                else:
+                    hold += 1
+        return train, hold
+
+    def share(size: int, minority: bool):
+        def pick(i):
+            low = i - size if i > size else 0
+            singles = pre[i] - pre[low]
+            doubles = (i - low) - singles
+            if singles == doubles:
+                return bits[i - 1]
+            majority = 1 if singles > doubles else 0
+            return 1 - majority if minority else majority
+        return pick
+
+    def cut(threshold: int):
+        return lambda i: 1 - bits[i - 1] if run[i] >= threshold else bits[i - 1]
+
+    train_total, hold_total = split - warm, holdout
+
+    def pack(train: int, hold: int, **params) -> dict:
+        return {**params, "train": _rate(train, train_total), "holdout": _rate(hold, hold_total)}
+
+    def best_of(candidates, default_key):
+        # candidates: (sort-preference, params, pick); most train hits wins
+        best = None
+        for params, pick in candidates:
+            train, hold = score(pick)
+            closeness = -abs(params["_k"] - default_key)
+            if best is None or (train, closeness) > (best[0], best[1]):
+                best = (train, closeness, hold, params)
+        return best
+
+    trend_train, trend_hold = score(lambda i: bits[i - 1])
+    out["trend"] = pack(trend_train, trend_hold)
+
+    # 跟龙 pick == last result for every N (= 顺势); only 斩龙 differs by N
+    dragon = [({"mode": MODE_CUT, "n": value, "_k": value}, cut(value)) for value in BEST_N_RANGE]
+    dragon_best = best_of(dragon, DEFAULT_STREAK_N)
+    if dragon_best[0] > trend_train:
+        params = dragon_best[3]
+        out["algorithms"]["dragon"] = pack(dragon_best[0], dragon_best[2], mode=MODE_CUT, n=params["n"])
+    else:
+        out["algorithms"]["dragon"] = pack(trend_train, trend_hold, mode=MODE_FOLLOW, n=None)
+    for name, minority, default in (
+        ("ratio", False, DEFAULT_RECENT_M), ("minority", True, DEFAULT_MINORITY_M),
+    ):
+        cands = [({"m": size, "_k": size}, share(size, minority)) for size in BEST_M_RANGE]
+        found = best_of(cands, default)
+        out["algorithms"][name] = pack(found[0], found[2], m=found[3]["m"])
+        d_train, d_hold = score(share(default, minority))
+        out["algorithms"][name]["default"] = {
+            "m": default, "train": _rate(d_train, train_total), "holdout": _rate(d_hold, hold_total),
+        }
+    candidates = len(BEST_N_RANGE) + len(BEST_M_RANGE)
+    sigma = 50 / math.sqrt(max(1, train_total))
+    out.update({
+        "ready": True,
+        "split": {"warmup": warm, "train": train_total, "holdout": hold_total},
+        "candidates": candidates,
+        # pure chance: the best of K coin-flip settings still looks this good
+        "luck_rate": round(50 + sigma * math.sqrt(2 * math.log(candidates)), 1),
+    })
+    return out
 
 
 def parse_reference_params(

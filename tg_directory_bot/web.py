@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hmac
 import io
 import secrets
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -18,7 +20,7 @@ from .config import Config
 from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
 from .tron_draw import (
-    CANONICAL_KEY, DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
+    BEST_MAX_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
     lookback_needed, my_trend, parse_limit,
     parse_reference_params, reference_panel,
 )
@@ -168,6 +170,29 @@ def create_app(config: Config) -> FastAPI:
                 mine_limit=mine,
             ),
             headers={"Cache-Control": "no-store"},
+        )
+
+    best_cache: dict = {"key": None, "value": None}
+    best_lock = threading.Lock()
+
+    def tron_draw_best_payload() -> dict:
+        """Best setting per algorithm; recomputed only when a new draw arrives."""
+        latest = store.tron_draw_recent(1)
+        key = (int(latest[0]["block_number"]), store.tron_draw_total()) if latest else (0, 0)
+        with best_lock:
+            if best_cache["key"] != key:
+                rows = store.tron_draw_recent(BEST_MAX_PERIODS)
+                best_cache["value"] = best_params([str(row["result"]) for row in rows])
+                best_cache["value"]["latest"] = key[0]
+                best_cache["key"] = key
+            return best_cache["value"]
+
+    @app.get("/api/tron-draw/best")
+    async def tron_draw_best_api():
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return JSONResponse(
+            await asyncio.to_thread(tron_draw_best_payload), headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/tron-draw", response_class=HTMLResponse)

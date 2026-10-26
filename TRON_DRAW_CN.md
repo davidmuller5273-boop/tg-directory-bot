@@ -47,6 +47,14 @@
 - **预测留底**：用默认设置（期数 100、N=3、跟龙、M=100、少数方 20）时，服务器在每个开奖块记录后立刻把下一期的最终预测写入 SQLite 表 `tron_draw_predictions`（只在该期开奖前可写入，之后不能改），「我的走势」里这些期显示为开奖前已记录；其它设置或更早的期用逐期回算。自定义设置的「刚才显示过的预测」由浏览器本地记录（localStorage），用于声音判断。
 - **声音**：页面顶部「声音：关/开」开关，保存在浏览器，默认关（浏览器要求先点击页面才能发声）。开启后每出一期新开奖：上一期的最终预测对了播放“叮叮”（上扬两声），错了播放低沉“嗡嗡”（下沉两声）；声音由浏览器 WebAudio 合成，无外部文件。可点「试听✅/❌」。刚打开页面时不会响，只对页面打开后新出的开奖响。
 
+- **最佳算法按钮**：在算法设置那一行的最后。点击后服务器用已记录的历史（最近最多 5000 期，至少 300 期）做逐期向前回测（每期只用其之前的数据），为每个算法各选一个训练命中率最高的设置，并自动填入输入框、刷新页面：
+  - 跟龙/斩龙：N 取 2~8；注意「跟龙」永远等于上一期结果（和顺势一样），所以只有「斩龙」会随 N 变化。若斩龙不比顺势更好，则保持「跟龙」不改 N。
+  - 近期占比 M、近期少数方 M：各取 5~200。
+  - 防过拟合：前面的期数用于「训练」选参，最后一段（最多 1000 期，约占 1/4）只用来「验证」，页面同时显示训练命中率和最近验证命中率及样本数，还有默认设置的对比和顺势基准。
+  - 诚实提示：纯随机时从约 200 组设置里挑最好的，训练命中率也能到 52%~53%；历史最优不代表未来更准，约 50% 属随机范围。
+  - 接口 `/api/tron-draw/best`；每出一个新开奖才重算一次（缓存），算一次通常不到 1 秒。
+  - 用了 Nginx/Caddy 反代的，需要放行 `/api/tron-draw/best`，见下面「更新一次」。
+
 接口：`/api/tron-draw?limit=100&mine_limit=100` 新增字段 `reference.final`（next/sums/votes/basis/for_block/recorded）、`runs`（single/double/alternating 的 len 与 start）、`previous`（上一期已记录的预测与对错）、`my_trend`（仅当传 `mine_limit` 时返回：items 每期 predicted/result/ok/source，以及 hits/total/rate/max_win/max_loss）。
 
 ## 部署更新
@@ -69,7 +77,7 @@ DOMAIN=example.com
 # 2) 安装 Nginx 和 certbot
 sudo apt-get update && sudo apt-get install -y nginx certbot python3-certbot-nginx
 
-# 3) 写入 Nginx 配置（只开放 /tron-draw 和 /api/tron-draw，其它路径 404）
+# 3) 写入 Nginx 配置（只开放 /tron-draw 和 /api/tron-draw（含 /best），其它路径 404）
 cat <<'EOF' | sudo tee /etc/nginx/sites-available/tron-draw >/dev/null
 server {
     listen 80;
@@ -87,7 +95,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location = /api/tron-draw {
+    location ~ ^/api/tron-draw(/best)?$ {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -131,7 +139,7 @@ example.com {
     handle /tron-draw {
         reverse_proxy 127.0.0.1:8080
     }
-    handle /api/tron-draw {
+    handle /api/tron-draw* {
         reverse_proxy 127.0.0.1:8080
     }
     handle / {
@@ -143,6 +151,16 @@ example.com {
 }
 EOF
 sudo sed -i "s/example.com/$DOMAIN/g" /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+### 已按旧文档配置过 Nginx / Caddy 的，更新一次（让「最佳算法」按钮能访问 /api/tron-draw/best）
+```
+# Nginx（域名配置文件名按你实际的；默认 tron-draw）
+sudo sed -i 's#location = /api/tron-draw {#location ~ ^/api/tron-draw(/best)?$ {#' /etc/nginx/sites-available/tron-draw
+sudo nginx -t && sudo systemctl reload nginx
+# 如果用的是 Caddy，改用下面两行
+sudo sed -i 's#handle /api/tron-draw {#handle /api/tron-draw* {#' /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 

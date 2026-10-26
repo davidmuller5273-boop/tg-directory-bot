@@ -758,3 +758,161 @@ class MyTrendWebTest(unittest.TestCase):
                               "trondraw.v2.", "webkitAudioContext", "✅", "❌", "最终预测", "mine_limit", "scrollIntoView"):
                     self.assertIn(token, html)
                 self.assertNotIn("http://", html.replace("http://www.w3.org", ""))
+
+
+class BestParamsTest(unittest.TestCase):
+    def skewed(self, n, p_single=0.7, seed=11):
+        import random
+        rng = random.Random(seed)
+        return [S if rng.random() < p_single else D for _ in range(n)]
+
+    def test_not_enough_history(self):
+        out = td.best_params(self.skewed(td.BEST_MIN_PERIODS - 1))
+        self.assertFalse(out["ready"])
+        self.assertEqual(out["periods"], td.BEST_MIN_PERIODS - 1)
+        self.assertIn("随机", out["note"])
+        self.assertEqual(td.best_params([])["ready"], False)
+
+    def test_split_and_honest_fields(self):
+        r = self.skewed(1000)
+        out = td.best_params(r)
+        sp = out["split"]
+        self.assertTrue(out["ready"])
+        self.assertEqual(sp["warmup"] + sp["train"] + sp["holdout"], 1000)
+        self.assertEqual(out["algorithms"]["ratio"]["train"]["total"], sp["train"])
+        self.assertEqual(out["algorithms"]["ratio"]["holdout"]["total"], sp["holdout"])
+        self.assertEqual(set(out["algorithms"]), {"dragon", "ratio", "minority"})
+        self.assertIn("default", out["algorithms"]["ratio"])
+        self.assertGreater(out["luck_rate"], 50)
+        self.assertEqual(out["candidates"], len(td.BEST_N_RANGE) + len(td.BEST_M_RANGE))
+        self.assertIn(out["algorithms"]["dragon"]["mode"], ("cut", "follow"))
+
+    def test_finds_a_planted_bias_and_is_walk_forward(self):
+        r = self.skewed(1200)
+        out = td.best_params(r)
+        ratio = out["algorithms"]["ratio"]
+        self.assertGreater(ratio["train"]["rate"], 60)
+        self.assertGreater(ratio["holdout"]["rate"], 60)
+        self.assertLess(out["algorithms"]["minority"]["train"]["rate"], 45)
+        # cross-check against the independent reference_pick backtest (no look-ahead)
+        sp = out["split"]
+        m = ratio["m"]
+        hits = sum(
+            1 for i in range(sp["warmup"], sp["warmup"] + sp["train"])
+            if td.reference_pick("ratio", r, i, recent_m=m) == r[i]
+        )
+        self.assertEqual(hits, ratio["train"]["hits"])
+        hold = sum(
+            1 for i in range(sp["warmup"] + sp["train"], len(r))
+            if td.reference_pick("ratio", r, i, recent_m=m) == r[i]
+        )
+        self.assertEqual(hold, ratio["holdout"]["hits"])
+        # minority brute force
+        mn = out["algorithms"]["minority"]
+        hits = sum(
+            1 for i in range(sp["warmup"], sp["warmup"] + sp["train"])
+            if td.reference_pick("minority", r, i, minority_m=mn["m"]) == r[i]
+        )
+        self.assertEqual(hits, mn["train"]["hits"])
+
+    def test_choice_never_uses_the_holdout_segment(self):
+        r = self.skewed(1000, seed=3)
+        base = td.best_params(r)
+        sp = base["split"]
+        start = sp["warmup"] + sp["train"]
+        flipped = r[:start] + [td._opposite(v) for v in r[start:]]
+        other = td.best_params(flipped)
+        for name in ("ratio", "minority"):
+            self.assertEqual(base["algorithms"][name]["m"], other["algorithms"][name]["m"])
+            self.assertEqual(base["algorithms"][name]["train"], other["algorithms"][name]["train"])
+        self.assertEqual(base["algorithms"]["dragon"]["mode"], other["algorithms"]["dragon"]["mode"])
+        self.assertNotEqual(base["algorithms"]["ratio"]["holdout"], other["algorithms"]["ratio"]["holdout"])
+
+    def test_cut_wins_when_dragons_always_end(self):
+        import random
+        rng = random.Random(2)
+        r = []
+        while len(r) < 900:
+            value = rng.choice((S, D))
+            if len(r) >= 3 and r[-1] == r[-2] == r[-3]:
+                value = td._opposite(r[-1])  # every 3-run is cut
+            r.append(value)
+        dragon = td.best_params(r)["algorithms"]["dragon"]
+        self.assertEqual(dragon["mode"], "cut")
+        self.assertEqual(dragon["n"], 3)
+        self.assertGreater(dragon["train"]["rate"], td.best_params(r)["trend"]["train"]["rate"])
+
+    def test_follow_when_cut_does_not_beat_trend(self):
+        r = [S] * 400
+        dragon = td.best_params(r)["algorithms"]["dragon"]
+        self.assertEqual((dragon["mode"], dragon["n"]), ("follow", None))
+        self.assertEqual(dragon["train"]["rate"], 100.0)
+
+    def test_search_is_cheap(self):
+        import time
+        started = time.monotonic()
+        td.best_params(self.skewed(td.BEST_MAX_PERIODS + 500))
+        self.assertLess(time.monotonic() - started, 15)
+
+    def test_only_recent_periods_are_used(self):
+        out = td.best_params(self.skewed(td.BEST_MAX_PERIODS + 500))
+        self.assertEqual(out["periods"], td.BEST_MAX_PERIODS)
+
+
+class BestEndpointTest(unittest.TestCase):
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_endpoint_cache_and_page(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp:
+            helper = MyTrendWebTest()
+            client, store = helper.make_client(temp)
+            with client:
+                small = client.get("/api/tron-draw/best").json()
+                self.assertFalse(small["ready"])
+                helper.fill(store, 400)
+                calls = []
+                real = td.best_params
+
+                def counting(results):
+                    calls.append(len(results))
+                    return real(results)
+
+                with patch("tg_directory_bot.web.best_params", counting):
+                    first = client.get("/api/tron-draw/best").json()
+                    second = client.get("/api/tron-draw/best").json()
+                    self.assertEqual(len(calls), 1)  # cached per latest period
+                    self.assertTrue(first["ready"])
+                    self.assertEqual(first, second)
+                    self.assertEqual(first["latest"], 8000)
+                    self.assertEqual(first["periods"], 400)
+                    n = 20 * 401
+                    store.record_tron_draw(n, make_hash(n, "1"), 1)
+                    third = client.get("/api/tron-draw/best").json()
+                    self.assertEqual(calls, [400, 401])
+                    self.assertEqual(third["latest"], n)
+                self.assertEqual(client.get("/api/tron-draw/best").headers["cache-control"], "no-store")
+                html = client.get("/tron-draw").text
+                for token in ("最佳算法", "/api/tron-draw/best", "bestbtn", "历史最优不代表未来更准"):
+                    self.assertIn(token, html)
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_disabled(self):
+        from tg_directory_bot.web import create_app
+
+        with tempfile.TemporaryDirectory() as temp:
+            config = Config(
+                bot_token="", admin_ids=set(), super_admin_ids=set(),
+                db_path=Path(temp) / "db.sqlite3", categories=("other",), blocked_keywords=(),
+                admin_username="admin", admin_password="testing-password",
+                session_secret="x" * 40, backups_dir=Path(temp) / "backups", tron_draw_stats=False,
+            )
+            with TestClient(create_app(config)) as client:
+                self.assertEqual(client.get("/api/tron-draw/best").status_code, 404)
+
+    def test_proxy_docs_allow_best_endpoint(self):
+        root = Path(__file__).resolve().parent.parent
+        self.assertIn("(/best)?", (root / "deploy/nginx/tron-draw.conf.example").read_text())
+        doc = (root / "TRON_DRAW_CN.md").read_text()
+        self.assertIn("(/best)?", doc)
+        self.assertIn("/api/tron-draw*", doc)
