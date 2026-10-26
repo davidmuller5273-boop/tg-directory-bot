@@ -56,6 +56,7 @@
   - 防过拟合：前面的期数用于「训练」选参，最后一段（最多 1000 期，约占 1/4）只用来「验证」，不参与选参。
   - 诚实提示：连错本身是随机的，公平硬币约 1000 期的最大连错通常也有 9~10 期；从 200 多组设置里挑最少的，历史上自然会更少，新数据上通常回到随机水平，历史最优不代表未来更准。不保证连错不会超过历史最大值。
   - 接口 `/api/tron-draw/best`（返回 `algorithms.{dragon,ratio,minority}` 的 `train`/`holdout`，其中含 `max_loss`、`max_loss_count`、`rate`、`hits`、`total`；以及 `final`、`trend`、`split`、`random_max_loss`、`note`）；每出一个新开奖才重算一次（缓存），算一次通常不到 1 秒。
+  - 提示框自动收起：黄色详情框约 10 秒后自动收起，绿色「已填入」行约 5 秒后收起；鼠标停在框上会暂停计时；框右上角有 ×，按钮旁有「详情」可随时重新打开（打开后重新计时）。再点「最佳算法」会重新显示并重新计时。收起只影响提示，输入框里的数值和结果保持不变。
   - 用了 Nginx/Caddy 反代的，需要放行 `/api/tron-draw/best`，见下面「更新一次」。
 
 接口：`/api/tron-draw?limit=100&mine_limit=100` 新增字段 `reference.final`（next/sums/votes/basis/for_block/recorded）、`runs`（single/double/alternating 的 len 与 start）、`previous`（上一期已记录的预测与对错）、`my_trend`（仅当传 `mine_limit` 时返回：items 每期 predicted/result/ok/source，以及 hits/total/rate/max_win/max_loss）。

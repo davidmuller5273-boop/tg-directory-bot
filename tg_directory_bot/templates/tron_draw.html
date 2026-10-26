@@ -45,6 +45,9 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .stats div span{color:var(--muted)}
 .filled{animation:fl 1.6s ease-out}
 @keyframes fl{0%{background:#ffe08a;box-shadow:0 0 0 3px #ffc53d}100%{background:#fff;box-shadow:0 0 0 0 transparent}}
+.bestbox{position:relative;padding-right:28px}
+.bx{position:absolute;top:2px;right:4px;border:0;background:transparent;font-size:18px;line-height:1;color:#8a6d00;cursor:pointer}
+#bestmore{font-size:13px;margin-left:4px}
 .filled-line{background:#e6f4ea;color:#1b6e3a;border-radius:6px;padding:4px 8px;margin-bottom:6px}
 .note{background:#fff9db;color:#8a6d00;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
 .rule{font-size:12px;color:var(--muted);line-height:1.6}
@@ -103,8 +106,9 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
    <label>近M期 <input id="setm" type="number" min="1" max="200" inputmode="numeric"></label>
    <label>少数方M <input id="setmn" type="number" min="1" max="200" inputmode="numeric"></label>
    <button class="snd on" id="bestbtn" type="button">最佳算法</button>
+   <a href="#" id="bestmore" hidden>详情</a>
   </div>
-  <div class="note" id="bestbox" hidden></div>
+  <div class="note bestbox" id="bestbox" hidden><button class="bx" id="bestx" type="button" aria-label="关闭">×</button><div id="bestfill" hidden></div><div id="bestdetail"></div></div>
   <table><thead><tr><th>算法</th><th>参考</th><th>回测命中（所选期数）</th></tr></thead><tbody id="reftable"></tbody></table>
   <div class="stats" id="refstats"></div>
   <div class="note">开奖为哈希末位，单双各约50%，各算法命中率理论上也约50%，统计仅供参考，不保证命中。回测为逐期向前：每期只用该期之前的数据。</div>
@@ -288,7 +292,7 @@ function bestLine(label,a,extra){
   return "<div><b>"+label+"</b> "+extra+"<br>训练："+seg(a.train)+"<br>最近验证："+seg(a.holdout)+"</div>";
 }
 function showBest(b){
-  var box=$("bestbox");box.hidden=false;
+  var box=$("bestdetail");
   if(!b.ready){box.textContent="历史数据不足（已有 "+b.periods+" 期，至少需要 "+b.need+" 期），暂无法计算最佳算法。";return}
   var A=b.algorithms,dr=A.dragon,cutMode=dr.mode==="cut";
   var html="<div><b>目标：连挂最少</b>（"+b.objective+"）</div>";
@@ -306,17 +310,36 @@ function fillBest(b){
   var A=b.algorithms,dr=A.dragon;
   $("setmode").value=dr.mode;$("setn").value=dr.n;$("setm").value=A.ratio.m;$("setmn").value=A.minority.m;
   ["setmode","setn","setm","setmn"].forEach(function(id){flash($(id))});
-  var line=document.createElement("div");line.className="filled-line";
+  var line=$("bestfill");line.className="filled-line";line.hidden=false;
   line.innerHTML="<b>已填入：</b>模式 "+(dr.mode==="cut"?"斩龙":"跟龙")+" · 龙长≥N "+dr.n+" · 近M期 "+A.ratio.m+" · 少数方M "+A.minority.m+"（与之前相同也已重新应用并刷新）";
-  $("bestbox").insertBefore(line,$("bestbox").firstChild);
   saveCfg();
 }
+// 提示框自动收起：详情框 10 秒、绿色「已填入」行 5 秒；鼠标停在框上暂停计时；点 × 或「详情」可手动关/开
+var DETAIL_MS=10000,FILL_MS=5000,hideT={};
+function armHide(key,ms,fn){
+  var t=hideT[key]=hideT[key]||{};
+  clearTimeout(t.id);t.fn=function(){t.id=0;fn()};t.left=ms;t.paused=false;t.at=Date.now();t.id=setTimeout(t.fn,ms);
+}
+function pauseHide(){for(var k in hideT){var t=hideT[k];if(t.id&&!t.paused){clearTimeout(t.id);t.left=Math.max(0,t.left-(Date.now()-t.at));t.paused=true}}}
+function resumeHide(){for(var k in hideT){var t=hideT[k];if(t.id&&t.paused){t.paused=false;t.at=Date.now();t.id=setTimeout(t.fn,t.left)}}}
+function cancelHide(key){var t=hideT[key];if(t){clearTimeout(t.id);t.id=0}}
+function hideFill(){cancelHide("fill");$("bestfill").hidden=true}
+function hideBest(){cancelHide("detail");hideFill();$("bestbox").hidden=true}
+function openBest(withFill){
+  $("bestbox").hidden=false;$("bestmore").hidden=false;
+  armHide("detail",DETAIL_MS,hideBest);
+  if(withFill)armHide("fill",FILL_MS,hideFill);else{cancelHide("fill");$("bestfill").hidden=true}
+}
+$("bestbox").onmouseenter=pauseHide;$("bestbox").onmouseleave=resumeHide;
+$("bestx").onclick=hideBest;
+$("bestmore").onclick=function(e){e.preventDefault();if($("bestbox").hidden)openBest(false);else hideBest()};
 $("bestbtn").onclick=function(){
   var btn=$("bestbtn");btn.disabled=true;btn.textContent="计算中…";
   fetch("/api/tron-draw/best",{cache:"no-store"}).then(function(r){return r.json()}).then(function(b){
     showBest(b);
     if(b.ready)fillBest(b);
-  }).catch(function(){$("bestbox").hidden=false;$("bestbox").textContent="计算失败，请稍后重试。"}).then(function(){btn.disabled=false;btn.textContent="最佳算法"});
+    openBest(!!b.ready);
+  }).catch(function(){$("bestdetail").textContent="计算失败，请稍后重试。";$("bestfill").hidden=true;openBest(false)}).then(function(){btn.disabled=false;btn.textContent="最佳算法"});
 };
 $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;
 $("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;

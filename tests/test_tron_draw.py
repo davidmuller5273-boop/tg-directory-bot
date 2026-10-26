@@ -991,7 +991,9 @@ class BestEndpointTest(unittest.TestCase):
                     self.assertEqual(third["latest"], n)
                 self.assertEqual(client.get("/api/tron-draw/best").headers["cache-control"], "no-store")
                 html = client.get("/tron-draw").text
-                for token in ("最佳算法", "/api/tron-draw/best", "bestbtn", "最大连错", "连挂最少", "已填入", "最近验证", "fillBest", "again"):
+                for token in ("最佳算法", "/api/tron-draw/best", "bestbtn", "最大连错", "连挂最少", "已填入", "最近验证", "fillBest", "again",
+                              "bestmore", "bestx", "bestfill", "DETAIL_MS=10000", "FILL_MS=5000",
+                              "onmouseenter", "pauseHide", "resumeHide", "详情"):
                     self.assertIn(token, html)
 
     @unittest.skipIf(TestClient is None, "fastapi not installed")
