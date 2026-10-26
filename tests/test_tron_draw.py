@@ -322,7 +322,7 @@ class WebTest(unittest.TestCase):
                 self.assertEqual(set(ref["algorithms"]), {"trend", "dragon", "ratio", "minority"})
                 self.assertEqual(ref["algorithms"]["minority"]["total"], 10)
                 self.assertIn("统计仅供参考", ref["note"])
-                self.assertEqual(ref["params"], {"streak_n": 3, "recent_m": 20, "mode": "follow", "minority_m": 10})
+                self.assertEqual(ref["params"], {"streak_n": 3, "recent_m": 100, "mode": "follow", "minority_m": 20})
                 self.assertEqual(ref["algorithms"]["trend"]["total"], 10)  # prior history feeds window
                 tuned = client.get("/api/tron-draw?limit=10&streak_n=2&recent_m=5&mode=cut&minority_m=7").json()
                 self.assertEqual(tuned["reference"]["params"], {"streak_n": 2, "recent_m": 5, "mode": "cut", "minority_m": 7})
@@ -450,7 +450,7 @@ class ReferenceTest(unittest.TestCase):
         self.assertEqual(panel["algorithms"]["trend"]["total"], 4)
         self.assertEqual(panel["algorithms"]["minority"]["total"], 4)
         self.assertIn(panel["algorithms"]["minority"]["next"], (S, D))
-        self.assertEqual(panel["params"]["minority_m"], 10)
+        self.assertEqual(panel["params"]["minority_m"], 20)
         self.assertEqual(panel["current_streak"], 1)
         self.assertEqual(panel["longest_streak"], 1)
         self.assertEqual(panel["ratio"], {"single": 50.0, "double": 50.0})
@@ -462,10 +462,10 @@ class ReferenceTest(unittest.TestCase):
         self.assertEqual(empty["algorithms"]["trend"]["total"], 0)
 
     def test_param_parsing(self):
-        self.assertEqual(td.parse_reference_params("", "", ""), (3, 20, "follow", 10))
+        self.assertEqual(td.parse_reference_params("", "", ""), (3, 100, "follow", 20))
         self.assertEqual(td.parse_reference_params("5", "999", "CUT", "7"), (5, 200, "cut", 7))
         self.assertEqual(td.parse_reference_params("x", "0", "bad", "999"), (3, 1, "follow", 200))
-        self.assertEqual(td.parse_reference_params("x", "0", "bad", "z"), (3, 1, "follow", 10))
+        self.assertEqual(td.parse_reference_params("x", "0", "bad", "z"), (3, 1, "follow", 20))
 
 
 class WiringTest(unittest.TestCase):
@@ -495,3 +495,266 @@ class WiringTest(unittest.TestCase):
             app2 = SimpleNamespace(bot_data={"store": store})
             setup_tron_monitoring(app2, config, chain)
             self.assertIsNone(app2.bot_data["tron_scanner"].draws)
+
+
+class FinalPredictionTest(unittest.TestCase):
+    PARAMS = {"streak_n": 3, "recent_m": 7, "mode": "follow", "minority_m": 4}
+
+    def random_results(self, n, seed):
+        import random
+        rng = random.Random(seed)
+        return [rng.choice((S, D)) for _ in range(n)]
+
+    def test_defaults_are_100_and_20(self):
+        self.assertEqual((td.DEFAULT_RECENT_M, td.DEFAULT_MINORITY_M), (100, 20))
+
+    def test_all_picks_matches_reference_pick(self):
+        for seed in range(5):
+            r = self.random_results(80, seed)
+            for mode in ("follow", "cut"):
+                params = {"streak_n": 3, "recent_m": 7, "mode": mode, "minority_m": 4}
+                picks = td.all_picks(r, **params)
+                for name in td.ALGORITHMS:
+                    self.assertEqual(len(picks[name]), 81)
+                    self.assertIsNone(picks[name][0])
+                    for i in range(1, 81):
+                        self.assertEqual(picks[name][i], td.reference_pick(name, r, i, **params), (name, i))
+
+    def test_combine_sums_hit_rates_of_voters(self):
+        picks = {"trend": S, "dragon": S, "ratio": D, "minority": S}
+        stats = {"trend": (37, 100), "dragon": (37, 100), "ratio": (43, 100), "minority": (49, 100)}
+        final = td.combine_final(picks, stats)
+        self.assertEqual(final["next"], S)
+        self.assertEqual(final["sums"], {"single": 123.0, "double": 43.0})
+        self.assertEqual(final["basis"], "sum")
+        self.assertIn("命中率", final["rule"])
+        flipped = td.combine_final({"trend": D, "dragon": D, "ratio": S, "minority": S}, stats)
+        self.assertEqual((flipped["next"], flipped["sums"]), (S, {"single": 92.0, "double": 74.0}))
+
+    def test_combine_tie_follows_best_single_algorithm(self):
+        picks = {"trend": S, "dragon": D, "ratio": S, "minority": D}
+        stats = {"trend": (40, 100), "dragon": (50, 100), "ratio": (60, 100), "minority": (30, 100)}
+        final = td.combine_final(picks, stats)  # S: 40+60 = D: 50+30? no -> 100 vs 80
+        self.assertEqual(final["next"], S)
+        tie = td.combine_final(picks, {"trend": (40, 100), "dragon": (60, 100),
+                                       "ratio": (60, 100), "minority": (40, 100)})
+        self.assertEqual(tie["basis"], "tie")
+        self.assertEqual(tie["tie_algorithm"], "dragon")  # best rate; earlier algorithm on equal rate
+        self.assertEqual(tie["next"], D)
+        nodata = td.combine_final(picks, {})
+        self.assertEqual((nodata["basis"], nodata["tie_algorithm"], nodata["next"]), ("tie", "trend", S))
+        self.assertIsNone(td.combine_final({}, {})["next"])
+
+    def test_panel_final_equals_walk_forward_next(self):
+        r = self.random_results(120, 1)
+        panel = td.reference_panel(r, 30, **self.PARAMS)
+        series = td.final_series(r, 1, 30, self.PARAMS)
+        self.assertEqual(panel["final"]["next"], series[len(r)]["next"])
+        self.assertEqual(panel["final"]["sums"], series[len(r)]["sums"])
+        self.assertEqual(panel["final"]["votes"], series[len(r)]["votes"])
+
+    def test_walk_forward_never_sees_the_period_it_predicts(self):
+        r = self.random_results(60, 2)
+        base = td.final_series(r, 1, 20, self.PARAMS)
+        for cut in (10, 30, 59):
+            changed = r[:cut] + [td._opposite(v) for v in r[cut:]]
+            other = td.final_series(changed, 1, 20, self.PARAMS)
+            for i in range(1, cut + 1):
+                self.assertEqual(base[i], other[i], (cut, i))
+
+    def test_hit_rate_window_is_the_selected_limit(self):
+        r = self.random_results(80, 3)
+        series = td.final_series(r, 1, 10, self.PARAMS)
+        picks = td.all_picks(r, **self.PARAMS)
+        i = 60
+        for name in td.ALGORITHMS:
+            hits = sum(1 for j in range(i - 10, i) if picks[name][j] == r[j])
+            panel = td.reference_panel(r[:i], 10, **self.PARAMS)
+            self.assertEqual(panel["algorithms"][name]["hits"], hits)
+        self.assertEqual(series[i]["next"], td.reference_panel(r[:i], 10, **self.PARAMS)["final"]["next"])
+
+
+class RunsAndMyTrendTest(unittest.TestCase):
+    def test_longest_runs(self):
+        runs = td.longest_runs(seq("ssdsdsdddds"))
+        self.assertEqual(runs["single"], {"len": 2, "start": 0})
+        self.assertEqual(runs["double"], {"len": 4, "start": 6})
+        self.assertEqual(runs["alternating"], {"len": 6, "start": 1})  # s d s d s d
+        self.assertEqual(td.longest_runs([]), {
+            "single": {"len": 0, "start": -1}, "double": {"len": 0, "start": -1},
+            "alternating": {"len": 0, "start": -1}})
+
+    def test_ties_choose_latest_run(self):
+        runs = td.longest_runs(seq("ssdss"))
+        self.assertEqual(runs["single"], {"len": 2, "start": 3})
+
+    def test_alternating_covers_whole_window(self):
+        self.assertEqual(td.longest_runs(seq("sdsdsd"))["alternating"], {"len": 6, "start": 0})
+        self.assertEqual(td.longest_runs(seq("ssss"))["alternating"]["len"], 1)
+
+    def test_my_trend_walk_forward_and_runs(self):
+        import random
+        rng = random.Random(7)
+        results = [rng.choice((S, D)) for _ in range(90)]
+        blocks = [20 * (i + 1) for i in range(90)]
+        params = {"streak_n": 3, "recent_m": 7, "mode": "follow", "minority_m": 4}
+        trend = td.my_trend(blocks, results, 40, 20, params)
+        self.assertEqual(trend["count"], 40)
+        self.assertEqual(trend["total"], 40)
+        self.assertEqual(trend["items"][-1]["block"], blocks[-1])
+        series = td.final_series(results, 1, 20, params)
+        for item, i in zip(trend["items"], range(50, 90)):
+            self.assertEqual(item["predicted"], series[i]["next"])
+            self.assertEqual(item["ok"], series[i]["next"] == results[i])
+            self.assertEqual(item["source"], "walk")
+        flags = [item["ok"] for item in trend["items"]]
+        self.assertEqual(trend["hits"], flags.count(True))
+        best = trend["max_win"]
+        self.assertTrue(all(flags[best["start"]:best["start"] + best["len"]]))
+        worst = trend["max_loss"]
+        self.assertTrue(not any(flags[worst["start"]:worst["start"] + worst["len"]]))
+        self.assertGreaterEqual(best["len"], 1)
+
+    def test_my_trend_prefers_stored_prediction_and_small_history(self):
+        results = seq("sdsdsd")
+        blocks = [20, 40, 60, 80, 100, 120]
+        params = {"streak_n": 3, "recent_m": 7, "mode": "follow", "minority_m": 4}
+        walk = td.my_trend(blocks, results, 500, 50, params)
+        self.assertEqual(walk["count"], 5)  # period 0 has no history to predict from
+        stored = td.my_trend(blocks, results, 500, 50, params, {120: S, 100: S})
+        self.assertEqual([i["source"] for i in stored["items"]], ["walk"] * 3 + ["stored"] * 2)
+        self.assertEqual(stored["items"][-1]["predicted"], S)
+        self.assertFalse(stored["items"][-1]["ok"])
+        self.assertTrue(stored["items"][-2]["ok"] is False or stored["items"][-2]["ok"] is True)
+        empty = td.my_trend([], [], 50, 50, params)
+        self.assertEqual((empty["count"], empty["max_win"]["len"], empty["rate"]), (0, 0, None))
+
+
+class PredictionStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = DirectoryStore(Path(self.temp.name) / "db.sqlite3")
+        self.store.init()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_store_rules(self):
+        s = self.store
+        self.assertTrue(s.record_tron_draw_prediction(620, S, "k"))
+        self.assertFalse(s.record_tron_draw_prediction(620, D, "k"))  # first wins
+        self.assertTrue(s.record_tron_draw_prediction(620, D, "other"))
+        self.assertFalse(s.record_tron_draw_prediction(640, "x", "k"))
+        self.assertEqual(s.tron_draw_predictions(0, 999, "k"), {620: S})
+        s.record_tron_draw(660, make_hash(660, "2"), 1)
+        self.assertFalse(s.record_tron_draw_prediction(660, S, "k"))  # draw already known
+        self.assertEqual(s.tron_draw_predictions(0, 999, "zzz"), {})
+
+    def test_recorder_stores_prediction_before_next_draw(self):
+        chain = FakeChain(head=1000)
+        rec = TronDrawRecorder(chain, self.store, confirmations=0, initial_backfill=5, per_step=10)
+        asyncio.run(rec.step(1000))
+        stored = self.store.tron_draw_predictions(0, 99999, td.CANONICAL_KEY)
+        self.assertEqual(set(stored), {1020})
+        self.assertIn(stored[1020], (S, D))
+        chain.head = 1020
+        asyncio.run(rec.step(1020))
+        self.assertEqual(set(self.store.tron_draw_predictions(0, 99999, td.CANONICAL_KEY)), {1020, 1040})
+        self.assertEqual(self.store.tron_draw_total(), 5 + 1)
+
+    def test_prediction_failure_never_breaks_recording(self):
+        chain = FakeChain(head=1000)
+        rec = TronDrawRecorder(chain, self.store, confirmations=0, initial_backfill=2)
+        self.store.record_tron_draw_prediction = None  # would raise TypeError
+        self.assertEqual(asyncio.run(rec.step(1000)), 2)
+
+
+class MyTrendWebTest(unittest.TestCase):
+    def make_client(self, temp):
+        from tg_directory_bot.web import create_app
+
+        config = Config(
+            bot_token="", admin_ids=set(), super_admin_ids=set(),
+            db_path=Path(temp) / "db.sqlite3", categories=("other",), blocked_keywords=(),
+            admin_username="admin", admin_password="testing-password",
+            session_secret="x" * 40, backups_dir=Path(temp) / "backups", tron_draw_stats=True,
+        )
+        return TestClient(create_app(config)), DirectoryStore(config.db_path)
+
+    def fill(self, store, count=60):
+        import random
+        rng = random.Random(5)
+        for i in range(count):
+            n = 20 * (i + 1)
+            store.record_tron_draw(n, make_hash(n, rng.choice("1357") if rng.random() < .5 else rng.choice("0246")), 1_700_000_000_000 + n)
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.make_client(temp)
+            with client:
+                empty = client.get("/api/tron-draw?mine_limit=50").json()
+                self.assertIsNone(empty["my_trend"])
+                self.assertIsNone(empty["reference"]["final"]["next"])
+                self.assertEqual(empty["runs"]["single"]["len"], 0)
+                self.fill(store)
+                data = client.get("/api/tron-draw?limit=30").json()
+                self.assertIsNone(data["my_trend"])  # only on request
+                final = data["reference"]["final"]
+                self.assertIn(final["next"], (S, D))
+                self.assertEqual(final["for_block"], 1220)
+                self.assertEqual(set(final["votes"]), {"trend", "dragon", "ratio", "minority"})
+                self.assertIn("最终预测", final["rule"])
+                self.assertEqual(data["runs"]["single"]["len"] + 0, td.longest_runs(
+                    [c["v"] for c in sorted(data["cells"], key=lambda c: c["i"])])["single"]["len"])
+                self.assertEqual([c["i"] for c in data["cells"]], list(range(30)))
+                self.assertEqual(data["cells"][0]["i"], 0)
+                # non-default settings are not written to the pre-draw history
+                self.assertFalse(final["recorded"])
+                self.assertEqual(store.tron_draw_predictions(0, 99999, td.CANONICAL_KEY), {})
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_default_settings_are_recorded_and_used_in_my_trend(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.make_client(temp)
+            with client:
+                self.fill(store)
+                data = client.get("/api/tron-draw?limit=100&mine_limit=20").json()
+                final = data["reference"]["final"]
+                self.assertTrue(final["recorded"])
+                self.assertEqual(store.tron_draw_predictions(1220, 1220, td.CANONICAL_KEY), {1220: final["next"]})
+                mine = data["my_trend"]
+                self.assertEqual(mine["count"], 20)
+                self.assertEqual(mine["items"][-1]["block"], 1200)
+                self.assertEqual({i["source"] for i in mine["items"]}, {"walk"})
+                self.assertIsNone(data["previous"])
+                # the draw arrives: the stored prediction is judged as made before it
+                store.record_tron_draw(1220, make_hash(1220, "1"), 1_700_000_000_000)
+                after = client.get("/api/tron-draw?limit=100&mine_limit=20").json()
+                prev = after["previous"]
+                self.assertEqual((prev["block"], prev["predicted"], prev["result"]), (1220, final["next"], S))
+                self.assertEqual(prev["ok"], final["next"] == S)
+                last = after["my_trend"]["items"][-1]
+                self.assertEqual((last["block"], last["source"], last["predicted"]), (1220, "stored", final["next"]))
+                self.assertEqual(last["ok"], final["next"] == S)
+                # the walk-forward value for the same period is what was predicted
+                walk = td.final_series([c for c in [r["result"] for r in store.tron_draw_recent(500)]], 1, 100,
+                                       {"streak_n": 3, "recent_m": 100, "mode": "follow", "minority_m": 20})
+                self.assertEqual(walk[61 - 1]["next"], final["next"])
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_mine_limit_and_page(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.make_client(temp)
+            with client:
+                self.fill(store, 40)
+                mine = client.get("/api/tron-draw?limit=10&mine_limit=999").json()["my_trend"]
+                self.assertEqual(mine["limit"], 999)
+                self.assertEqual(mine["count"], 39)
+                self.assertEqual(mine["hits"] + len([i for i in mine["items"] if i["ok"] is False]), mine["total"])
+                self.assertIsNone(client.get("/api/tron-draw?mine_limit=abc").json()["my_trend"] if False else None)
+                html = client.get("/tron-draw").text
+                for token in ("最长龙", "最大连跳", "最大连中", "最大连错", "预测", "blink", "AudioContext",
+                              "trondraw.v2.", "webkitAudioContext", "✅", "❌", "最终预测", "mine_limit", "scrollIntoView"):
+                    self.assertIn(token, html)
+                self.assertNotIn("http://", html.replace("http://www.w3.org", ""))

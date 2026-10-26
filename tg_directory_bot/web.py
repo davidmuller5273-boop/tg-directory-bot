@@ -18,7 +18,8 @@ from .config import Config
 from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
 from .tron_draw import (
-    DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, lookback_needed, parse_limit,
+    CANONICAL_KEY, DRAW_INTERVAL, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
+    lookback_needed, my_trend, parse_limit,
     parse_reference_params, reference_panel,
 )
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
@@ -87,16 +88,42 @@ def create_app(config: Config) -> FastAPI:
 
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
     def tron_draw_payload(
-        limit: int, streak_n: int = 3, recent_m: int = 20, mode: str = "follow",
-        minority_m: int = 10,
+        limit: int, streak_n: int = 3, recent_m: int = 100, mode: str = "follow",
+        minority_m: int = 20, mine_limit: int = 0,
     ) -> dict:
         extra = lookback_needed(streak_n, recent_m, minority_m)
-        all_rows = store.tron_draw_recent(limit + extra)
+        all_rows = store.tron_draw_recent(limit + extra + mine_limit)
         rows = all_rows[-limit:]
-        reference = reference_panel(
-            [str(row["result"]) for row in all_rows], limit,
-            streak_n=streak_n, recent_m=recent_m, mode=mode, minority_m=minority_m,
-        )
+        params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode, "minority_m": minority_m}
+        reference = reference_panel([str(row["result"]) for row in all_rows], limit, **params)
+        key = config_key(limit, streak_n, mode, recent_m, minority_m)
+        next_block = int(all_rows[-1]["block_number"]) + DRAW_INTERVAL if all_rows else None
+        reference["final"]["for_block"] = next_block
+        reference["final"]["recorded"] = False
+        if next_block and reference["final"]["next"]:
+            if key == CANONICAL_KEY:  # default settings: keep the pre-draw history
+                store.record_tron_draw_prediction(next_block, reference["final"]["next"], key)
+            reference["final"]["recorded"] = next_block in store.tron_draw_predictions(
+                next_block, next_block, key,
+            )
+        previous = None
+        if all_rows:
+            last_block = int(all_rows[-1]["block_number"])
+            stored_last = store.tron_draw_predictions(last_block, last_block, key).get(last_block)
+            if stored_last:
+                previous = {
+                    "block": last_block, "predicted": stored_last,
+                    "result": str(all_rows[-1]["result"]),
+                    "ok": stored_last == str(all_rows[-1]["result"]),
+                }
+        mine = None
+        if mine_limit > 0 and all_rows:
+            blocks = [int(row["block_number"]) for row in all_rows]
+            stored = store.tron_draw_predictions(blocks[0], blocks[-1], key)
+            mine = my_trend(
+                blocks, [str(row["result"]) for row in all_rows], mine_limit, limit,
+                params, stored,
+            )
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
         latest = rows[-1] if rows else None
@@ -109,6 +136,9 @@ def create_app(config: Config) -> FastAPI:
             "max_rows": MAX_ROWS,
             "cells": cells,
             "reference": reference,
+            "runs": longest_runs([str(row["result"]) for row in rows]),
+            "previous": previous,
+            "my_trend": mine,
             "latest": None if latest is None else int(latest["block_number"]),
             "next_draw_block": None if latest is None else int(latest["block_number"]) + DRAW_INTERVAL,
             "recent": [
@@ -127,13 +157,15 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/tron-draw")
     async def tron_draw_api(
         limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
-        minority_m: str = "",
+        minority_m: str = "", mine_limit: str = "0",
     ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
+        mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
         return JSONResponse(
             tron_draw_payload(
                 parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
+                mine_limit=mine,
             ),
             headers={"Cache-Control": "no-store"},
         )

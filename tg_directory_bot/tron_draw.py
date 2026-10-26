@@ -87,8 +87,9 @@ def parse_limit(raw, default: int = 100, maximum: int = 5000) -> int:
 # --- 参考方向 (fixed algorithms, pure history statistics, no look-ahead) ---
 
 DEFAULT_STREAK_N = 3
-DEFAULT_RECENT_M = 20
-DEFAULT_MINORITY_M = 10
+DEFAULT_RECENT_M = 100
+DEFAULT_MINORITY_M = 20
+DEFAULT_LIMIT = 100
 MODE_FOLLOW = "follow"  # 跟龙
 MODE_CUT = "cut"  # 斩龙
 ALGORITHMS = ("trend", "dragon", "ratio", "minority")  # 顺势 / 跟龙·斩龙 / 近期占比 / 近期少数方
@@ -209,8 +210,13 @@ def reference_panel(
         result = backtest(name, results, window_start, **params)
         result["next"] = reference_pick(name, results, **params)
         algorithms[name] = result
+    final = combine_final(
+        {name: algorithms[name]["next"] for name in ALGORITHMS},
+        {name: (algorithms[name]["hits"], algorithms[name]["total"]) for name in ALGORITHMS},
+    )
     return {
         "note": REFERENCE_NOTE,
+        "final": final,
         "params": params,
         "current_streak": streak_at(window),
         "current_value": window[-1] if window else None,
@@ -222,6 +228,211 @@ def reference_panel(
         "omission": omissions(window),
         "algorithms": algorithms,
     }
+
+
+# --- 最终预测 / 最长龙 / 最大连跳 / 我的走势 ---
+
+FINAL_RULE = (
+    "最终预测：把投票给同一方的各算法回测命中率(%)相加，合计较大的一方即为预测；"
+    "合计相等时，跟随回测命中率最高的单个算法。仅为统计参考，不保证命中。"
+)
+
+
+def combine_final(picks: dict, stats: dict) -> dict:
+    """Combine the algorithms: sum the hit-rate % of each side's voters.
+
+    ``picks``: name -> 单/双/None; ``stats``: name -> (hits, total) over the
+    backtest window. Tie -> the single algorithm with the best hit rate
+    (first in ``ALGORITHMS`` order on equal rates).
+    """
+    sums = {SINGLE: 0.0, DOUBLE: 0.0}
+    rates: dict[str, float] = {}
+    for name in ALGORITHMS:
+        pick = picks.get(name)
+        hits, total = stats.get(name, (0, 0))
+        if pick is None or not total:
+            continue
+        rates[name] = hits * 100 / total
+        sums[pick] += rates[name]
+    voters = [name for name in ALGORITHMS if picks.get(name)]
+    result = {
+        "next": None, "basis": "none", "tie_algorithm": None,
+        "sums": {"single": round(sums[SINGLE], 1), "double": round(sums[DOUBLE], 1)},
+        "votes": {name: picks.get(name) for name in ALGORITHMS},
+        "rule": FINAL_RULE,
+    }
+    if not voters:
+        return result
+    if abs(sums[SINGLE] - sums[DOUBLE]) > 1e-9:
+        result["next"] = SINGLE if sums[SINGLE] > sums[DOUBLE] else DOUBLE
+        result["basis"] = "sum"
+        return result
+    best = max(voters, key=lambda name: (rates.get(name, -1.0), -ALGORITHMS.index(name)))
+    result["next"] = picks[best]
+    result["basis"] = "tie"
+    result["tie_algorithm"] = best
+    return result
+
+
+def all_picks(
+    results: list[str], *, streak_n: int = DEFAULT_STREAK_N, recent_m: int = DEFAULT_RECENT_M,
+    mode: str = MODE_FOLLOW, minority_m: int = DEFAULT_MINORITY_M,
+) -> dict[str, list]:
+    """O(n) version of ``reference_pick`` for every index 0..n.
+
+    ``out[name][i]`` is the pick for period ``i`` from ``results[:i]`` only.
+    """
+    n = len(results)
+    pre = [0] * (n + 1)
+    run = [0] * (n + 1)
+    for i, value in enumerate(results):
+        pre[i + 1] = pre[i] + (value == SINGLE)
+        run[i + 1] = run[i] + 1 if i > 0 and results[i - 1] == value else 1
+    out: dict[str, list] = {name: [None] * (n + 1) for name in ALGORITHMS}
+    for i in range(1, n + 1):
+        last = results[i - 1]
+        out["trend"][i] = last
+        cut = mode == MODE_CUT and run[i] >= streak_n
+        out["dragon"][i] = _opposite(last) if cut else last
+        for name, size in (("ratio", recent_m), ("minority", minority_m)):
+            low = max(0, i - size)
+            singles = pre[i] - pre[low]
+            doubles = (i - low) - singles
+            if singles == doubles:
+                out[name][i] = last
+            elif name == "ratio":
+                out[name][i] = SINGLE if singles > doubles else DOUBLE
+            else:
+                out[name][i] = SINGLE if singles < doubles else DOUBLE
+    return out
+
+
+def final_series(results: list[str], start: int, hit_limit: int, params: dict) -> dict[int, dict]:
+    """Walk-forward final prediction for every period index in [start, n].
+
+    Period ``i`` uses only ``results[:i]``: each algorithm's pick for ``i`` and
+    its hit rate over the ``hit_limit`` periods right before ``i``. Index ``n``
+    is the next, not yet drawn period.
+    """
+    n = len(results)
+    picks = all_picks(results, **params)
+    prefix = {}
+    for name in ALGORITHMS:
+        acc = [0] * (n + 1)
+        for j in range(n):
+            acc[j + 1] = acc[j] + (1 if j >= 1 and picks[name][j] == results[j] else 0)
+        prefix[name] = acc
+    out = {}
+    for i in range(max(1, int(start)), n + 1):
+        low = max(1, i - int(hit_limit))
+        stats = {name: (prefix[name][i] - prefix[name][low], i - low) for name in ALGORITHMS}
+        out[i] = combine_final({name: picks[name][i] for name in ALGORITHMS}, stats)
+    return out
+
+
+def _runs(values: list, match) -> dict:
+    """Longest run of consecutive items accepted by ``match`` (latest on ties)."""
+    best_len, best_start, index, n = 0, -1, 0, len(values)
+    while index < n:
+        if not match(values[index]):
+            index += 1
+            continue
+        end = index
+        while end + 1 < n and match(values[end + 1]):
+            end += 1
+        if end - index + 1 >= best_len:
+            best_len, best_start = end - index + 1, index
+        index = end + 1
+    return {"len": best_len, "start": best_start}
+
+
+def longest_runs(results: list[str]) -> dict:
+    """最长龙 单/双 and 最大连跳 (alternating 单双单双…) in the window.
+
+    ``start`` is the index in ``results``; ties choose the most recent run.
+    """
+    runs = {
+        "single": _runs(results, lambda value: value == SINGLE),
+        "double": _runs(results, lambda value: value == DOUBLE),
+    }
+    best_len, best_start, index, n = 0, -1, 0, len(results)
+    while index < n:
+        end = index
+        while end + 1 < n and results[end + 1] != results[end]:
+            end += 1
+        if end - index + 1 >= best_len:
+            best_len, best_start = end - index + 1, index
+        index = end + 1
+    runs["alternating"] = {"len": best_len, "start": best_start}
+    return runs
+
+
+def my_trend(
+    blocks: list[int], results: list[str], mine_limit: int, hit_limit: int,
+    params: dict, stored: dict | None = None,
+) -> dict:
+    """我的走势: was the final prediction right, for the last ``mine_limit`` periods.
+
+    A stored (pre-draw) prediction wins over the walk-forward recomputation.
+    """
+    n = len(results)
+    start = max(1, n - int(mine_limit))
+    series = final_series(results, start, hit_limit, params)
+    items = []
+    for i in range(start, n):
+        predicted, source = series[i]["next"], "walk"
+        if stored and blocks[i] in stored:
+            predicted, source = stored[blocks[i]], "stored"
+        items.append({
+            "block": int(blocks[i]), "predicted": predicted, "result": results[i],
+            "ok": None if predicted is None else predicted == results[i], "source": source,
+        })
+    flags = [item["ok"] for item in items]
+    hits = sum(1 for flag in flags if flag is True)
+    total = sum(1 for flag in flags if flag is not None)
+    return {
+        "limit": int(mine_limit),
+        "count": len(items),
+        "hits": hits,
+        "total": total,
+        "rate": round(hits * 100 / total, 1) if total else None,
+        "max_win": _runs(flags, lambda flag: flag is True),
+        "max_loss": _runs(flags, lambda flag: flag is False),
+        "items": items,
+    }
+
+
+def config_key(limit: int, streak_n: int, mode: str, recent_m: int, minority_m: int) -> str:
+    return f"{int(limit)}|{int(streak_n)}|{mode}|{int(recent_m)}|{int(minority_m)}"
+
+
+CANONICAL_KEY = config_key(
+    DEFAULT_LIMIT, DEFAULT_STREAK_N, MODE_FOLLOW, DEFAULT_RECENT_M, DEFAULT_MINORITY_M,
+)
+
+
+def record_next_prediction(store) -> bool:
+    """Store the default-settings final prediction for the next draw block.
+
+    Called by the recorder right after a draw is recorded (a minute before the
+    next one), so the history holds what was really predicted before the draw.
+    """
+    params = {
+        "streak_n": DEFAULT_STREAK_N, "recent_m": DEFAULT_RECENT_M, "mode": MODE_FOLLOW,
+        "minority_m": DEFAULT_MINORITY_M,
+    }
+    rows = store.tron_draw_recent(
+        DEFAULT_LIMIT + lookback_needed(DEFAULT_STREAK_N, DEFAULT_RECENT_M, DEFAULT_MINORITY_M),
+    )
+    if not rows:
+        return False
+    panel = reference_panel([str(row["result"]) for row in rows], DEFAULT_LIMIT, **params)
+    predicted = panel["final"]["next"]
+    if predicted is None:
+        return False
+    return store.record_tron_draw_prediction(
+        int(rows[-1]["block_number"]) + DRAW_INTERVAL, predicted, CANONICAL_KEY,
+    )
 
 
 def parse_reference_params(
@@ -252,6 +463,7 @@ class TronDrawRecorder:
         self.per_step = max(1, int(per_step))
         self._pending: list[int] = []
         self._planned_for = 0
+        self._predicted_for = 0
         self._retry_at = 0.0
         self.stats = {"recorded": 0, "requests": 0, "errors": 0}
 
@@ -289,6 +501,7 @@ class TronDrawRecorder:
             self._planned_for = latest
         recorded = await self._verify(head)
         if not self._pending or time.monotonic() < self._retry_at:
+            self._predict_next()
             return recorded
         for _ in range(self.per_step):
             if not self._pending:
@@ -311,7 +524,19 @@ class TronDrawRecorder:
                 recorded += 1
                 self.stats["recorded"] += 1
             self._pending.pop(0)
+        self._predict_next()
         return recorded
+
+    def _predict_next(self) -> None:
+        """Remember the final prediction for the next draw (never raises)."""
+        try:
+            newest = self.store.tron_draw_recent(1)
+            if not newest or int(newest[0]["block_number"]) == self._predicted_for:
+                return
+            self._predicted_for = int(newest[0]["block_number"])
+            record_next_prediction(self.store)
+        except Exception:  # statistics only; recording draws must not fail
+            logger.exception("TRON draw prediction record failed")
 
     async def _verify(self, head: int) -> int:
         """Re-check hashes recorded from young blocks once they are solidified.

@@ -613,6 +613,13 @@ class DirectoryStore(FeatureStoreMixin):
                     block_timestamp_ms INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS tron_draw_predictions (
+                    block_number INTEGER NOT NULL,
+                    config TEXT NOT NULL,
+                    predicted TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (block_number, config)
+                );
                 CREATE TABLE IF NOT EXISTS tron_monitors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     owner_id INTEGER NOT NULL,
@@ -2210,6 +2217,34 @@ class DirectoryStore(FeatureStoreMixin):
                  int(timestamp_ms or 0), int(block_number)),
             )
             return cursor.rowcount > 0
+
+    def record_tron_draw_prediction(self, block_number: int, predicted: str, config: str) -> bool:
+        """Store the final prediction shown for draw block ``block_number``.
+
+        Written once (first wins) and only BEFORE that draw exists, so the
+        history can never be rewritten after the result is known.
+        """
+        if predicted not in ("单", "双") or int(block_number) <= 0:
+            return False
+        with self.connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM tron_draws WHERE block_number=?", (int(block_number),),
+            ).fetchone():
+                return False
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO tron_draw_predictions (block_number, config, predicted) "
+                "VALUES (?, ?, ?)", (int(block_number), str(config)[:120], predicted),
+            )
+            return cursor.rowcount > 0
+
+    def tron_draw_predictions(self, low: int, high: int, config: str) -> dict[int, str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT block_number, predicted FROM tron_draw_predictions "
+                "WHERE config=? AND block_number BETWEEN ? AND ?",
+                (str(config)[:120], int(low), int(high)),
+            ).fetchall()
+        return {int(row["block_number"]): str(row["predicted"]) for row in rows}
 
     def tron_draw_existing(self, low: int, high: int) -> set[int]:
         with self.connect() as conn:
