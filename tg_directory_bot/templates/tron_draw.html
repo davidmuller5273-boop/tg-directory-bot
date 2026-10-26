@@ -43,6 +43,9 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .set select{width:auto}
 .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 12px;font-size:13px;margin-top:8px}
 .stats div span{color:var(--muted)}
+.filled{animation:fl 1.6s ease-out}
+@keyframes fl{0%{background:#ffe08a;box-shadow:0 0 0 3px #ffc53d}100%{background:#fff;box-shadow:0 0 0 0 transparent}}
+.filled-line{background:#e6f4ea;color:#1b6e3a;border-radius:6px;padding:4px 8px;margin-bottom:6px}
 .note{background:#fff9db;color:#8a6d00;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
 .rule{font-size:12px;color:var(--muted);line-height:1.6}
 .lnk{color:#364fc7;cursor:pointer;text-decoration:underline;white-space:nowrap}
@@ -121,7 +124,7 @@ function $(id){return document.getElementById(id)}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 var limit=clamp(localStorage.getItem("trondraw.limit"),100,1,5000);
 var mine=clamp(ls("mine","100"),100,1,5000);
-var tab="block",busy=false,soundOn=ls("sound","0")==="1";
+var tab="block",busy=false,again=false,soundOn=ls("sound","0")==="1";
 var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比",minority:"近期少数方"};
 var cfg={n:clamp(ls("n","3"),3,2,50),m:clamp(ls("m","100"),100,1,200),mn:clamp(ls("mn","20"),20,1,200),mode:ls("mode","follow")==="cut"?"cut":"follow"};
 var lastLatest=null,lastScrollKey="",lastMineKey="",hl=null,hlTimer=null;
@@ -255,10 +258,10 @@ function render(d){
   if(tab==="mine")renderMine(d);
   applyHl();
 }
-function load(){
-  if(busy)return;busy=true;
+function load(force){
+  if(busy){if(force)again=true;return}busy=true;
   var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+(tab==="mine"?"&mine_limit="+mine:"");
-  fetch(q,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false});
+  fetch(q,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false;if(again){again=false;load()}});
 }
 function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark("periods",limit);load()}
 function setMine(n){mine=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"mine",mine);mark("mperiods",mine);load()}
@@ -277,32 +280,42 @@ document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){
 function saveCfg(){
   cfg.n=clamp($("setn").value,3,2,50);cfg.m=clamp($("setm").value,100,1,200);cfg.mn=clamp($("setmn").value,20,1,200);cfg.mode=$("setmode").value==="cut"?"cut":"follow";
   localStorage.setItem(K+"n",cfg.n);localStorage.setItem(K+"m",cfg.m);localStorage.setItem(K+"mn",cfg.mn);localStorage.setItem(K+"mode",cfg.mode);
-  load();
+  load(true);
 }
 function pct(x){return x.total?x.rate+"%（"+x.hits+"/"+x.total+"）":"-"}
+function seg(x){return x.total?"最大连错 "+x.max_loss+"（"+x.max_loss_count+"次），命中 "+pct(x):"-"}
 function bestLine(label,a,extra){
-  return "<div><b>"+label+"</b> "+extra+"：历史训练 "+pct(a.train)+" · 最近验证 "+pct(a.holdout)+"</div>";
+  return "<div><b>"+label+"</b> "+extra+"<br>训练："+seg(a.train)+"<br>最近验证："+seg(a.holdout)+"</div>";
 }
 function showBest(b){
   var box=$("bestbox");box.hidden=false;
   if(!b.ready){box.textContent="历史数据不足（已有 "+b.periods+" 期，至少需要 "+b.need+" 期），暂无法计算最佳算法。";return}
-  var A=b.algorithms,dr=A.dragon;
-  var html=bestLine(dr.mode==="cut"?"斩龙":"跟龙",dr,dr.mode==="cut"?"N="+dr.n:"（与顺势相同，斩龙均不更优）")+
-    bestLine("近期占比",A.ratio,"M="+A.ratio.m)+bestLine("近期少数方",A.minority,"M="+A.minority.m);
-  html+="<div>共 "+b.periods+" 期历史：前 "+b.split.train+" 期训练选参，后 "+b.split.holdout+" 期仅用于验证（逐期向前回测，每期只用其之前的数据）。顺势基准：训练 "+pct(b.trend.train)+" · 验证 "+pct(b.trend.holdout)+"。</div>";
-  html+="<div>纯随机时，从 "+b.candidates+" 组设置里挑最好的，训练命中率通常也能到约 "+b.luck_rate+"%。历史最优不代表未来更准，约 50% 属随机范围。</div>";
+  var A=b.algorithms,dr=A.dragon,cutMode=dr.mode==="cut";
+  var html="<div><b>目标：连挂最少</b>（"+b.objective+"）</div>";
+  html+=bestLine(cutMode?"斩龙":"跟龙",dr,cutMode?"N="+dr.n:"（跟龙=顺势，最大连错已不多于斩龙；N="+dr.n+" 是斩龙时的最佳）")+
+    bestLine("近期占比",A.ratio,"M="+A.ratio.m+"（默认 M="+A.ratio.default.m+" 的最大连错：训练 "+A.ratio.default.train.max_loss+" · 验证 "+A.ratio.default.holdout.max_loss+"）")+
+    bestLine("近期少数方",A.minority,"M="+A.minority.m+"（默认 M="+A.minority.default.m+" 的最大连错：训练 "+A.minority.default.train.max_loss+" · 验证 "+A.minority.default.holdout.max_loss+"）");
+  html+="<div><b>最终预测（用上面这组设置）</b><br>训练："+seg(b.final.train)+"<br>最近验证："+seg(b.final.holdout)+"<br>默认设置的最终预测：训练最大连错 "+b.final.default.train.max_loss+" · 验证 "+b.final.default.holdout.max_loss+"</div>";
+  html+="<div>顺势基准：训练 "+seg(b.trend.train)+"；验证 "+seg(b.trend.holdout)+"。</div>";
+  html+="<div>共 "+b.periods+" 期历史：前 "+b.split.train+" 期训练选参，后 "+b.split.holdout+" 期仅用于验证（逐期向前回测，每期只用其之前的数据）。纯随机（公平硬币）的最大连错约 "+b.random_max_loss.train+"（"+b.split.train+" 期）/ "+b.random_max_loss.holdout+"（"+b.split.holdout+" 期）。</div>";
+  html+="<div>"+b.note+"约 50% 命中属随机范围。</div>";
   box.innerHTML=html;
+}
+function flash(el){el.classList.remove("filled");void el.offsetWidth;el.classList.add("filled")}
+function fillBest(b){
+  var A=b.algorithms,dr=A.dragon;
+  $("setmode").value=dr.mode;$("setn").value=dr.n;$("setm").value=A.ratio.m;$("setmn").value=A.minority.m;
+  ["setmode","setn","setm","setmn"].forEach(function(id){flash($(id))});
+  var line=document.createElement("div");line.className="filled-line";
+  line.innerHTML="<b>已填入：</b>模式 "+(dr.mode==="cut"?"斩龙":"跟龙")+" · 龙长≥N "+dr.n+" · 近M期 "+A.ratio.m+" · 少数方M "+A.minority.m+"（与之前相同也已重新应用并刷新）";
+  $("bestbox").insertBefore(line,$("bestbox").firstChild);
+  saveCfg();
 }
 $("bestbtn").onclick=function(){
   var btn=$("bestbtn");btn.disabled=true;btn.textContent="计算中…";
   fetch("/api/tron-draw/best",{cache:"no-store"}).then(function(r){return r.json()}).then(function(b){
     showBest(b);
-    if(b.ready){
-      var A=b.algorithms;
-      if(A.dragon.mode==="cut"){$("setmode").value="cut";$("setn").value=A.dragon.n}else{$("setmode").value="follow"}
-      $("setm").value=A.ratio.m;$("setmn").value=A.minority.m;
-      saveCfg();
-    }
+    if(b.ready)fillBest(b);
   }).catch(function(){$("bestbox").hidden=false;$("bestbox").textContent="计算失败，请稍后重试。"}).then(function(){btn.disabled=false;btn.textContent="最佳算法"});
 };
 $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;

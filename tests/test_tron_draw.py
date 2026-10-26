@@ -845,8 +845,106 @@ class BestParamsTest(unittest.TestCase):
     def test_follow_when_cut_does_not_beat_trend(self):
         r = [S] * 400
         dragon = td.best_params(r)["algorithms"]["dragon"]
-        self.assertEqual((dragon["mode"], dragon["n"]), ("follow", None))
+        self.assertEqual(dragon["mode"], "follow")
+        self.assertIn(dragon["n"], td.BEST_N_RANGE)  # N is still filled (best 斩龙 N) so the input visibly changes
         self.assertEqual(dragon["train"]["rate"], 100.0)
+        self.assertEqual(dragon["train"]["max_loss"], 0)
+
+    def losing_runs(self, r, picks, lo, hi):
+        """(longest losing run, runs at that length) for periods lo..hi-1; picks[i] from r[:i]."""
+        best = count = run = 0
+        for i in range(lo, hi):
+            if picks[i] == r[i]:
+                run = 0
+                continue
+            run += 1
+            if run > best:
+                best, count = run, 1
+            elif run == best:
+                count += 1
+        return best, count
+
+    def test_objective_is_fewest_consecutive_losses(self):
+        r = self.skewed(500, p_single=0.55, seed=5)
+        out = td.best_params(r)
+        sp = out["split"]
+        lo, mid, hi = sp["warmup"], sp["warmup"] + sp["train"], len(r)
+        for name, key in (("ratio", "recent_m"), ("minority", "minority_m")):
+            table = {}
+            for m in td.BEST_M_RANGE:
+                picks = td.all_picks(r, **{key: m})[name]
+                loss, at_max = self.losing_runs(r, picks, lo, mid)
+                hits = sum(1 for i in range(lo, mid) if picks[i] == r[i])
+                table[m] = (loss, -hits, at_max, abs(m - (td.DEFAULT_RECENT_M if name == "ratio" else td.DEFAULT_MINORITY_M)))
+            best_m = min(table, key=lambda m: table[m])
+            chosen = out["algorithms"][name]
+            self.assertEqual(chosen["m"], best_m)
+            self.assertEqual(chosen["train"]["max_loss"], table[best_m][0])
+            self.assertEqual(chosen["train"]["max_loss_count"], table[best_m][2])
+            self.assertEqual(chosen["train"]["hits"], -table[best_m][1])
+            # nothing in the grid has a shorter losing streak on the train segment
+            self.assertEqual(chosen["train"]["max_loss"], min(v[0] for v in table.values()))
+            # the hold-out figures are reported (computed independently)
+            picks = td.all_picks(r, **{key: best_m})[name]
+            self.assertEqual(
+                (chosen["holdout"]["max_loss"], chosen["holdout"]["max_loss_count"]),
+                self.losing_runs(r, picks, mid, hi),
+            )
+            self.assertLessEqual(chosen["train"]["max_loss"], chosen["default"]["train"]["max_loss"])
+
+    def test_tie_break_prefers_more_hits_then_fewer_max_runs(self):
+        seg = td._Seg
+        a, b = seg(), seg()
+        for hit in (1, 1, 0, 0, 1, 1, 1):
+            a.add(bool(hit))
+        for hit in (1, 0, 0, 1, 0, 0, 1):
+            b.add(bool(hit))
+        self.assertEqual((a.longest, a.count, a.hits), (2, 1, 5))
+        self.assertEqual((b.longest, b.count, b.hits), (2, 2, 3))
+
+    def test_dragon_competes_with_follow_on_losing_streak(self):
+        # runs of exactly 3: following loses once per run end; cutting at N=3 never loses
+        r = [S, S, S, D, D, D] * 100
+        dragon = td.best_params(r)["algorithms"]["dragon"]
+        self.assertEqual((dragon["mode"], dragon["n"]), ("cut", 3))
+        self.assertEqual(dragon["train"]["max_loss"], 0)
+        self.assertEqual(dragon["follow"]["train"]["max_loss"], 1)
+
+    def test_final_prediction_is_reported_with_losing_streak(self):
+        r = self.skewed(600, p_single=0.55, seed=9)
+        out = td.best_params(r)
+        sp = out["split"]
+        final = out["final"]
+        params = {
+            "streak_n": out["algorithms"]["dragon"]["n"], "mode": out["algorithms"]["dragon"]["mode"],
+            "recent_m": out["algorithms"]["ratio"]["m"], "minority_m": out["algorithms"]["minority"]["m"],
+        }
+        self.assertEqual(final["params"], params)
+        series = td.final_series(r, 1, td.DEFAULT_LIMIT, params)
+        picks = {i: series[i]["next"] for i in range(1, len(r))}
+        picks[0] = None
+        lo, mid = sp["warmup"], sp["warmup"] + sp["train"]
+        self.assertEqual(
+            (final["train"]["max_loss"], final["train"]["max_loss_count"]),
+            self.losing_runs(r, picks, lo, mid),
+        )
+        self.assertEqual(final["holdout"]["max_loss"], self.losing_runs(r, picks, mid, len(r))[0])
+        self.assertEqual(final["train"]["total"], sp["train"])
+        self.assertIn("max_loss", final["default"]["train"])
+        self.assertEqual(final["hit_limit"], td.DEFAULT_LIMIT)
+
+    def test_honest_numbers_and_note(self):
+        out = td.best_params(self.skewed(1500, p_single=0.5, seed=21))
+        self.assertIn("9~10", out["note"])
+        self.assertIn("连错", out["note"])
+        self.assertIn("连错", out["objective"])
+        # fair-coin expectation for 1000 periods is about 9-10 (log2 n - 0.67)
+        self.assertEqual(td.expected_max_run(1000), 9.3)
+        self.assertEqual(out["random_max_loss"]["holdout"], td.expected_max_run(out["split"]["holdout"]))
+        for name in ("dragon", "ratio", "minority"):
+            for part in ("train", "holdout"):
+                self.assertIn("max_loss", out["algorithms"][name][part])
+        self.assertIn("max_loss", out["trend"]["train"])
 
     def test_search_is_cheap(self):
         import time
@@ -893,7 +991,7 @@ class BestEndpointTest(unittest.TestCase):
                     self.assertEqual(third["latest"], n)
                 self.assertEqual(client.get("/api/tron-draw/best").headers["cache-control"], "no-store")
                 html = client.get("/tron-draw").text
-                for token in ("最佳算法", "/api/tron-draw/best", "bestbtn", "历史最优不代表未来更准"):
+                for token in ("最佳算法", "/api/tron-draw/best", "bestbtn", "最大连错", "连挂最少", "已填入", "最近验证", "fillBest", "again"):
                     self.assertIn(token, html)
 
     @unittest.skipIf(TestClient is None, "fastapi not installed")

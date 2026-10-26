@@ -436,33 +436,79 @@ def record_next_prediction(store) -> bool:
     )
 
 
-# --- 最佳算法: best single setting per algorithm on stored history ---
+# --- 最佳算法: fewest consecutive losses (最大连错) per algorithm on stored history ---
 
 BEST_MAX_PERIODS = 5000      # most recent periods searched (keeps it cheap)
 BEST_WARMUP = 200            # first periods only feed look-back windows
 BEST_MIN_PERIODS = 300       # below this the search is meaningless
 BEST_M_RANGE = range(5, 201)
 BEST_N_RANGE = range(2, 9)
-BEST_NOTE = "历史最优不代表未来更准；单双本质约 50% 随机，最优设置在新数据上通常回落到 50% 附近。"
+BEST_NOTE = (
+    "历史最优不代表未来更准；连错（连挂）本身是随机的，公平硬币约 1000 期的最大连错通常也有 9~10 期，"
+    "从 200 多组设置里挑最少的，历史上自然会更少，新数据上通常会回到随机水平。"
+)
+BEST_OBJECTIVE = "最大连错最少 → 命中率更高 → 最大连错出现次数更少 → 更接近默认设置"
 
 
-def _rate(hits: int, total: int) -> dict:
-    return {"hits": hits, "total": total, "rate": round(hits * 100 / total, 1) if total else None}
+def expected_max_run(periods: int) -> float | None:
+    """Expected longest run of one side in ``periods`` fair coin flips (~log2 n - 0.67)."""
+    return round(math.log2(periods) - 0.67, 1) if periods >= 2 else None
+
+
+def _rate(hits: int, total: int, max_loss: int | None = None, at_max: int | None = None) -> dict:
+    out = {"hits": hits, "total": total, "rate": round(hits * 100 / total, 1) if total else None}
+    if max_loss is not None:
+        out["max_loss"] = max_loss      # 最大连错: longest run of wrong predictions
+        out["max_loss_count"] = at_max  # how many separate runs reached that length
+    return out
+
+
+class _Seg:
+    """Hits and the longest losing run (and how often it was reached) of one segment."""
+
+    __slots__ = ("hits", "total", "run", "longest", "count")
+
+    def __init__(self):
+        self.hits = self.total = self.run = self.longest = self.count = 0
+
+    def add(self, hit: bool) -> None:
+        self.total += 1
+        if hit:
+            self.hits += 1
+            self.run = 0
+            return
+        self.run += 1
+        if self.run > self.longest:
+            self.longest, self.count = self.run, 1
+        elif self.run == self.longest:
+            self.count += 1
+
+    def rate(self) -> dict:
+        return _rate(self.hits, self.total, self.longest, self.count)
+
+
+def _segments(flags: list, warm: int, split: int) -> tuple[_Seg, _Seg]:
+    """``flags[i]`` = prediction for period ``i`` was right. Losing runs never span the split."""
+    train, hold = _Seg(), _Seg()
+    for i in range(warm, len(flags)):
+        (train if i < split else hold).add(flags[i])
+    return train, hold
 
 
 def best_params(results: list[str]) -> dict:
     """Search the parameter grid with a walk-forward backtest.
 
-    Every period ``i`` is predicted from ``results[:i]`` only. The candidate
-    with the most hits on the TRAIN segment wins; its hit rate on the later
-    HOLD-OUT segment (never used for the choice) is reported next to it.
-    Ties prefer the setting closest to the page defaults.
+    Objective: the smallest 最大连错 (longest run of wrong predictions) on the
+    TRAIN segment; ties go to the higher hit rate, then fewer runs at the
+    maximum length, then the setting closest to the page defaults. Every
+    period ``i`` is predicted from ``results[:i]`` only. The same figures on the
+    later HOLD-OUT segment (never used for the choice) are reported alongside.
     """
     results = list(results[-BEST_MAX_PERIODS:])
     n = len(results)
     out = {
-        "ready": False, "periods": n, "note": BEST_NOTE, "algorithms": {},
-        "need": BEST_MIN_PERIODS,
+        "ready": False, "periods": n, "note": BEST_NOTE, "objective": BEST_OBJECTIVE,
+        "algorithms": {}, "need": BEST_MIN_PERIODS,
     }
     if n < BEST_MIN_PERIODS:
         return out
@@ -476,15 +522,8 @@ def best_params(results: list[str]) -> dict:
         pre[i + 1] = pre[i] + bit
         run[i + 1] = run[i] + 1 if i > 0 and bits[i - 1] == bit else 1
 
-    def score(pick_at) -> tuple[int, int]:
-        train = hold = 0
-        for i in range(warm, n):
-            if pick_at(i) == bits[i]:
-                if i < split:
-                    train += 1
-                else:
-                    hold += 1
-        return train, hold
+    def flags_of(pick_at) -> list:
+        return [i >= warm and pick_at(i) == bits[i] for i in range(n)]
 
     def share(size: int, minority: bool):
         def pick(i):
@@ -502,47 +541,80 @@ def best_params(results: list[str]) -> dict:
 
     train_total, hold_total = split - warm, holdout
 
-    def pack(train: int, hold: int, **params) -> dict:
-        return {**params, "train": _rate(train, train_total), "holdout": _rate(hold, hold_total)}
+    def pack(train: _Seg, hold: _Seg, **params) -> dict:
+        return {**params, "train": train.rate(), "holdout": hold.rate()}
+
+    def key(train: _Seg, closeness: int) -> tuple:
+        # bigger is better: fewer max losses, more hits, fewer max-length runs, nearer default
+        return (-train.longest, train.hits, -train.count, closeness)
 
     def best_of(candidates, default_key):
-        # candidates: (sort-preference, params, pick); most train hits wins
         best = None
         for params, pick in candidates:
-            train, hold = score(pick)
-            closeness = -abs(params["_k"] - default_key)
-            if best is None or (train, closeness) > (best[0], best[1]):
-                best = (train, closeness, hold, params)
+            train, hold = _segments(flags_of(pick), warm, split)
+            rank = key(train, -abs(params["_k"] - default_key))
+            if best is None or rank > best[0]:
+                best = (rank, train, hold, params)
         return best
 
-    trend_train, trend_hold = score(lambda i: bits[i - 1])
+    trend_flags = flags_of(lambda i: bits[i - 1])
+    trend_train, trend_hold = _segments(trend_flags, warm, split)
     out["trend"] = pack(trend_train, trend_hold)
 
-    # 跟龙 pick == last result for every N (= 顺势); only 斩龙 differs by N
+    # 跟龙 pick == last result for every N (= 顺势); only 斩龙 differs by N.
+    # 斩龙 competes with 跟龙 on the same objective; follow wins exact ties.
     dragon = [({"mode": MODE_CUT, "n": value, "_k": value}, cut(value)) for value in BEST_N_RANGE]
-    dragon_best = best_of(dragon, DEFAULT_STREAK_N)
-    if dragon_best[0] > trend_train:
-        params = dragon_best[3]
-        out["algorithms"]["dragon"] = pack(dragon_best[0], dragon_best[2], mode=MODE_CUT, n=params["n"])
+    cut_rank, cut_train, cut_hold, cut_params = best_of(dragon, DEFAULT_STREAK_N)
+    follow_rank = key(trend_train, 1)
+    cut_n = cut_params["n"]
+    if cut_rank > follow_rank:
+        out["algorithms"]["dragon"] = pack(cut_train, cut_hold, mode=MODE_CUT, n=cut_n)
     else:
-        out["algorithms"]["dragon"] = pack(trend_train, trend_hold, mode=MODE_FOLLOW, n=None)
+        out["algorithms"]["dragon"] = pack(trend_train, trend_hold, mode=MODE_FOLLOW, n=cut_n)
+    out["algorithms"]["dragon"]["cut"] = pack(cut_train, cut_hold, n=cut_n)
+    out["algorithms"]["dragon"]["follow"] = pack(trend_train, trend_hold)
     for name, minority, default in (
         ("ratio", False, DEFAULT_RECENT_M), ("minority", True, DEFAULT_MINORITY_M),
     ):
         cands = [({"m": size, "_k": size}, share(size, minority)) for size in BEST_M_RANGE]
-        found = best_of(cands, default)
-        out["algorithms"][name] = pack(found[0], found[2], m=found[3]["m"])
-        d_train, d_hold = score(share(default, minority))
-        out["algorithms"][name]["default"] = {
-            "m": default, "train": _rate(d_train, train_total), "holdout": _rate(d_hold, hold_total),
-        }
+        _, train, hold, params = best_of(cands, default)
+        entry = pack(train, hold, m=params["m"])
+        d_train, d_hold = _segments(flags_of(share(default, minority)), warm, split)
+        entry["default"] = pack(d_train, d_hold, m=default)
+        out["algorithms"][name] = entry
+
+    # the combined 最终预测 if the chosen settings are used (hit-rate window = page default)
+    dragon_pick = out["algorithms"]["dragon"]
+    chosen = {
+        "streak_n": dragon_pick["n"], "mode": dragon_pick["mode"],
+        "recent_m": out["algorithms"]["ratio"]["m"], "minority_m": out["algorithms"]["minority"]["m"],
+    }
+    default = {
+        "streak_n": DEFAULT_STREAK_N, "recent_m": DEFAULT_RECENT_M,
+        "mode": MODE_FOLLOW, "minority_m": DEFAULT_MINORITY_M,
+    }
+
+    def final_stats(params: dict) -> dict:
+        series = final_series(results, 1, DEFAULT_LIMIT, params)
+        flags = [i >= warm and series[i]["next"] == results[i] for i in range(n)]
+        train, hold = _segments(flags, warm, split)
+        return {"train": train.rate(), "holdout": hold.rate()}
+
+    final = final_stats(chosen)
+    final["params"] = chosen
+    final["default"] = final_stats(default)
+    final["hit_limit"] = DEFAULT_LIMIT
+    out["final"] = final
     candidates = len(BEST_N_RANGE) + len(BEST_M_RANGE)
     sigma = 50 / math.sqrt(max(1, train_total))
     out.update({
         "ready": True,
         "split": {"warmup": warm, "train": train_total, "holdout": hold_total},
         "candidates": candidates,
-        # pure chance: the best of K coin-flip settings still looks this good
+        "random_max_loss": {
+            "train": expected_max_run(train_total), "holdout": expected_max_run(hold_total),
+        },
+        # pure chance: the best of K coin-flip settings still shows this hit rate
         "luck_rate": round(50 + sigma * math.sqrt(2 * math.log(candidates)), 1),
     })
     return out
