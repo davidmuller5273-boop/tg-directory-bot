@@ -12,6 +12,8 @@ number with a tiny header-only request, a few per second at most.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import math
 import re
@@ -649,6 +651,44 @@ def best_params(results: list[str]) -> dict:
     return out
 
 
+AUTO_MIN_PERIODS = BEST_MIN_PERIODS
+
+
+def auto_best_pick(results: list[str]) -> tuple[str, dict] | None:
+    """Final prediction for the next period with the best parameters found on ``results`` only.
+
+    Uses the same fewest-max-consecutive-losses search as ``best_params`` (history
+    strictly before the predicted period: no look-ahead). None while there is too
+    little history.
+    """
+    best = best_params(results)
+    if not best.get("ready"):
+        return None
+    params = dict(best["final"]["params"])
+    keep = DEFAULT_LIMIT + lookback_needed(params["streak_n"], params["recent_m"], params["minority_m"])
+    panel = reference_panel(list(results[-keep:]), DEFAULT_LIMIT, **params)
+    pick = panel["final"]["next"]
+    return (pick, params) if pick else None
+
+
+def record_next_auto_prediction(store) -> bool:
+    """Compute + store (write-once, before the draw) the 自动最优 prediction for the next draw block."""
+    newest = store.tron_draw_recent(1)
+    if not newest:
+        return False
+    next_block = int(newest[0]["block_number"]) + DRAW_INTERVAL
+    if next_block in store.tron_auto_predictions(next_block, next_block):
+        return False
+    rows = store.tron_draw_recent(BEST_MAX_PERIODS)
+    if int(rows[-1]["block_number"]) + DRAW_INTERVAL != next_block:
+        return False  # a newer draw landed meanwhile; that period will be handled on its own
+    found = auto_best_pick([str(row["result"]) for row in rows])
+    if found is None:
+        return False
+    pick, params = found
+    return store.record_tron_auto_prediction(next_block, pick, json.dumps(params, sort_keys=True))
+
+
 def parse_reference_params(
     streak_n, recent_m, mode, minority_m="",
 ) -> tuple[int, int, str, int]:
@@ -667,10 +707,14 @@ class TronDrawRecorder:
     def __init__(
         self, chain, store, *, confirmations: int = 0, initial_backfill: int = 500,
         max_backfill: int = 20000, per_step: int = 3, block_offset: int = 0, ai=None,
+        auto_best: bool = False,
     ):
         self.chain = chain
         self.store = store
         self.ai = ai  # optional tron_ai.AiPredictor (background, never blocks recording)
+        self.auto_best = bool(auto_best)  # store the 自动最优 prediction before every draw
+        self._auto_task: asyncio.Task | None = None
+        self._auto_dirty = False
         self.confirmations = max(0, int(confirmations))
         self.offset = int(block_offset) % DRAW_INTERVAL
         self.initial_backfill = max(1, int(initial_backfill))
@@ -757,6 +801,28 @@ class TronDrawRecorder:
                 self.ai.schedule()
             except Exception:
                 logger.exception("TRON AI prediction schedule failed")
+        if self.auto_best:
+            self._schedule_auto()
+
+    def _schedule_auto(self) -> None:
+        """Background (worker thread) 自动最优 record for the next period; never raises."""
+        try:
+            if self._auto_task is not None and not self._auto_task.done():
+                self._auto_dirty = True  # rerun for the newest period once the current job ends
+                return
+            self._auto_task = asyncio.get_running_loop().create_task(self._auto_job())
+        except Exception:
+            logger.exception("TRON auto-best schedule failed")
+
+    async def _auto_job(self) -> None:
+        while True:
+            self._auto_dirty = False
+            try:
+                await asyncio.to_thread(record_next_auto_prediction, self.store)
+            except Exception as exc:  # statistics only; recording draws must not fail
+                logger.warning("TRON auto-best prediction failed: %s", type(exc).__name__)
+            if not self._auto_dirty:
+                return
 
     async def _verify(self, head: int) -> int:
         """Re-check hashes recorded from young blocks once they are solidified.

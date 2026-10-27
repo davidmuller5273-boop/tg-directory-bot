@@ -620,6 +620,12 @@ class DirectoryStore(FeatureStoreMixin):
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (block_number, config)
                 );
+                CREATE TABLE IF NOT EXISTS tron_auto_predictions (
+                    block_number INTEGER PRIMARY KEY,
+                    pick TEXT NOT NULL,
+                    params TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS tron_ai_predictions (
                     block_number INTEGER PRIMARY KEY,
                     pick TEXT NOT NULL,
@@ -2266,6 +2272,36 @@ class DirectoryStore(FeatureStoreMixin):
                 "VALUES (?, ?, ?)", (int(block_number), pick, str(model)[:80]),
             )
             return cursor.rowcount > 0
+
+    def record_tron_auto_prediction(self, block_number: int, pick: str, params: str = "") -> bool:
+        """Store the 自动最优 prediction for draw block ``block_number`` (write-once, pre-draw only)."""
+        if pick not in ("单", "双") or int(block_number) <= 0:
+            return False
+        with self.connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM tron_draws WHERE block_number=?", (int(block_number),),
+            ).fetchone():
+                return False  # already drawn: never a look-ahead record
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO tron_auto_predictions (block_number, pick, params) VALUES (?, ?, ?)",
+                (int(block_number), pick, str(params)[:200]),
+            )
+            return cursor.rowcount > 0
+
+    def tron_auto_predictions(self, low: int, high: int) -> dict[int, str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT block_number, pick FROM tron_auto_predictions WHERE block_number BETWEEN ? AND ?",
+                (int(low), int(high)),
+            ).fetchall()
+        return {int(row["block_number"]): str(row["pick"]) for row in rows}
+
+    def tron_auto_params(self, block_number: int) -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT params FROM tron_auto_predictions WHERE block_number=?", (int(block_number),),
+            ).fetchone()
+        return str(row["params"]) if row else ""
 
     def tron_ai_scored(self, model: str = "", low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
         """(block, pick, result) of stored AI predictions that have a draw result, oldest first.

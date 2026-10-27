@@ -13849,7 +13849,7 @@ def setup_tron_monitoring(application: Application, config: Config, chain: Chain
                 ai = AiPredictor(config, application.bot_data["store"])
                 logging.info("TRON AI reference enabled (model=%s)", config.ai_model)
             application.bot_data["tron_scanner"].draws = TronDrawRecorder(
-                chain, application.bot_data["store"], ai=ai,
+                chain, application.bot_data["store"], ai=ai, auto_best=True,
                 confirmations=getattr(config, "tron_draw_confirmations", 0),
                 block_offset=getattr(config, "tron_draw_block_offset", 0),
                 initial_backfill=getattr(config, "tron_draw_initial_backfill", 500),

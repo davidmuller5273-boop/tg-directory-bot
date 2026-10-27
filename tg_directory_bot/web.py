@@ -4,6 +4,8 @@ import asyncio
 import csv
 import hmac
 import io
+import json
+import logging
 import secrets
 import threading
 from pathlib import Path
@@ -22,7 +24,7 @@ from .storage import DirectoryStore
 from .tron_draw import (
     BEST_MAX_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
     ai_trend, lookback_needed, my_trend, parse_limit,
-    parse_reference_params, reference_panel,
+    parse_reference_params, record_next_auto_prediction, reference_panel,
 )
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
 from .validation import parse_submission_payload
@@ -91,12 +93,12 @@ def create_app(config: Config) -> FastAPI:
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
     def tron_draw_payload(
         limit: int, streak_n: int = 3, recent_m: int = 100, mode: str = "follow",
-        minority_m: int = 20, mine_limit: int = 0, ai_limit: int = 0,
+        minority_m: int = 20, mine_limit: int = 0, ai_limit: int = 0, auto_limit: int = 0,
     ) -> dict:
         extra = lookback_needed(streak_n, recent_m, minority_m)
         ai_on = bool(config.tron_ai_enabled)
         ai_limit = ai_limit if ai_on else 0
-        all_rows = store.tron_draw_recent(limit + extra + max(mine_limit, ai_limit))
+        all_rows = store.tron_draw_recent(limit + extra + max(mine_limit, ai_limit, auto_limit))
         rows = all_rows[-limit:]
         params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode, "minority_m": minority_m}
         reference = reference_panel([str(row["result"]) for row in all_rows], limit, **params)
@@ -128,26 +130,47 @@ def create_app(config: Config) -> FastAPI:
                 blocks, [str(row["result"]) for row in all_rows], mine_limit, limit,
                 params, stored,
             )
+        def pre_draw_source(stored: dict, trend_limit: int) -> dict:
+            """next pick / hit window / trend / previous of a source whose picks were stored before each draw."""
+            out = {"next": None, "window": None, "trend": None, "prev": None}
+            if not all_rows:
+                return out
+            blocks = [int(row["block_number"]) for row in all_rows]
+            texts = [str(row["result"]) for row in all_rows]
+            if next_block in stored:
+                out["next"] = {"block": next_block, "pick": stored[next_block]}
+            win_blocks, win_texts = blocks[-limit:], texts[-limit:]
+            judged = [stored[b] == r for b, r in zip(win_blocks, win_texts) if b in stored]
+            out["window"] = {
+                "limit": limit, "hits": sum(judged), "total": len(judged),
+                "rate": round(sum(judged) * 100 / len(judged), 1) if judged else None,
+            }
+            if blocks[-1] in stored:
+                out["prev"] = {
+                    "block": blocks[-1], "pick": stored[blocks[-1]], "ok": stored[blocks[-1]] == texts[-1],
+                }
+            if trend_limit > 0:
+                out["trend"] = ai_trend(blocks, texts, trend_limit, stored)
+            return out
+
         ai = None
         if ai_on:  # AI reference: the key never appears here, only pick/model/stats
-            ai = {"enabled": True, "model": config.ai_model, "next": None, "window": None, "trend": None}
+            ai = {"enabled": True, "model": config.ai_model, "next": None, "window": None, "trend": None, "prev": None}
             if all_rows:
-                blocks = [int(row["block_number"]) for row in all_rows]
-                texts = [str(row["result"]) for row in all_rows]
-                stored_ai = store.tron_ai_predictions(blocks[0], next_block, config.ai_model)
-                ai["next"] = (
-                    {"block": next_block, "pick": stored_ai[next_block]} if next_block in stored_ai else None
+                stored_ai = store.tron_ai_predictions(
+                    int(all_rows[0]["block_number"]), next_block, config.ai_model,
                 )
-                win_blocks, win_texts = blocks[-limit:], texts[-limit:]
-                judged = [
-                    stored_ai[b] == r for b, r in zip(win_blocks, win_texts) if b in stored_ai
-                ]
-                ai["window"] = {
-                    "limit": limit, "hits": sum(judged), "total": len(judged),
-                    "rate": round(sum(judged) * 100 / len(judged), 1) if judged else None,
-                }
-                if ai_limit > 0:
-                    ai["trend"] = ai_trend(blocks, texts, ai_limit, stored_ai)
+                ai.update(pre_draw_source(stored_ai, ai_limit))
+        ensure_auto_prediction()
+        auto = {"enabled": True, "next": None, "window": None, "trend": None, "prev": None, "params": None}
+        if all_rows:
+            stored_auto = store.tron_auto_predictions(int(all_rows[0]["block_number"]), next_block)
+            auto.update(pre_draw_source(stored_auto, auto_limit))
+            if auto["next"]:
+                try:
+                    auto["params"] = json.loads(store.tron_auto_params(next_block) or "null")
+                except ValueError:
+                    auto["params"] = None
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
         latest = rows[-1] if rows else None
@@ -161,6 +184,7 @@ def create_app(config: Config) -> FastAPI:
             "cells": cells,
             "blocks": [int(row["block_number"]) for row in rows],
             "ai": ai,
+            "auto": auto,
             "reference": reference,
             "runs": longest_runs([str(row["result"]) for row in rows]),
             "previous": previous,
@@ -194,6 +218,7 @@ def create_app(config: Config) -> FastAPI:
             store.tron_ai_predictions(block, block, config.ai_model).get(int(block))
             if config.tron_ai_enabled else None
         )
+        auto_pick = store.tron_auto_predictions(block, block).get(int(block))
         return {
             "block": int(row["block_number"]), "hash": str(row["block_hash"]),
             "digit": int(row["last_digit"]), "result": result,
@@ -202,12 +227,13 @@ def create_app(config: Config) -> FastAPI:
             "verified": bool(row["verified"]),
             "algo": None if algo is None else {"pick": algo, "ok": algo == result},
             "ai": None if ai_pick is None else {"pick": ai_pick, "ok": ai_pick == result, "model": config.ai_model},
+            "auto": None if auto_pick is None else {"pick": auto_pick, "ok": auto_pick == result},
         }
 
     @app.get("/api/tron-draw")
     async def tron_draw_api(
         limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
-        minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", block: str = "",
+        minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", auto_limit: str = "0", block: str = "",
     ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
@@ -221,13 +247,30 @@ def create_app(config: Config) -> FastAPI:
             return JSONResponse(detail, headers={"Cache-Control": "no-store"})
         mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
         ai_n = parse_limit(ai_limit, 0, 5000) if str(ai_limit).strip() not in ("", "0") else 0
+        auto_n = parse_limit(auto_limit, 0, 5000) if str(auto_limit).strip() not in ("", "0") else 0
         return JSONResponse(
             tron_draw_payload(
                 parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
-                mine_limit=mine, ai_limit=ai_n,
+                mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n,
             ),
             headers={"Cache-Control": "no-store"},
         )
+
+    auto_lock = threading.Lock()
+
+    def ensure_auto_prediction() -> None:
+        """The recorder stores it right after each draw; this covers the gap until it has (never raises)."""
+        try:
+            newest = store.tron_draw_recent(1)
+            if not newest:
+                return
+            nxt = int(newest[0]["block_number"]) + DRAW_INTERVAL
+            if nxt in store.tron_auto_predictions(nxt, nxt):
+                return
+            with auto_lock:
+                record_next_auto_prediction(store)
+        except Exception:
+            logging.getLogger(__name__).warning("TRON auto-best prediction failed", exc_info=False)
 
     best_cache: dict = {"key": None, "value": None}
     best_lock = threading.Lock()
