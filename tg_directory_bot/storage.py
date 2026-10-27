@@ -620,6 +620,12 @@ class DirectoryStore(FeatureStoreMixin):
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (block_number, config)
                 );
+                CREATE TABLE IF NOT EXISTS tron_ai_predictions (
+                    block_number INTEGER PRIMARY KEY,
+                    pick TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS tron_monitors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     owner_id INTEGER NOT NULL,
@@ -2245,6 +2251,38 @@ class DirectoryStore(FeatureStoreMixin):
                 (str(config)[:120], int(low), int(high)),
             ).fetchall()
         return {int(row["block_number"]): str(row["predicted"]) for row in rows}
+
+    def record_tron_ai_prediction(self, block_number: int, pick: str, model: str) -> bool:
+        """Store the AI reference for draw block ``block_number`` (write-once, pre-draw only)."""
+        if pick not in ("单", "双") or int(block_number) <= 0:
+            return False
+        with self.connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM tron_draws WHERE block_number=?", (int(block_number),),
+            ).fetchone():
+                return False
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO tron_ai_predictions (block_number, pick, model) "
+                "VALUES (?, ?, ?)", (int(block_number), pick, str(model)[:80]),
+            )
+            return cursor.rowcount > 0
+
+    def tron_ai_predictions(self, low: int, high: int, model: str = "") -> dict[int, str]:
+        """block -> pick; with ``model`` only that model's predictions."""
+        query = "SELECT block_number, pick FROM tron_ai_predictions WHERE block_number BETWEEN ? AND ?"
+        args: list = [int(low), int(high)]
+        if model:
+            query += " AND model=?"
+            args.append(str(model)[:80])
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return {int(row["block_number"]): str(row["pick"]) for row in rows}
+
+    def tron_draw_get(self, block_number: int):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM tron_draws WHERE block_number=?", (int(block_number),),
+            ).fetchone()
 
     def tron_draw_existing(self, low: int, high: int) -> set[int]:
         with self.connect() as conn:

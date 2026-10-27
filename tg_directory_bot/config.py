@@ -43,6 +43,18 @@ class Config:
     tron_draw_initial_backfill: int = 500
     tron_draw_max_backfill: int = 20000
     tron_draw_backfill_per_step: int = 3
+    # AI reference (OpenAI-compatible relay). The key stays server side: it is never
+    # part of repr() / API output / logs. Feature is off while ai_api_key is empty.
+    ai_api_key: str = field(default="", repr=False)
+    ai_base_url: str = "https://api.mixroute.ai/v1"
+    ai_model: str = "gpt-4.1-mini"
+    tron_ai_predict: bool = True
+    ai_timeout_seconds: float = 20.0
+    tron_ai_max_per_hour: int = 120
+
+    @property
+    def tron_ai_enabled(self) -> bool:
+        return bool(self.ai_api_key.strip()) and self.tron_ai_predict
     tron_scan_lag_blocks: int = 1
     tron_scan_max_catchup_blocks: int = 1200
     tron_reconcile_seconds: int = 300
@@ -196,6 +208,13 @@ def load_config(env_file: str | Path | None = ".env", require_bot_token: bool = 
         tron_draw_initial_backfill=int(_float_env("TRON_DRAW_INITIAL_BACKFILL", 500, 1)),
         tron_draw_max_backfill=int(_float_env("TRON_DRAW_MAX_BACKFILL", 20000, 1)),
         tron_draw_backfill_per_step=int(_float_env("TRON_DRAW_BACKFILL_PER_STEP", 3, 1)),
+        ai_api_key=os.getenv("AI_API_KEY", "").strip(),
+        ai_base_url=(os.getenv("AI_BASE_URL", "").strip() or "https://api.mixroute.ai/v1").rstrip("/"),
+        ai_model=os.getenv("AI_MODEL", "").strip() or "gpt-4.1-mini",
+        tron_ai_predict=os.getenv("TRON_AI_PREDICT", "1").strip().casefold()
+        not in {"0", "false", "no", "off"},
+        ai_timeout_seconds=_float_env("AI_TIMEOUT_SECONDS", 20, 3),
+        tron_ai_max_per_hour=int(_float_env("TRON_AI_MAX_PER_HOUR", 120, 1)),
         tron_scan_lag_blocks=int(_float_env("TRON_SCAN_LAG_BLOCKS", 1, 0)),
         tron_scan_max_catchup_blocks=int(_float_env("TRON_SCAN_MAX_CATCHUP_BLOCKS", 1200, 20)),
         tron_reconcile_seconds=int(_float_env("TRON_RECONCILE_SECONDS", 300, 30)),

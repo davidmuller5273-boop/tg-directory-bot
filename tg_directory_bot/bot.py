@@ -70,6 +70,7 @@ from . import quick_buttons
 from . import channel_manage
 from . import crypto_alert, crypto_price, life_guide, market_sources, raffle_fair, raffle_parse, settings_wizard, sticker_clone
 from .tron_net import BUSY_MESSAGE, is_busy_error, strip_urls
+from .tron_ai import AiPredictor
 from .tron_draw import TronDrawRecorder
 from .tron_scanner import ScanDB, TronBlockScanner, row_transaction, shared_scan_db_path
 from .time_utils import (
@@ -13843,8 +13844,12 @@ def setup_tron_monitoring(application: Application, config: Config, chain: Chain
             use_events=bool(chain.governor.keys),
         )
         if getattr(config, "tron_draw_stats", True):
+            ai = None
+            if getattr(config, "tron_ai_enabled", False):
+                ai = AiPredictor(config, application.bot_data["store"])
+                logging.info("TRON AI reference enabled (model=%s)", config.ai_model)
             application.bot_data["tron_scanner"].draws = TronDrawRecorder(
-                chain, application.bot_data["store"],
+                chain, application.bot_data["store"], ai=ai,
                 confirmations=getattr(config, "tron_draw_confirmations", 0),
                 block_offset=getattr(config, "tron_draw_block_offset", 0),
                 initial_backfill=getattr(config, "tron_draw_initial_backfill", 500),

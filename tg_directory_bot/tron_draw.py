@@ -403,6 +403,35 @@ def my_trend(
     }
 
 
+def ai_trend(
+    blocks: list[int], results: list[str], ai_limit: int, stored: dict,
+) -> dict:
+    """AI走势: ✅/❌ per period for the last ``ai_limit`` periods.
+
+    Only predictions stored before the draw count; periods without one are
+    empty (ok=None) and break neither hit nor miss runs' counting.
+    """
+    n = len(results)
+    start = max(0, n - int(ai_limit))
+    items = []
+    for i in range(start, n):
+        predicted = stored.get(blocks[i])
+        items.append({
+            "block": int(blocks[i]), "predicted": predicted, "result": results[i],
+            "ok": None if predicted is None else predicted == results[i],
+        })
+    flags = [item["ok"] for item in items]
+    hits = sum(1 for flag in flags if flag is True)
+    total = sum(1 for flag in flags if flag is not None)
+    return {
+        "limit": int(ai_limit), "count": len(items), "hits": hits, "total": total,
+        "rate": round(hits * 100 / total, 1) if total else None,
+        "max_win": _runs(flags, lambda flag: flag is True),
+        "max_loss": _runs(flags, lambda flag: flag is False),
+        "items": items,
+    }
+
+
 def config_key(limit: int, streak_n: int, mode: str, recent_m: int, minority_m: int) -> str:
     return f"{int(limit)}|{int(streak_n)}|{mode}|{int(recent_m)}|{int(minority_m)}"
 
@@ -637,10 +666,11 @@ class TronDrawRecorder:
 
     def __init__(
         self, chain, store, *, confirmations: int = 0, initial_backfill: int = 500,
-        max_backfill: int = 20000, per_step: int = 3, block_offset: int = 0,
+        max_backfill: int = 20000, per_step: int = 3, block_offset: int = 0, ai=None,
     ):
         self.chain = chain
         self.store = store
+        self.ai = ai  # optional tron_ai.AiPredictor (background, never blocks recording)
         self.confirmations = max(0, int(confirmations))
         self.offset = int(block_offset) % DRAW_INTERVAL
         self.initial_backfill = max(1, int(initial_backfill))
@@ -722,6 +752,11 @@ class TronDrawRecorder:
             record_next_prediction(self.store)
         except Exception:  # statistics only; recording draws must not fail
             logger.exception("TRON draw prediction record failed")
+        if self.ai is not None:
+            try:
+                self.ai.schedule()
+            except Exception:
+                logger.exception("TRON AI prediction schedule failed")
 
     async def _verify(self, head: int) -> int:
         """Re-check hashes recorded from young blocks once they are solidified.

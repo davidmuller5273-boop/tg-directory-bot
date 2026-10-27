@@ -21,7 +21,7 @@ from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
 from .tron_draw import (
     BEST_MAX_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
-    lookback_needed, my_trend, parse_limit,
+    ai_trend, lookback_needed, my_trend, parse_limit,
     parse_reference_params, reference_panel,
 )
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
@@ -91,10 +91,12 @@ def create_app(config: Config) -> FastAPI:
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
     def tron_draw_payload(
         limit: int, streak_n: int = 3, recent_m: int = 100, mode: str = "follow",
-        minority_m: int = 20, mine_limit: int = 0,
+        minority_m: int = 20, mine_limit: int = 0, ai_limit: int = 0,
     ) -> dict:
         extra = lookback_needed(streak_n, recent_m, minority_m)
-        all_rows = store.tron_draw_recent(limit + extra + mine_limit)
+        ai_on = bool(config.tron_ai_enabled)
+        ai_limit = ai_limit if ai_on else 0
+        all_rows = store.tron_draw_recent(limit + extra + max(mine_limit, ai_limit))
         rows = all_rows[-limit:]
         params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode, "minority_m": minority_m}
         reference = reference_panel([str(row["result"]) for row in all_rows], limit, **params)
@@ -126,6 +128,26 @@ def create_app(config: Config) -> FastAPI:
                 blocks, [str(row["result"]) for row in all_rows], mine_limit, limit,
                 params, stored,
             )
+        ai = None
+        if ai_on:  # AI reference: the key never appears here, only pick/model/stats
+            ai = {"enabled": True, "model": config.ai_model, "next": None, "window": None, "trend": None}
+            if all_rows:
+                blocks = [int(row["block_number"]) for row in all_rows]
+                texts = [str(row["result"]) for row in all_rows]
+                stored_ai = store.tron_ai_predictions(blocks[0], next_block, config.ai_model)
+                ai["next"] = (
+                    {"block": next_block, "pick": stored_ai[next_block]} if next_block in stored_ai else None
+                )
+                win_blocks, win_texts = blocks[-limit:], texts[-limit:]
+                judged = [
+                    stored_ai[b] == r for b, r in zip(win_blocks, win_texts) if b in stored_ai
+                ]
+                ai["window"] = {
+                    "limit": limit, "hits": sum(judged), "total": len(judged),
+                    "rate": round(sum(judged) * 100 / len(judged), 1) if judged else None,
+                }
+                if ai_limit > 0:
+                    ai["trend"] = ai_trend(blocks, texts, ai_limit, stored_ai)
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
         latest = rows[-1] if rows else None
@@ -137,6 +159,8 @@ def create_app(config: Config) -> FastAPI:
             "columns": columns,
             "max_rows": MAX_ROWS,
             "cells": cells,
+            "blocks": [int(row["block_number"]) for row in rows],
+            "ai": ai,
             "reference": reference,
             "runs": longest_runs([str(row["result"]) for row in rows]),
             "previous": previous,
@@ -156,18 +180,51 @@ def create_app(config: Config) -> FastAPI:
             ],
         }
 
+    def tron_draw_block_detail(block: int, limit: int, params: tuple) -> dict | None:
+        """One recorded draw for the page's click-to-inspect panel (+ AI / algorithm picks)."""
+        row = store.tron_draw_get(block)
+        if row is None:
+            return None
+        streak_n, recent_m, mode, minority_m = params
+        result = str(row["result"])
+        algo = store.tron_draw_predictions(
+            block, block, config_key(limit, streak_n, mode, recent_m, minority_m),
+        ).get(int(block))
+        ai_pick = (
+            store.tron_ai_predictions(block, block, config.ai_model).get(int(block))
+            if config.tron_ai_enabled else None
+        )
+        return {
+            "block": int(row["block_number"]), "hash": str(row["block_hash"]),
+            "digit": int(row["last_digit"]), "result": result,
+            "ts": int(row["block_timestamp_ms"]),
+            "time": format_beijing_timestamp_ms(row["block_timestamp_ms"]) if row["block_timestamp_ms"] else "",
+            "verified": bool(row["verified"]),
+            "algo": None if algo is None else {"pick": algo, "ok": algo == result},
+            "ai": None if ai_pick is None else {"pick": ai_pick, "ok": ai_pick == result, "model": config.ai_model},
+        }
+
     @app.get("/api/tron-draw")
     async def tron_draw_api(
         limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
-        minority_m: str = "", mine_limit: str = "0",
+        minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", block: str = "",
     ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
+        if str(block).strip():  # detail of one draw: /api/tron-draw?block=12345
+            detail = tron_draw_block_detail(
+                parse_limit(block, 0, 10**12), parse_limit(limit),
+                parse_reference_params(streak_n, recent_m, mode, minority_m),
+            )
+            if detail is None:
+                raise HTTPException(404)
+            return JSONResponse(detail, headers={"Cache-Control": "no-store"})
         mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
+        ai_n = parse_limit(ai_limit, 0, 5000) if str(ai_limit).strip() not in ("", "0") else 0
         return JSONResponse(
             tron_draw_payload(
                 parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
-                mine_limit=mine,
+                mine_limit=mine, ai_limit=ai_n,
             ),
             headers={"Cache-Control": "no-store"},
         )

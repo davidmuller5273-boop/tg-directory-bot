@@ -68,6 +68,13 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .fin .big{font-size:40px;font-weight:700;line-height:1.1}
 .fin .big.s{color:var(--single)}.fin .big.d{color:var(--double)}
 .fin .sums{font-size:13px}
+.src{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--muted);margin:2px 0 8px}
+.tip{position:absolute;z-index:50;background:#1f2933;color:#fff;border-radius:8px;padding:5px 9px;font-size:12px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.25);pointer-events:none;max-width:240px}
+.mk.sel,.bead.sel{outline:2px solid #364fc7;outline-offset:1px}
+.sec{font-size:16px;font-weight:600}
+.ai{background:#f3f0ff;color:#5f3dc4;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
+#detailbox .k{color:var(--muted)}
+#detailbox div.row{padding:3px 0;border-bottom:1px solid var(--line);word-break:break-all}
 </style>
 </head>
 <body>
@@ -76,29 +83,40 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <div class="head"><h1>开奖走势</h1><div class="counts"><span class="s">单 <span id="cs">-</span></span> / <span class="d">双 <span id="cd">-</span></span></div></div>
   <div class="head" style="margin-top:6px"><button class="snd" id="snd">🔕 声音：关</button><span class="muted"><span class="lnk" id="tsA">试听✅</span> · <span class="lnk" id="tsB">试听❌</span></span></div>
   <div class="muted" id="lastjudge"></div>
-  <div class="tabs"><button class="tab on" data-tab="block">区块走势</button><button class="tab" data-tab="mine">我的走势</button></div>
-  <div id="pane-block">
-   <div class="periods" id="periods">
-    <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
-    <input id="custom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
-   </div>
-   <div class="runs" id="runs"></div>
-   <div class="road" id="road"><div class="grid" id="grid"></div></div>
-   <div class="muted" id="meta"></div>
+  <div class="head" style="margin-top:12px"><span class="sec">区块走势</span>
+   <span class="src" id="srcbox"><span>预测来源：</span><button class="snd" id="srcA" type="button" data-src="algo">算法预测</button><button class="snd" id="srcI" type="button" data-src="ai" hidden>AI预测</button></span></div>
+  <div class="periods" id="periods">
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <input id="custom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
   </div>
-  <div id="pane-mine" hidden>
-   <div class="periods" id="mperiods">
-    <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
-    <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
-   </div>
-   <div class="runs" id="mstat"></div>
-   <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div>
-   <div class="muted" id="mmeta"></div>
+  <div class="runs" id="runs"></div>
+  <div class="road" id="road"><div class="grid" id="grid"></div></div>
+  <div class="muted" id="meta"></div>
+ </div>
+ <div class="card" id="aicard" hidden>
+  <div class="head"><span class="sec" id="aititle">AI走势</span></div>
+  <div class="periods" id="aperiods" style="margin-top:8px">
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <input id="acustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
   </div>
+  <div class="runs" id="astat"></div>
+  <div class="road" id="aroad"><div class="mgrid" id="agrid"></div></div>
+  <div class="muted" id="ameta"></div>
+  <div class="ai">AI参考仅为统计分析，开奖随机，不保证命中。AI 只看到程序算好的统计结果，凭感觉回答「单」或「双」；不参与最终预测的投票。</div>
+ </div>
+ <div class="card">
+  <div class="head"><span class="sec">算法走势</span></div>
+  <div class="periods" id="mperiods" style="margin-top:8px">
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
+  </div>
+  <div class="runs" id="mstat"></div>
+  <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div>
+  <div class="muted" id="mmeta"></div>
  </div>
  <div class="card ref">
   <div class="head"><strong>参考</strong><span class="muted" id="refnext">下一期参考方向</span></div>
-  <div class="fin"><div><div class="muted">最终预测</div><div class="big" id="finbig">-</div></div><div class="sums" id="finsums"></div></div>
+  <div class="fin"><div><div class="muted">最终预测</div><div class="big" id="finbig">-</div></div><div class="sums" id="finsums"></div><div class="sums" id="finai" hidden></div></div>
   <div class="note" id="finrule"></div>
   <div class="set">
    <label>龙长≥N <input id="setn" type="number" min="2" max="50" inputmode="numeric"></label>
@@ -112,12 +130,17 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <table><thead><tr><th>算法</th><th>参考</th><th>回测命中（所选期数）</th></tr></thead><tbody id="reftable"></tbody></table>
   <div class="stats" id="refstats"></div>
   <div class="note">开奖为哈希末位，单双各约50%，各算法命中率理论上也约50%，统计仅供参考，不保证命中。回测为逐期向前：每期只用该期之前的数据。</div>
+  <div class="ai" id="ainote" hidden>AI参考仅为统计分析，开奖随机，不保证命中。AI 的命中率只统计开启之后、开奖前已记录的预测。</div>
  </div>
  <div class="card">
   <strong>最近开奖</strong>
   <table><thead><tr><th>区块</th><th>哈希（末位数字加粗）</th><th>结果</th></tr></thead><tbody id="recent"></tbody></table>
  </div>
- <div class="rule">规则：每 20 个区块开奖一次，区块高度以 00/20/40/60/80 结尾的区块为开奖块；取该区块哈希，忽略字母，取最后一位数字：1/3/5/7/9 为单，0/2/4/6/8 为双。数据每 4 秒自动刷新，时间为区块时间（北京时间）。<br>最终预测：把投票给同一方的各算法回测命中率(%)相加，合计大的一方为预测；相等时跟随命中率最高的单个算法。「我的走势」中的预测命中率按「区块走势」所选期数计算。以上均为历史统计，不保证命中。</div>
+ <div class="rule">规则：每 20 个区块开奖一次，区块高度以 00/20/40/60/80 结尾的区块为开奖块；取该区块哈希，忽略字母，取最后一位数字：1/3/5/7/9 为单，0/2/4/6/8 为双。数据每 4 秒自动刷新，时间为区块时间（北京时间）。<br>最终预测：把投票给同一方的各算法回测命中率(%)相加，合计大的一方为预测；相等时跟随命中率最高的单个算法。「算法走势」中的预测命中率按「区块走势」所选期数计算。以上均为历史统计，不保证命中。</div>
+ <div class="card" id="detailbox" hidden>
+  <div class="head"><strong>区块详情</strong><button class="snd" id="detailx" type="button">关闭</button></div>
+  <div id="detailbody"></div>
+ </div>
 </div>
 <script>
 (function(){
@@ -127,11 +150,11 @@ function clamp(v,d,lo,hi){v=parseInt(v,10);if(isNaN(v))v=d;return Math.max(lo,Ma
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 var limit=clamp(localStorage.getItem("trondraw.limit"),100,1,5000);
-var mine=clamp(ls("mine","100"),100,1,5000);
-var tab="block",busy=false,again=false,soundOn=ls("sound","0")==="1";
+var mine=clamp(ls("mine","100"),100,1,5000),ailimit=clamp(ls("ailimit","100"),100,1,5000);
+var busy=false,again=false,soundOn=ls("sound","0")==="1";
 var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比",minority:"近期少数方"};
 var cfg={n:clamp(ls("n","3"),3,2,50),m:clamp(ls("m","100"),100,1,200),mn:clamp(ls("mn","20"),20,1,200),mode:ls("mode","follow")==="cut"?"cut":"follow"};
-var lastLatest=null,lastScrollKey="",lastMineKey="",hl=null,hlTimer=null;
+var lastLatest=null,hl=null,hlTimer=null;
 function hashHtml(h,d){var i=h.lastIndexOf(String(d));return esc(h.slice(0,i))+"<b>"+esc(h.charAt(i))+"</b>"+esc(h.slice(i+1))}
 function cls(v){return v==="单"?"s":"d"}
 function mark(box,val){
@@ -177,7 +200,7 @@ function judge(d){
 function applyHl(){
   document.querySelectorAll(".hl").forEach(function(e){e.className=e.className.replace(" hl","")});
   if(!hl||Date.now()>hl.until)return;
-  var sel=hl.pane==="block"?"#grid .bead":"#mgrid .mk",els=document.querySelectorAll(sel),first=null;
+  var sel=hl.pane==="block"?"#grid .bead":hl.pane==="ai"?"#agrid .mk":"#mgrid .mk",els=document.querySelectorAll(sel),first=null;
   for(var i=0;i<els.length;i++){
     var x=parseInt(els[i].getAttribute("data-i"),10);
     if(x>=hl.start&&x<hl.start+hl.len){els[i].className+=" hl";if(!first)first=els[i]}
@@ -191,18 +214,119 @@ function jump(pane,start,len){
   if(first&&first.scrollIntoView)first.scrollIntoView({behavior:"smooth",block:"nearest",inline:"center"});
   clearTimeout(hlTimer);hlTimer=setTimeout(function(){hl=null;applyHl()},5100);
 }
+/* ---------- road: auto-return to the latest edge, click-to-inspect ---------- */
+var RETURN_MS=window.TRONDRAW_RETURN_MS||10000,pauseUntil=0,lastData=null,roads=[];
+function atEnd(r){return r.scrollLeft+r.clientWidth>=r.scrollWidth-4}
+function autoScroll(r,smooth){
+  r._prog=Date.now();
+  if(smooth&&r.scrollTo)r.scrollTo({left:r.scrollWidth,behavior:"smooth"});else r.scrollLeft=r.scrollWidth;
+}
+function watchRoad(r){
+  r._t=0;r._down=false;r._tm=0;roads.push(r);
+  function arm(ms){
+    clearTimeout(r._tm);
+    r._tm=setTimeout(function(){
+      var now=Date.now();
+      if(r._down)return arm(RETURN_MS);                    /* never fight an active drag */
+      if(now<pauseUntil)return arm(pauseUntil-now+50);     /* click pause */
+      var idle=now-r._t;
+      if(idle<RETURN_MS-50)return arm(RETURN_MS-idle);     /* interacted meanwhile */
+      if(!atEnd(r))autoScroll(r,true);
+    },ms);
+  }
+  function touch(){r._t=Date.now();arm(RETURN_MS)}
+  ["pointerdown","mousedown","touchstart"].forEach(function(n){r.addEventListener(n,function(){r._down=true;touch()},{passive:true})});
+  ["pointerup","pointercancel","mouseup","touchend","touchcancel","mouseleave"].forEach(function(n){r.addEventListener(n,function(){r._down=false;touch()},{passive:true})});
+  ["wheel","touchmove","pointermove","keydown"].forEach(function(n){r.addEventListener(n,function(e){if(n==="pointermove"&&!r._down)return;touch()},{passive:true})});
+  r.addEventListener("scroll",function(){if(Date.now()-(r._prog||0)<1500)return;touch()},{passive:true});
+}
+function followEnd(r,key,store){
+  if(key===store.k)return;
+  store.k=key;
+  if(Date.now()-(r._t||0)<RETURN_MS&&!atEnd(r))return;  /* user is browsing: the timer brings it back */
+  if(Date.now()<pauseUntil)return;
+  autoScroll(r,false);
+}
+var tipEl=document.createElement("div");tipEl.className="tip";tipEl.hidden=true;document.body.appendChild(tipEl);
+var selEl=null,detailSeq=0;
+function hideTip(){tipEl.hidden=true;if(selEl){selEl.className=selEl.className.replace(" sel","");selEl=null}}
+function placeTip(el){
+  var rc=el.getBoundingClientRect(),sx=window.pageXOffset||0,sy=window.pageYOffset||0;
+  tipEl.hidden=false;
+  var w=tipEl.offsetWidth,h=tipEl.offsetHeight;
+  var left=Math.max(4,Math.min(rc.left+sx+rc.width/2-w/2,document.documentElement.clientWidth+sx-w-4));
+  var top=rc.top+sy-h-8;if(top<sy+4)top=rc.bottom+sy+8;
+  tipEl.style.left=left+"px";tipEl.style.top=top+"px";
+}
+function okMark(o){return o===true?"✅":o===false?"❌":"—"}
+function pickLine(label,x){return label+"："+(x?x.pick+" "+okMark(x.ok):"—")}
+function showDetail(el,block,pending){
+  pauseUntil=Date.now()+1000;       /* 1 s: no refresh / auto-scroll while looking at the cell */
+  hideTip();selEl=el;el.className+=" sel";
+  var seq=++detailSeq;
+  if(pending){
+    tipEl.innerHTML="#"+block+"<br>待开奖（预测仅供参考）";placeTip(el);
+    $("detailbox").hidden=false;
+    $("detailbody").innerHTML="<div class=row><span class=k>区块高度：</span>#"+block+"（待开奖）</div>";
+    return;
+  }
+  tipEl.innerHTML="#"+block+"<br>加载中…";placeTip(el);
+  var q="/api/tron-draw?block="+block+"&limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn;
+  fetch(q,{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(x){
+    if(seq!==detailSeq)return;
+    tipEl.innerHTML="#"+x.block+"<br>"+esc(x.time||"时间未知")+"（北京时间）<br>"+x.result+" · 末位 "+x.digit;placeTip(el);
+    var body="<div class=row><span class=k>区块高度：</span>#"+x.block+"</div>"+
+      "<div class=row><span class=k>区块时间（北京时间）：</span>"+esc(x.time||"-")+"</div>"+
+      "<div class=row><span class=k>区块哈希：</span><span class=hash>"+hashHtml(x.hash,x.digit)+"</span></div>"+
+      "<div class=row><span class=k>末位数字：</span>"+x.digit+"</div>"+
+      "<div class=row><span class=k>结果：</span><b class='res "+cls(x.result)+"'>"+x.result+"</b>"+(x.verified?"":"（尚未二次确认）")+"</div>"+
+      "<div class=row><span class=k>算法预测：</span>"+(x.algo?x.algo.pick+" "+okMark(x.algo.ok):(algoHit(x.block)||"无记录"))+"</div>";
+    if(lastData&&lastData.ai)body+="<div class=row><span class=k>AI预测"+(x.ai?"（"+esc(x.ai.model)+"）":"")+"：</span>"+(x.ai?x.ai.pick+" "+okMark(x.ai.ok):"无记录")+"</div>";
+    $("detailbody").innerHTML=body;$("detailbox").hidden=false;
+  }).catch(function(){if(seq===detailSeq){tipEl.innerHTML="#"+block+"<br>暂无详情";placeTip(el)}});
+}
+function algoHit(block){
+  var m=lastData&&lastData.my_trend;if(!m)return "";
+  for(var i=0;i<m.items.length;i++)if(m.items[i].block===block&&m.items[i].predicted)return m.items[i].predicted+" "+okMark(m.items[i].ok)+"（逐期回算）";
+  return "";
+}
+document.addEventListener("click",function(e){
+  var t=e.target&&e.target.closest?e.target.closest(".bead,.mk,.pred"):null;
+  if(!t||!t.hasAttribute("data-b")){if(!(e.target.closest&&e.target.closest(".tip")))hideTip();return}
+  showDetail(t,parseInt(t.getAttribute("data-b"),10),t.hasAttribute("data-p"));
+});
+$("detailx").onclick=function(){$("detailbox").hidden=true;hideTip()};
+/* ---------- prediction source (算法 / AI) ---------- */
+var src=ls("src","algo")==="ai"?"ai":"algo";
+function curSrc(d){return d&&d.ai&&src==="ai"?"ai":"algo"}
+function markSrc(d){
+  var ai=d&&d.ai;
+  $("srcI").hidden=!ai;
+  var s=curSrc(d);
+  $("srcA").className="snd"+(s==="algo"?" on":"");$("srcI").className="snd"+(s==="ai"?" on":"");
+}
+function setSrc(v){src=v;localStorage.setItem(K+"src",v);markSrc(lastData);if(lastData)renderBlock(lastData)}
+$("srcA").onclick=function(){setSrc("algo")};$("srcI").onclick=function(){setSrc("ai")};
 /* ---------- render ---------- */
+function aiRowHtml(d){
+  var a=d.ai,w=a.window,nx=a.next?a.next.pick:null;
+  var note=w.total<w.limit?"<div class=muted>仅统计开启后开奖前已记录的预测：已有 "+w.total+" 期（所选 "+w.limit+" 期）</div>":"";
+  return "<tr><td>AI（"+esc(a.model)+"）</td><td class='res "+(nx?cls(nx):"")+"'>"+(nx||"…")+"</td><td>"+(w.total?w.hits+"/"+w.total+"（"+w.rate+"%）":"-")+note+"</td></tr>";
+}
 function renderRef(d){
   var r=d.reference,f=r.final,big=$("finbig");
   big.textContent=f.next||"-";big.className="big "+(f.next?cls(f.next):"");
   $("refnext").textContent=d.next_draw_block?("下一开奖块 #"+d.next_draw_block):"下一期参考方向";
   $("finsums").innerHTML=f.next?("单合计 <b>"+f.sums.single+"%</b> ／ 双合计 <b>"+f.sums.double+"%</b>"+(f.basis==="tie"?"（相等，跟随最高命中率："+ALG[f.tie_algorithm]+"）":"")):"数据不足，暂无预测";
+  var fa=$("finai");
+  if(d.ai){fa.hidden=false;fa.innerHTML="AI参考：<b class='"+(d.ai.next?cls(d.ai.next.pick):"")+"'>"+(d.ai.next?d.ai.next.pick:"生成中…")+"</b>（不参与上面的投票）"}else fa.hidden=true;
+  $("ainote").hidden=!d.ai;
   $("finrule").textContent=f.rule;
   $("reftable").innerHTML=Object.keys(ALG).map(function(k){
     var x=r.algorithms[k];
     var nm=k==="dragon"?(cfg.mode==="cut"?"斩龙(N="+cfg.n+")":"跟龙(N="+cfg.n+")"):k==="ratio"?"近期占比(M="+cfg.m+")":k==="minority"?"近期少数方(M="+cfg.mn+")":ALG[k];
     return "<tr><td>"+nm+"</td><td class='res "+(x.next?cls(x.next):"")+"'>"+(x.next||"-")+"</td><td>"+(x.total?x.hits+"/"+x.total+"（"+x.rate+"%）":"-")+"</td></tr>"
-  }).join("");
+  }).join("")+(d.ai?aiRowHtml(d):"");
   var sv=r.current_value?(r.current_streak+" 连"+r.current_value):"-";
   $("refstats").innerHTML="<div><span>当前连续：</span>"+sv+"</div><div><span>最长连续：</span>"+r.longest_streak+"</div>"+
    "<div><span>单占比：</span>"+(r.ratio.single===null?"-":r.ratio.single+"%")+"</div><div><span>双占比：</span>"+(r.ratio.double===null?"-":r.ratio.double+"%")+"</div>"+
@@ -213,42 +337,68 @@ function renderRuns(d){
   $("runs").innerHTML="最长龙 <b class=s>单</b><span class=lnk data-r=single>"+u.single.len+"期</span> / <b class=d>双</b><span class=lnk data-r=double>"+u.double.len+"期</span> · 最大连跳 <span class=lnk data-r=alternating>"+u.alternating.len+"期</span>";
   $("runs").querySelectorAll(".lnk").forEach(function(a){a.onclick=function(){var x=u[a.getAttribute("data-r")];jump("block",x.start,x.len)}});
 }
+var scrollKeys={block:{k:""},mine:{k:""},ai:{k:""}};
 function renderBlock(d){
   var g=$("grid");g.innerHTML="";
-  var cols=Math.max(d.columns,1),lastRow=0;
+  var cols=Math.max(d.columns,1),lastRow=0,s=curSrc(d);
   g.style.gridTemplateRows="18px repeat("+d.max_rows+",26px)";
-  g.style.gridTemplateColumns="repeat("+cols+",26px) 34px";
+  g.style.gridTemplateColumns="repeat("+cols+",26px) 52px";
   d.cells.forEach(function(c){
     var e=document.createElement("div");e.className="bead "+cls(c.v);e.textContent=c.v;e.setAttribute("data-i",c.i);
+    if(d.blocks&&d.blocks[c.i]!==undefined)e.setAttribute("data-b",d.blocks[c.i]);
     e.style.gridColumn=c.c+1;e.style.gridRow=c.r+2;g.appendChild(e);lastRow=c.r;
   });
-  var h=document.createElement("div");h.className="phead";h.textContent="预测";h.style.gridColumn=cols+1;h.style.gridRow=1;g.appendChild(h);
-  var nx=d.reference.final.next;
+  var h=document.createElement("div");h.className="phead";h.textContent=s==="ai"?"AI预测":"算法预测";h.style.gridColumn=cols+1;h.style.gridRow=1;g.appendChild(h);
+  var nx=s==="ai"?(d.ai&&d.ai.next?d.ai.next.pick:null):d.reference.final.next;
+  var p=document.createElement("div");
   if(nx){
-    var p=document.createElement("div");p.className="pred "+cls(nx);p.textContent=nx;p.title="下一期预测（仅供参考）";
-    p.style.gridColumn=cols+1;p.style.gridRow=lastRow+2;g.appendChild(p);
-  }
-  var key=limit+":"+d.latest,road=$("road");
-  if(key!==lastScrollKey){road.scrollLeft=road.scrollWidth;lastScrollKey=key}
+    p.className="pred "+cls(nx);p.textContent=nx;p.title=(s==="ai"?"AI":"算法")+"对下一期的预测（仅供参考）";
+  }else if(s==="ai"&&d.ai){p.className="mk";p.textContent="…";p.title="AI 预测生成中"}
+  if(p.className){p.setAttribute("data-b",d.next_draw_block||"");p.setAttribute("data-p","1");p.style.gridColumn=cols+1;p.style.gridRow=lastRow+2;g.appendChild(p)}
+  followEnd($("road"),limit+":"+d.latest,scrollKeys.block);
   $("meta").textContent="近 "+d.count+" 期（已记录 "+d.total_recorded+" 期）"+(d.latest?" · 最新开奖块 #"+d.latest:"")+(d.next_draw_block?" · 下一开奖块 #"+d.next_draw_block:"");
   $("recent").innerHTML=d.recent.map(function(r){
     return "<tr><td>#"+r.block+"<div class=muted>"+esc(r.time)+"</div></td><td class=hash>"+hashHtml(r.hash,r.digit)+"</td><td class='res "+cls(r.result)+"'>"+r.result+"</td></tr>"
   }).join("")||"<tr><td colspan=3 class=muted>暂无数据，等待下一个开奖块。</td></tr>";
 }
-function renderMine(d){
-  var m=d.my_trend,g=$("mgrid");
-  if(!m){return}
-  g.innerHTML=m.items.map(function(it,i){
-    var t="#"+it.block+" 预测"+(it.predicted||"-")+" 开奖"+it.result+(it.source==="stored"?"（开奖前已记录）":"（逐期回算）");
-    return "<div class=mk data-i="+i+" title='"+esc(t)+"'>"+(it.ok===true?"✅":it.ok===false?"❌":"·")+"</div>"
+function trendHtml(m,nextPick,nextBlock,kind){
+  var cells=m.items.map(function(it,i){
+    var t="#"+it.block+" 预测"+(it.predicted||"-")+" 开奖"+it.result+(kind==="mine"?(it.source==="stored"?"（开奖前已记录）":"（逐期回算）"):"");
+    return "<div class=mk data-i="+i+" data-b="+it.block+" title='"+esc(t)+"'>"+(it.ok===true?"✅":it.ok===false?"❌":"·")+"</div>";
   }).join("");
-  $("mstat").innerHTML="命中 "+m.hits+"/"+m.total+(m.rate===null?"":"（"+m.rate+"%）")+" · <span class=lnk data-k=max_win>最大连中 "+m.max_win.len+"✅</span> · <span class=lnk data-k=max_loss>最大连错 "+m.max_loss.len+"❌</span>";
-  $("mstat").querySelectorAll(".lnk").forEach(function(a){a.onclick=function(){var x=m[a.getAttribute("data-k")];jump("mine",x.start,x.len)}});
-  $("mmeta").textContent="近 "+m.count+" 期最终预测结果（预测命中率按区块走势所选 "+limit+" 期计算）"+(d.next_draw_block&&d.reference.final.next?" · 下一期预测："+d.reference.final.next:"");
-  var key=mine+":"+d.latest,road=$("mroad");
-  if(key!==lastMineKey){road.scrollLeft=road.scrollWidth;lastMineKey=key}
+  /* the last cell: the pending prediction for the next period (blinking) */
+  if(nextPick)cells+="<div class='pred "+cls(nextPick)+"' data-p=1 data-b="+(nextBlock||"")+" title='下一期预测（仅供参考）'>"+nextPick+"</div>";
+  else if(kind==="ai")cells+="<div class=mk data-p=1 data-b="+(nextBlock||"")+" title='AI 预测生成中'>…</div>";
+  return cells;
+}
+function statHtml(m,pane){
+  return "命中 "+m.hits+"/"+m.total+(m.rate===null?"":"（"+m.rate+"%）")+" · <span class=lnk data-k=max_win>最大连中 "+m.max_win.len+"✅</span> · <span class=lnk data-k=max_loss>最大连错 "+m.max_loss.len+"❌</span>";
+}
+function bindStat(el,m,pane){
+  el.querySelectorAll(".lnk").forEach(function(a){a.onclick=function(){var x=m[a.getAttribute("data-k")];jump(pane,x.start,x.len)}});
+}
+function renderMine(d){
+  var m=d.my_trend;
+  if(!m){return}
+  var nx=d.next_draw_block&&d.reference.final.next?d.reference.final.next:null;
+  $("mgrid").innerHTML=trendHtml(m,nx,d.next_draw_block,"mine");
+  $("mstat").innerHTML=statHtml(m,"mine");bindStat($("mstat"),m,"mine");
+  $("mmeta").textContent="近 "+m.count+" 期最终预测结果（预测命中率按区块走势所选 "+limit+" 期计算）"+(nx?" · 最右侧闪烁为下一期预测："+nx:"");
+  followEnd($("mroad"),mine+":"+d.latest,scrollKeys.mine);
+}
+function renderAi(d){
+  var card=$("aicard");
+  if(!d.ai||!d.ai.trend){card.hidden=true;return}
+  card.hidden=false;
+  var t=d.ai.trend,nx=d.ai.next?d.ai.next.pick:null;
+  $("aititle").textContent="AI走势（"+d.ai.model+"）";
+  $("agrid").innerHTML=trendHtml(t,nx,d.next_draw_block,"ai");
+  $("astat").innerHTML=statHtml(t,"ai");bindStat($("astat"),t,"ai");
+  $("ameta").textContent="近 "+t.count+" 期，其中已有 AI 记录 "+t.total+" 期（· 表示当期没有记录，只统计开启后开奖前已记录的预测）"+(nx?" · 最右侧闪烁为下一期 AI 预测："+nx:"");
+  followEnd($("aroad"),ailimit+":"+d.latest,scrollKeys.ai);
 }
 function render(d){
+  lastData=d;markSrc(d);
   renderRef(d);renderRuns(d);
   $("cs").textContent=d.counts.single;$("cd").textContent=d.counts.double;
   var ok=null;
@@ -259,28 +409,30 @@ function render(d){
   lastLatest=d.latest;
   if(d.latest&&d.next_draw_block&&d.reference.final.next)remember(d.next_draw_block,d.reference.final.next);
   renderBlock(d);
-  if(tab==="mine")renderMine(d);
+  renderMine(d);renderAi(d);
   applyHl();
 }
+var pauseTimer=0;
 function load(force){
+  var now=Date.now();
+  if(now<pauseUntil){clearTimeout(pauseTimer);pauseTimer=setTimeout(function(){load(force)},pauseUntil-now+30);return}
   if(busy){if(force)again=true;return}busy=true;
-  var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+(tab==="mine"?"&mine_limit="+mine:"");
+  var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+"&mine_limit="+mine+"&ai_limit="+ailimit;
   fetch(q,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false;if(again){again=false;load()}});
 }
 function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark("periods",limit);load()}
 function setMine(n){mine=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"mine",mine);mark("mperiods",mine);load()}
+function setAi(n){ailimit=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"ailimit",ailimit);mark("aperiods",ailimit);load()}
 document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(parseInt(b.getAttribute("data-n"),10))}});
 document.querySelectorAll("#mperiods button[data-n]").forEach(function(b){b.onclick=function(){setMine(parseInt(b.getAttribute("data-n"),10))}});
+document.querySelectorAll("#aperiods button[data-n]").forEach(function(b){b.onclick=function(){setAi(parseInt(b.getAttribute("data-n"),10))}});
 $("go").onclick=function(){var v=parseInt($("custom").value,10);if(v>0)setLimit(v)};
 $("mgo").onclick=function(){var v=parseInt($("mcustom").value,10);if(v>0)setMine(v)};
+$("ago").onclick=function(){var v=parseInt($("acustom").value,10);if(v>0)setAi(v)};
 $("custom").onkeydown=function(e){if(e.key==="Enter")$("go").onclick()};
 $("mcustom").onkeydown=function(e){if(e.key==="Enter")$("mgo").onclick()};
-document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){
-  document.querySelectorAll(".tab").forEach(function(x){x.className="tab"});t.className="tab on";
-  tab=t.getAttribute("data-tab");
-  $("pane-block").hidden=tab!=="block";$("pane-mine").hidden=tab!=="mine";
-  load();
-}});
+$("acustom").onkeydown=function(e){if(e.key==="Enter")$("ago").onclick()};
+watchRoad($("road"));watchRoad($("mroad"));watchRoad($("aroad"));
 function saveCfg(){
   cfg.n=clamp($("setn").value,3,2,50);cfg.m=clamp($("setm").value,100,1,200);cfg.mn=clamp($("setmn").value,20,1,200);cfg.mode=$("setmode").value==="cut"?"cut":"follow";
   localStorage.setItem(K+"n",cfg.n);localStorage.setItem(K+"m",cfg.m);localStorage.setItem(K+"mn",cfg.mn);localStorage.setItem(K+"mode",cfg.mode);
@@ -343,7 +495,7 @@ $("bestbtn").onclick=function(){
 };
 $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;
 $("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;
-markSound();mark("periods",limit);mark("mperiods",mine);load();
+markSound();mark("periods",limit);mark("mperiods",mine);mark("aperiods",ailimit);markSrc(null);load();
 setInterval(function(){if(!document.hidden)load()},4000);
 document.addEventListener("visibilitychange",function(){if(!document.hidden)load()});
 })();
