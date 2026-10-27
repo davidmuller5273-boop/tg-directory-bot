@@ -371,10 +371,18 @@ class AiWebTest(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         for token in (
             "AI预测", "算法预测", "srcA", "srcI", "aicard", "detailbox", "RETURN_MS", "pauseUntil",
-            "AI参考", "开奖随机，不保证命中", "ai_limit", "K+\"src\"",
+            "AI参考", "开奖随机，不保证命中", "afold", "mfold", "abody", "mbody", "open.ai", "open.mine", "pendingJump", "ai_limit", "K+\"src\"",
         ):
             self.assertIn(token, html)
         self.assertNotIn("我的走势", html)
+        # both trend sections start collapsed and sit right after the block trend
+        self.assertIn('id="abody" hidden', html)
+        self.assertIn('id="mbody" hidden', html)
+        self.assertLess(html.index('id="road"'), html.index('id="afold"'))
+        self.assertLess(html.index('id="afold"'), html.index('id="mfold"'))
+        self.assertLess(html.index('id="mfold"'), html.index('id="setn"'))
+        self.assertLess(html.index('id="setn"'), html.index('id="detailbox"'))
+        self.assertIn('"&mine_limit="+(openS.mine?mine:0)', html)
         self.assertNotIn(DUMMY, html)
 
 

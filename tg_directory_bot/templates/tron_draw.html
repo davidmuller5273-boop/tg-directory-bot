@@ -72,6 +72,10 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .tip{position:absolute;z-index:50;background:#1f2933;color:#fff;border-radius:8px;padding:5px 9px;font-size:12px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.25);pointer-events:none;max-width:240px}
 .mk.sel,.bead.sel{outline:2px solid #364fc7;outline-offset:1px}
 .sec{font-size:16px;font-weight:600}
+.fold{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
+.fold .arr{display:inline-block;width:1.1em;color:#364fc7}
+.fold .sum{font-size:13px;font-weight:400;color:var(--muted)}
+.fold:focus-visible{outline:2px solid #364fc7;outline-offset:2px;border-radius:6px}
 .ai{background:#f3f0ff;color:#5f3dc4;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
 #detailbox .k{color:var(--muted)}
 #detailbox div.row{padding:3px 0;border-bottom:1px solid var(--line);word-break:break-all}
@@ -94,7 +98,8 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <div class="muted" id="meta"></div>
  </div>
  <div class="card" id="aicard" hidden>
-  <div class="head"><span class="sec" id="aititle">AI走势</span></div>
+  <div class="fold" id="afold" role="button" tabindex="0" aria-expanded="false"><span class="sec"><span id="aititle">AI走势</span> <span class="arr" id="aarr">▶</span></span><span class="sum" id="asum"></span></div>
+  <div id="abody" hidden>
   <div class="periods" id="aperiods" style="margin-top:8px">
    <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
    <input id="acustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
@@ -103,9 +108,11 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <div class="road" id="aroad"><div class="mgrid" id="agrid"></div></div>
   <div class="muted" id="ameta"></div>
   <div class="ai">AI参考仅为统计分析，开奖随机，不保证命中。AI 只看到程序算好的统计结果，凭感觉回答「单」或「双」；不参与最终预测的投票。</div>
+  </div>
  </div>
  <div class="card">
-  <div class="head"><span class="sec">算法走势</span></div>
+  <div class="fold" id="mfold" role="button" tabindex="0" aria-expanded="false"><span class="sec">算法走势 <span class="arr" id="marr">▶</span></span><span class="sum" id="msum"></span></div>
+  <div id="mbody" hidden>
   <div class="periods" id="mperiods" style="margin-top:8px">
    <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
    <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
@@ -113,6 +120,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <div class="runs" id="mstat"></div>
   <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div>
   <div class="muted" id="mmeta"></div>
+  </div>
  </div>
  <div class="card ref">
   <div class="head"><strong>参考</strong><span class="muted" id="refnext">下一期参考方向</span></div>
@@ -151,6 +159,7 @@ function $(id){return document.getElementById(id)}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 var limit=clamp(localStorage.getItem("trondraw.limit"),100,1,5000);
 var mine=clamp(ls("mine","100"),100,1,5000),ailimit=clamp(ls("ailimit","100"),100,1,5000);
+var openS={ai:ls("open.ai","0")==="1",mine:ls("open.mine","0")==="1"},pendingJump=null,mineLast=null;
 var busy=false,again=false,soundOn=ls("sound","0")==="1";
 var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比",minority:"近期少数方"};
 var cfg={n:clamp(ls("n","3"),3,2,50),m:clamp(ls("m","100"),100,1,200),mn:clamp(ls("mn","20"),20,1,200),mode:ls("mode","follow")==="cut"?"cut":"follow"};
@@ -209,6 +218,7 @@ function applyHl(){
 }
 function jump(pane,start,len){
   if(!(len>0)||start<0)return;
+  if((pane==="ai"||pane==="mine")&&!openS[pane]){pendingJump={pane:pane,start:start,len:len};setOpen(pane,true);return}  /* collapsed: open first, jump after it renders */
   hl={pane:pane,start:start,len:len,until:Date.now()+5000};
   var first=applyHl();
   if(first&&first.scrollIntoView)first.scrollIntoView({behavior:"smooth",block:"nearest",inline:"center"});
@@ -377,10 +387,32 @@ function statHtml(m,pane){
 function bindStat(el,m,pane){
   el.querySelectorAll(".lnk").forEach(function(a){a.onclick=function(){var x=m[a.getAttribute("data-k")];jump(pane,x.start,x.len)}});
 }
+function setOpen(pane,on){
+  openS[pane]=!!on;localStorage.setItem(K+"open."+pane,on?"1":"0");
+  syncFold(pane);
+  if(on){scrollKeys[pane].k="";if(lastData){if(pane==="ai")renderAi(lastData);else renderMine(lastData)}load(true)}
+}
+function syncFold(pane){
+  var a=pane==="ai",on=openS[pane];
+  $(a?"abody":"mbody").hidden=!on;$(a?"aarr":"marr").textContent=on?"▼":"▶";
+  $(a?"afold":"mfold").setAttribute("aria-expanded",on?"true":"false");
+}
+function bindFold(pane){
+  var el=$(pane==="ai"?"afold":"mfold");
+  el.onclick=function(){setOpen(pane,!openS[pane])};
+  el.onkeydown=function(e){if(e.key==="Enter"||e.key===" "){e.preventDefault();el.onclick()}};
+  syncFold(pane);
+}
+function sumLine(nx,m,lim){
+  return (nx?"下一期 <b class="+cls(nx)+">"+nx+"</b>":"下一期 …")+(m?" · 近 "+lim+" 期命中 "+m.hits+"/"+m.total+(m.rate===null?"":"（"+m.rate+"%）"):"");
+}
 function renderMine(d){
-  var m=d.my_trend;
-  if(!m){return}
   var nx=d.next_draw_block&&d.reference.final.next?d.reference.final.next:null;
+  var m=d.my_trend;
+  if(m)mineLast={m:m,lim:mine};
+  var cur=m||(mineLast&&mineLast.m),curLim=m?mine:(mineLast&&mineLast.lim);
+  $("msum").innerHTML=sumLine(nx,cur,curLim);
+  if(!openS.mine||!m)return;   /* collapsed: no rendering of the road */
   $("mgrid").innerHTML=trendHtml(m,nx,d.next_draw_block,"mine");
   $("mstat").innerHTML=statHtml(m,"mine");bindStat($("mstat"),m,"mine");
   $("mmeta").textContent="近 "+m.count+" 期最终预测结果（预测命中率按区块走势所选 "+limit+" 期计算）"+(nx?" · 最右侧闪烁为下一期预测："+nx:"");
@@ -388,10 +420,13 @@ function renderMine(d){
 }
 function renderAi(d){
   var card=$("aicard");
-  if(!d.ai||!d.ai.trend){card.hidden=true;return}
+  if(!d.ai){card.hidden=true;return}
   card.hidden=false;
   var t=d.ai.trend,nx=d.ai.next?d.ai.next.pick:null;
   $("aititle").textContent="AI走势（"+d.ai.model+"）";
+  var w=d.ai.window;
+  $("asum").innerHTML=sumLine(nx,t||(w&&w.total?w:null),t?ailimit:(w?w.limit:0));
+  if(!openS.ai||!t)return;     /* collapsed: no rendering of the road */
   $("agrid").innerHTML=trendHtml(t,nx,d.next_draw_block,"ai");
   $("astat").innerHTML=statHtml(t,"ai");bindStat($("astat"),t,"ai");
   $("ameta").textContent="近 "+t.count+" 期，其中已有 AI 记录 "+t.total+" 期（· 表示当期没有记录，只统计开启后开奖前已记录的预测）"+(nx?" · 最右侧闪烁为下一期 AI 预测："+nx:"");
@@ -411,13 +446,14 @@ function render(d){
   renderBlock(d);
   renderMine(d);renderAi(d);
   applyHl();
+  if(pendingJump&&openS[pendingJump.pane]&&(pendingJump.pane==="ai"?d.ai&&d.ai.trend:d.my_trend)){var pj=pendingJump;pendingJump=null;jump(pj.pane,pj.start,pj.len)}
 }
 var pauseTimer=0;
 function load(force){
   var now=Date.now();
   if(now<pauseUntil){clearTimeout(pauseTimer);pauseTimer=setTimeout(function(){load(force)},pauseUntil-now+30);return}
   if(busy){if(force)again=true;return}busy=true;
-  var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+"&mine_limit="+mine+"&ai_limit="+ailimit;
+  var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+"&mine_limit="+(openS.mine?mine:0)+"&ai_limit="+(openS.ai?ailimit:0);
   fetch(q,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false;if(again){again=false;load()}});
 }
 function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark("periods",limit);load()}
@@ -495,7 +531,7 @@ $("bestbtn").onclick=function(){
 };
 $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;
 $("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;
-markSound();mark("periods",limit);mark("mperiods",mine);mark("aperiods",ailimit);markSrc(null);load();
+bindFold("ai");bindFold("mine");markSound();mark("periods",limit);mark("mperiods",mine);mark("aperiods",ailimit);markSrc(null);load();
 setInterval(function(){if(!document.hidden)load()},4000);
 document.addEventListener("visibilitychange",function(){if(!document.hidden)load()});
 })();
