@@ -292,6 +292,25 @@ sudo systemctl list-timers tg-directory-bot-backup.timer
 
 备份位于 /opt/tg-directory-bot/backups/，默认保留 30 份，每份都有 .sha256 校验文件。
 
+## 5.1 异地加密备份到私有 GitHub 仓库（每 2 天）
+
+数据库（含 `data/clones/` 里所有子机器人库）每 2 天在线备份一次，压缩并用 AES-256 加密后推送到私有仓库 `tg-bot-backup`，仓库里只保留最新 3 份（`BACKUP_KEEP`，在 `/etc/tg-bot-backup/backup.conf` 里改）。
+不备份：`.env` 和所有密钥/令牌、`backups/` 目录、`data/clones/deleted/` 归档、日志。推送使用专用 SSH 部署公钥，**不需要 GitHub 访问令牌**。
+
+安装（单行；`你的密码` 换成你自己想好的备份密码，至少 8 个字符，建议记在密码管理器里）：
+
+~~~bash
+curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/setup-backup.sh | sudo BACKUP_PASS='你的密码' bash
+~~~
+
+- 不写 `BACKUP_PASS=...` 时会自动生成随机口令（不推荐，容易丢）；显示当前口令：`sudo cat /etc/tg-bot-backup/backup.pass`。
+- **解密恢复用的就是这同一个密码**；没有它备份无法恢复。以后改密码（重新运行上面的命令换一个）后，旧备份仍需要旧密码，新备份用新密码。
+- 脚本会输出一行部署公钥，把它发给开发者添加到仓库后，运行 `sudo systemctl start tg-bot-backup` 做第一次备份。
+- 查看状态：`sudo systemctl status tg-bot-backup`，日志：`sudo journalctl -u tg-bot-backup -n 50 --no-pager`，下次时间：`systemctl list-timers tg-bot-backup.timer`。
+- 随时手动备份：`sudo tgbot-backup`（会显示中文进度和结果）；查看仓库里现存的备份：`sudo tgbot-backup list`。
+- 其它项目（如另一个机器人的 MySQL）通过「钩子」一并备份：放可执行脚本到 `/etc/tg-bot-backup.d/*.sh`，约定见 `deploy/ubuntu/restore-backup.md`。钩子失败不会影响其它部分，只会在结果里报告。任何 `.env` 都不会进入备份。
+- 恢复方法见 `deploy/ubuntu/restore-backup.md`。
+
 ## 6. 恢复
 
 ~~~bash

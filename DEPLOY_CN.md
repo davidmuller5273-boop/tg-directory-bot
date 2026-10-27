@@ -25,6 +25,8 @@ docker compose --profile tools run --rm backup
 
 长期保留 .env、data/ 和 backups/。
 
+Ubuntu systemd 部署另有「每 2 天加密备份到私有 GitHub 仓库」，安装方式和备份密码说明见 UBUNTU_CN.md 的 5.1 节（安装命令：`curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/setup-backup.sh | sudo BACKUP_PASS='你的密码' bash`）。
+
 更新：
 
 ~~~bash
