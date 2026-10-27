@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # 一键安装「每 2 天加密备份到私有 GitHub 仓库」。可重复运行（幂等）。
 #   curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/setup-backup.sh | sudo bash
+# 整个脚本放在 main 函数里：curl | bash 时，子命令不会误吞脚本本身的 stdin。
+main() {
 set -Eeuo pipefail
+exec </dev/null
 
 APP_DIR="${APP_DIR:-/opt/tg-directory-bot}"
 STATE_DIR="${STATE_DIR:-/etc/tg-bot-backup}"   # 口令/私钥放这里；不能放 APP_DIR（update-from-git.sh 会清空它）
@@ -143,3 +146,5 @@ else
   echo "查看原因：sudo journalctl -u $UNIT -n 30 --no-pager"
 fi
 exit 0
+}
+main "$@"

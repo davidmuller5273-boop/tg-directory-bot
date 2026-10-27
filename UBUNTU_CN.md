@@ -311,6 +311,16 @@ curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-b
 - 其它项目（如另一个机器人的 MySQL）通过「钩子」一并备份：放可执行脚本到 `/etc/tg-bot-backup.d/*.sh`，约定见 `deploy/ubuntu/restore-backup.md`。钩子失败不会影响其它部分，只会在结果里报告；钩子输出（包括它自己放进去的 .env/配置）原样进入加密包。
 - 恢复方法见 `deploy/ubuntu/restore-backup.md`。
 
+## 5.2 新服务器一条命令完整恢复
+
+换新服务器时，先按提示拿到只读公钥（第一次运行会打印，发给开发者添加），再运行同一条命令（单行）：
+
+~~~bash
+curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/new-server-restore.sh | sudo BACKUP_PASS='你的备份密码' bash
+~~~
+
+它会安装程序、解密最新备份、恢复数据库和 `.env`、启动服务、重新装好自动备份并运行其它项目的恢复钩子，最后列出要手动做的事（DNS、Nginx/certbot、停旧服务器等）。详见 `deploy/ubuntu/restore-backup.md` 第 0 节。
+
 ## 6. 恢复
 
 ~~~bash

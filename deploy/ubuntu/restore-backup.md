@@ -8,6 +8,31 @@
 
 下面每一条命令都是单行，整行复制粘贴即可。
 
+## 0. 新服务器一条命令完整恢复
+
+在一台全新的 Ubuntu 服务器上（用 root 登录或加 sudo），运行这一条命令（单行；`你的备份密码` 换成安装备份时设置的那个密码）：
+
+~~~bash
+curl -fsSL https://raw.githubusercontent.com/davidmuller5273-boop/tg-directory-bot/main/deploy/ubuntu/new-server-restore.sh | sudo BACKUP_PASS='你的备份密码' bash
+~~~
+
+- **第一次运行**会生成一把新服务器专用的「只读」公钥并打印出来，然后停止（提示「公钥已生成，添加后重新运行同一条命令」）。把这一行公钥发给开发者，由开发者添加到备份仓库后，**再运行同一条命令**继续。不需要 GitHub 令牌。
+- 之后脚本依次：安装依赖 → 下载私有备份仓库 → 取**最新**的 `tg-bot-backup-*.tar.gz.enc`，用密码解密（密码只走环境变量，不会显示）→ 检查所有数据库完整性 → 安装机器人程序 → 恢复 `data/` 和 `.env`（权限 600）→ 运行 install.sh 并启动服务 → 重新安装自动备份（同一个密码，生成**新的写入公钥**，需要再发给开发者添加）→ 运行恢复钩子 → 打印还需要手动做的事。
+- 可重复运行：同一份备份已恢复过会跳过；服务器上已有机器人数据或 `.env` 时会拒绝覆盖，确实要覆盖才加 `FORCE_RESTORE=1`。任何一步失败都会用中文说明原因并停止（密码错误、仓库里没有备份、公钥还没添加……）。
+- 恢复出来的明文在 `/tmp/tg-restore`（含 `.env` 等机密，权限 700）；全部确认后请删除：`sudo rm -rf /tmp/tg-restore`。
+
+脚本最后会列出还要手动做的事：旧服务器停掉机器人、域名 188.ms / www.188.ms 的 DNS 指向新 IP、Nginx + certbot 的两行命令、`.env` 里 `AI_API_KEY` 为空时的提示。
+
+### 恢复钩子约定（其它项目，例如 safe 机器人）
+
+解密出来的目录里，除 `app/`、`data/` 之外的每个子目录 `<name>/` 都是某个备份钩子写入的部分。对每个 `<name>/`：如果存在可执行的 `/etc/tg-bot-backup.restore.d/<name>.sh`，脚本就运行它：
+
+- `$1` = 解密目录（默认 `/tmp/tg-restore`，同时在环境变量 `BACKUP_DECRYPTED` 里）；这一部分的文件在 `"$1/<name>/"`，也在环境变量 `RESTORE_PART_DIR` 里。
+- 钩子负责把该项目装好并恢复（例如 safe：安装程序、导入 MySQL、放回 `.env` 和文件，`.env` 保持 600）。以 root 运行，退出码 0 = 成功；失败只会记录并在最后报告，不影响其它部分。
+- 没有对应钩子的部分会被跳过并提示（文件仍在解密目录里）。对 `safe/`：设置了环境变量 `SAFE_RESTORE_URL`（safe 项目恢复脚本的 raw 地址）就自动下载运行；没设置则打印一行命令：`cd ~ && rm -rf safe-restore && git clone https://github.com/davidmuller5273-boop/safe.git safe-restore && sudo BACKUP_DECRYPTED=/tmp/tg-restore bash safe-restore/deploy/ubuntu/restore-from-backup.sh`。如果 safe 仓库是私有的，脚本会另外生成一把 safe 专用公钥（`/etc/tg-bot-backup/safe_ed25519`），打印它和用这把密钥 clone 的命令，公钥添加为 safe 仓库的只读部署密钥后再运行。
+
+下面是手动一步步恢复的方法（新服务器优先用上面的一条命令）。
+
 ## 1. 取回备份文件
 
 在原服务器上，备份仓库的本地副本就在 `/var/lib/tg-bot-backup/repo`：
