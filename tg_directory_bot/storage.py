@@ -2296,6 +2296,30 @@ class DirectoryStore(FeatureStoreMixin):
             ).fetchall()
         return {int(row["block_number"]): str(row["pick"]) for row in rows}
 
+    def tron_auto_scored(self, low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
+        """(block, pick, result) of stored 自动最优 predictions that have a draw result, oldest first."""
+        query = (
+            "SELECT p.block_number AS b, p.pick AS pick, d.result AS result "
+            "FROM tron_auto_predictions p JOIN tron_draws d ON d.block_number = p.block_number "
+            "WHERE p.block_number >= ? ORDER BY p.block_number DESC"
+        )
+        args: list = [int(low)]
+        if limit and int(limit) > 0:
+            query += " LIMIT ?"
+            args.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [(int(r["b"]), str(r["pick"]), str(r["result"])) for r in reversed(rows)]
+
+    def tron_auto_overall(self) -> tuple[int, int]:
+        """(hits, total) over every stored 自动最优 prediction that has a draw result."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total, COALESCE(SUM(p.pick = d.result), 0) AS hits "
+                "FROM tron_auto_predictions p JOIN tron_draws d ON d.block_number = p.block_number",
+            ).fetchone()
+        return int(row["hits"]), int(row["total"])
+
     def tron_auto_params(self, block_number: int) -> str:
         with self.connect() as conn:
             row = conn.execute(

@@ -472,7 +472,8 @@ class AiBroadcastApiTest(unittest.TestCase):
         self.assertEqual([item["block"] for item in recent], sorted(item["block"] for item in recent))
         self.assertTrue(all(item["result"] in (S, D) and item["pick"] in (S, D) for item in recent))
         hits = sum(1 for _, p, r in scored if p == r)
-        self.assertEqual(data["window"], {"periods": 180, "hits": hits, "total": 11})
+        # L W W L W L W W L L W (gaps skipped): longest hit run 2, longest miss run 2
+        self.assertEqual(data["window"], {"periods": 180, "hits": hits, "total": 11, "max_win": 2, "max_loss": 2})
         self.assertEqual(data["overall"], {"hits": hits, "total": 11})
         # newest scored: k=14 pick S result S (win), k=13 pick S result D (loss) -> win streak of 1
         self.assertEqual(data["streak"], {"kind": "win", "count": 1})

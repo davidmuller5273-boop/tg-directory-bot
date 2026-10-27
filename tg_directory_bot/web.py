@@ -22,8 +22,8 @@ from .config import Config
 from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
 from .tron_draw import (
-    BEST_MAX_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
-    ai_trend, lookback_needed, my_trend, parse_limit,
+    BEST_MAX_PERIODS, BEST_MIN_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
+    ai_trend, lookback_needed, my_trend, parse_limit, pick_runs,
     parse_reference_params, record_next_auto_prediction, reference_panel,
 )
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
@@ -289,6 +289,33 @@ def create_app(config: Config) -> FastAPI:
 
     AI_BROADCAST_WINDOW = 180
 
+    def broadcast_feed(next_pick_of, scored_of, overall, recent_n: int) -> dict:
+        """Shared body of the bot feeds. Everything is computed here (the bots only display it):
+        pre-draw stored predictions, window = the newest AI_BROADCAST_WINDOW draw blocks."""
+        rows = store.tron_draw_recent(AI_BROADCAST_WINDOW)
+        latest = int(rows[-1]["block_number"]) if rows else 0
+        next_block = latest + DRAW_INTERVAL if latest else 0
+        window = scored_of(low=int(rows[0]["block_number"])) if rows else []
+        runs = pick_runs(window)  # periods without a stored prediction are skipped
+        overall_hits, overall_total = overall()
+        return {
+            "enabled": True,
+            "reason": "",
+            "latest_block": latest,
+            "latest_ts": int(rows[-1]["block_timestamp_ms"] or 0) if rows else 0,
+            "next_block": next_block,
+            "next_pick": next_pick_of(next_block) if next_block else None,
+            "recent": [
+                {"block": block, "result": result, "pick": pick} for block, pick, result in scored_of(limit=recent_n)
+            ],
+            "window": {
+                "periods": AI_BROADCAST_WINDOW, "hits": sum(1 for _, pick, result in window if pick == result),
+                "total": len(window), "max_win": runs["max_win"], "max_loss": runs["max_loss"],
+            },
+            "overall": {"hits": overall_hits, "total": overall_total},
+            "streak": {"kind": runs["kind"], "count": runs["count"]},
+        }
+
     def tron_ai_broadcast_payload() -> dict:
         """Compact feed for the Go bot's AI broadcast (localhost use; pre-draw stored predictions only)."""
         if not config.ai_api_key:
@@ -296,34 +323,25 @@ def create_app(config: Config) -> FastAPI:
         if not config.tron_ai_predict:
             return {"enabled": False, "reason": "TRON_AI_PREDICT=0 已关闭"}
         model = config.ai_model
-        rows = store.tron_draw_recent(AI_BROADCAST_WINDOW)
-        latest = int(rows[-1]["block_number"]) if rows else 0
-        next_block = latest + DRAW_INTERVAL if latest else 0
-        next_pick = store.tron_ai_predictions(next_block, next_block, model).get(next_block) if next_block else None
-        window = store.tron_ai_scored(model, low=int(rows[0]["block_number"])) if rows else []
-        hits = sum(1 for _, pick, result in window if pick == result)
-        kind, count = "none", 0
-        for _, pick, result in reversed(window):  # newest first; periods without a prediction are absent
-            win = pick == result
-            if count and (kind == "win") != win:
-                break
-            kind, count = ("win" if win else "loss"), count + 1
-        overall_hits, overall_total = store.tron_ai_overall(model)
-        return {
-            "enabled": True,
-            "reason": "",
-            "latest_block": latest,
-            "latest_ts": int(rows[-1]["block_timestamp_ms"] or 0) if rows else 0,
-            "next_block": next_block,
-            "next_pick": next_pick,
-            "recent": [
-                {"block": block, "result": result, "pick": pick}
-                for block, pick, result in store.tron_ai_scored(model, limit=10)
-            ],
-            "window": {"periods": AI_BROADCAST_WINDOW, "hits": hits, "total": len(window)},
-            "overall": {"hits": overall_hits, "total": overall_total},
-            "streak": {"kind": kind, "count": count},
-        }
+        return broadcast_feed(
+            lambda block: store.tron_ai_predictions(block, block, model).get(block),
+            lambda low=0, limit=0: store.tron_ai_scored(model, low=low, limit=limit),
+            lambda: store.tron_ai_overall(model),
+            10,
+        )
+
+    def tron_auto_broadcast_payload() -> dict:
+        """Same feed for 自动最优 (needs no AI key; only enough history to search the best settings)."""
+        have = store.tron_draw_total()
+        if have < BEST_MIN_PERIODS:
+            return {"enabled": False, "reason": f"自动最优需要至少 {BEST_MIN_PERIODS} 期历史（已有 {have} 期）"}
+        ensure_auto_prediction()
+        return broadcast_feed(
+            lambda block: store.tron_auto_predictions(block, block).get(block),
+            lambda low=0, limit=0: store.tron_auto_scored(low=low, limit=limit),
+            store.tron_auto_overall,
+            15,
+        )
 
     @app.get("/api/tron-draw/ai-broadcast")
     async def tron_draw_ai_broadcast_api():
@@ -331,6 +349,14 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(404)
         return JSONResponse(
             await asyncio.to_thread(tron_ai_broadcast_payload), headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/tron-draw/auto-broadcast")
+    async def tron_draw_auto_broadcast_api():
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return JSONResponse(
+            await asyncio.to_thread(tron_auto_broadcast_payload), headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/api/tron-draw/best")

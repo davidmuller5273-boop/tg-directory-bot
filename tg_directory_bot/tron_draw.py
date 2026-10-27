@@ -434,6 +434,26 @@ def ai_trend(
     }
 
 
+def pick_runs(scored: list[tuple[int, str, str]]) -> dict:
+    """Streak facts over stored pre-draw predictions (oldest first; periods without one are simply absent).
+
+    max_win / max_loss: longest run of consecutive hits / misses; streak: the run at the newest end.
+    """
+    max_win = max_loss = run = 0
+    kind = "none"
+    for _, pick, result in scored:
+        win = pick == result
+        if run and (kind == "win") == win:
+            run += 1
+        else:
+            run, kind = 1, ("win" if win else "loss")
+        if win:
+            max_win = max(max_win, run)
+        else:
+            max_loss = max(max_loss, run)
+    return {"max_win": max_win, "max_loss": max_loss, "kind": kind if run else "none", "count": run}
+
+
 def config_key(limit: int, streak_n: int, mode: str, recent_m: int, minority_m: int) -> str:
     return f"{int(limit)}|{int(streak_n)}|{mode}|{int(recent_m)}|{int(minority_m)}"
 

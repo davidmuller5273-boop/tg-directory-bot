@@ -236,5 +236,159 @@ class AutoWebTest(unittest.TestCase):
             self.assertIn(f'data-tk="{tk}"', html)
 
 
+class PickRunsTest(unittest.TestCase):
+    @staticmethod
+    def scored(flags):
+        """flags: True/False = hit/miss, None = gap (no stored prediction, absent from the list)."""
+        return [(20 * (i + 1), S, S if f else D) for i, f in enumerate(flags) if f is not None]
+
+    def test_max_runs_skip_gaps(self):
+        runs = tron_draw.pick_runs(self.scored([True, True, None, True, False, False, False, None, True]))
+        self.assertEqual(runs, {"max_win": 3, "max_loss": 3, "kind": "win", "count": 1})
+        runs = tron_draw.pick_runs(self.scored([False, None, False, True, True, True, True, False]))
+        self.assertEqual((runs["max_win"], runs["max_loss"], runs["kind"], runs["count"]), (4, 2, "loss", 1))
+
+    def test_empty_and_single(self):
+        self.assertEqual(tron_draw.pick_runs([]), {"max_win": 0, "max_loss": 0, "kind": "none", "count": 0})
+        self.assertEqual(tron_draw.pick_runs(self.scored([False])), {"max_win": 0, "max_loss": 1, "kind": "loss", "count": 1})
+
+
+@unittest.skipIf(TestClient is None, "fastapi not installed")
+class BroadcastFeedTest(unittest.TestCase):
+    def client(self, temp, **extra):
+        from tg_directory_bot.web import create_app
+        cfg = make_config(temp, **extra)
+        return TestClient(create_app(cfg)), DirectoryStore(cfg.db_path)
+
+    @staticmethod
+    def seed(store, flags, table="tron_ai_predictions"):
+        """Draw k (block 20*(k+1)) is S for even k; flags[k]: True = stored pick hits, False = misses, None = none."""
+        for k in range(len(flags)):
+            n = 20 * (k + 1)
+            store.record_tron_draw(n, make_hash(n, "1" if k % 2 == 0 else "2"), 1_700_000_000_000 + k * 60_000)
+        with store.connect() as conn:
+            for k, flag in enumerate(flags):
+                if flag is None:
+                    continue
+                result = S if k % 2 == 0 else D
+                pick = result if flag else (D if result == S else S)
+                if table == "tron_ai_predictions":
+                    conn.execute("INSERT INTO tron_ai_predictions (block_number,pick,model) VALUES (?,?,?)",
+                                 (20 * (k + 1), pick, "gpt-4.1-mini"))
+                else:
+                    conn.execute("INSERT INTO tron_auto_predictions (block_number,pick,params) VALUES (?,?,?)",
+                                 (20 * (k + 1), pick, "{}"))
+
+    def test_ai_window_max_runs_with_gaps_data_smaller_than_window(self):
+        flags = [None, True, True, None, True, False, False, False, None, True]
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, flags)
+                data = client.get("/api/tron-draw/ai-broadcast").json()
+        self.assertEqual(data["window"], {"periods": 180, "hits": 4, "total": 7, "max_win": 3, "max_loss": 3})
+        self.assertEqual(data["streak"], {"kind": "win", "count": 1})
+
+    def test_ai_window_larger_than_180_only_counts_newest_180_blocks(self):
+        # 200 draws: the oldest 20 are a long hit run that must fall outside the window
+        flags = [True] * 20 + [False, True] * 90
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, flags)
+                data = client.get("/api/tron-draw/ai-broadcast").json()
+        self.assertEqual(data["window"]["total"], 180)
+        self.assertEqual((data["window"]["max_win"], data["window"]["max_loss"]), (1, 1))
+        self.assertEqual(data["overall"]["total"], 200)
+        self.assertEqual(data["streak"], {"kind": "win", "count": 1})
+
+    def test_auto_broadcast_disabled_when_history_too_short(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                data = client.get("/api/tron-draw/auto-broadcast").json()
+                self.assertEqual(data["enabled"], False)
+                self.assertIn("300", data["reason"])
+                self.assertEqual(set(data), {"enabled", "reason"})
+                fill_random(store, 120)
+                data = client.get("/api/tron-draw/auto-broadcast").json()
+                self.assertFalse(data["enabled"])
+                self.assertIn("120", data["reason"])
+                self.assertEqual(store.tron_auto_predictions(0, 10**9), {})
+
+    def test_auto_broadcast_works_without_ai_key_and_starts_empty(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp, ai_api_key="")
+            with client:
+                fill_random(store, 320)
+                response = client.get("/api/tron-draw/auto-broadcast")
+                data = response.json()
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(set(data), {
+            "enabled", "reason", "latest_block", "latest_ts", "next_block", "next_pick",
+            "recent", "window", "overall", "streak"})
+        self.assertTrue(data["enabled"])
+        self.assertEqual((data["latest_block"], data["next_block"]), (6400, 6420))
+        self.assertIn(data["next_pick"], (S, D))          # computed lazily before the draw, stored write-once
+        self.assertEqual(data["recent"], [])
+        self.assertEqual(data["window"], {"periods": 180, "hits": 0, "total": 0, "max_win": 0, "max_loss": 0})
+        self.assertEqual(data["overall"], {"hits": 0, "total": 0})
+        self.assertEqual(data["streak"], {"kind": "none", "count": 0})
+
+    def test_auto_broadcast_normal(self):
+        flags = [None] * 290 + [True, False, False, None, True, True, True, False, True, True] + [None] * 5
+        flags += [True, False, True, True, False, None, None, True, True, False] * 1
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, flags, table="tron_auto_predictions")
+                data = client.get("/api/tron-draw/auto-broadcast").json()
+                self.assertTrue(data["enabled"])
+                n = len(flags)
+                self.assertEqual(data["latest_block"], 20 * n)
+                self.assertEqual(data["latest_ts"], 1_700_000_000_000 + (n - 1) * 60_000)
+                self.assertEqual(data["next_block"], 20 * (n + 1))
+                self.assertIn(data["next_pick"], (S, D))
+                predicted = [(k, f) for k, f in enumerate(flags) if f is not None]
+                self.assertEqual(len(data["recent"]), 15)
+                self.assertEqual([r["block"] for r in data["recent"]], [20 * (k + 1) for k, _ in predicted[-15:]])
+                for item, (k, f) in zip(data["recent"], predicted[-15:]):
+                    self.assertEqual(item["result"], S if k % 2 == 0 else D)
+                    self.assertEqual(item["pick"] == item["result"], f)
+                # window = newest 180 draw blocks (k >= n-180); gaps skipped
+                win = [f for k, f in predicted if k >= n - 180]
+                self.assertEqual(data["window"]["total"], len(win))
+                self.assertEqual(data["window"]["hits"], sum(win))
+                self.assertEqual(data["window"]["periods"], 180)
+                best_w = best_l = run = 0
+                prev = None
+                for f in win:
+                    run = run + 1 if f == prev else 1
+                    prev = f
+                    best_w, best_l = (max(best_w, run), best_l) if f else (best_w, max(best_l, run))
+                self.assertEqual((data["window"]["max_win"], data["window"]["max_loss"]), (best_w, best_l))
+                self.assertEqual(data["overall"], {"hits": sum(f for _, f in predicted), "total": len(predicted)})
+                self.assertEqual(data["streak"], {"kind": "loss", "count": 1})
+                # the AI feed stays the AI feed (no AI records here)
+                self.assertEqual(client.get("/api/tron-draw/ai-broadcast").json()["window"]["total"], 0)
+
+    def test_not_reachable_through_the_public_allowlist(self):
+        conf = (Path(__file__).resolve().parent.parent / "deploy/nginx/tron-draw.conf.example").read_text()
+        pattern = re.search(r"location ~ (\^/api/tron-draw[^ ]*) \{", conf).group(1)
+        for path in ("/api/tron-draw", "/api/tron-draw/best"):
+            self.assertTrue(re.search(pattern, path), path)
+        for path in ("/api/tron-draw/auto-broadcast", "/api/tron-draw/ai-broadcast"):
+            self.assertFalse(re.search(pattern, path), path)
+
+    def test_page_has_180_choice_and_streak_tokens(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, _ = self.client(temp)
+            with client:
+                html = client.get("/tron-draw").text
+        self.assertEqual(html.count('data-n="180"'), 4)  # 区块走势 / AI走势 / 自动最优走势 / 算法走势
+        for token in ("data-tk=\"p180\"", "function icw(", "function curRun(", "当前\"+(c.win", "最大连中", "最大连错", "currun:"):
+            self.assertIn(token, html)
+
+
 if __name__ == "__main__":
     unittest.main()

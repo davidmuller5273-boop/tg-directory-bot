@@ -102,7 +102,7 @@ th{white-space:nowrap}
    <span class="src" id="srcbox"><span class="tl" data-tk="srcl">预测来源：</span><button class="snd" id="srcI" type="button" data-src="ai" data-tk="sai" hidden>AI预测</button><button class="snd" id="srcO" type="button" data-src="auto" data-tk="sauto">自动最优算法预测</button><button class="snd" id="srcA" type="button" data-src="input" data-tk="sinput">输入参数算法预测</button></span></div>
   <div class="curpred" id="curpred" data-tk="cur"></div>
   <div class="periods" id="periods">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
    <input id="custom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
   </div>
   <div class="runs" id="runs"></div>
@@ -113,7 +113,7 @@ th{white-space:nowrap}
   <div class="fold" id="afold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldAi"><span id="aititle">AI走势</span> <span class="arr" id="aarr">▶</span></span><span class="sum" id="asum"></span></div>
   <div id="abody" hidden>
   <div class="periods" id="aperiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
    <input id="acustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
   </div>
   <div class="runs" id="astat"></div>
@@ -126,7 +126,7 @@ th{white-space:nowrap}
   <div class="fold" id="ofold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldAuto">自动最优走势 <span class="arr" id="oarr">▶</span></span><span class="sum" id="osum"></span></div>
   <div id="obody" hidden>
   <div class="periods" id="operiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
    <input id="ocustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ogo">确定</button>
   </div>
   <div class="runs" id="ostat"></div>
@@ -139,7 +139,7 @@ th{white-space:nowrap}
   <div class="fold" id="mfold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldMine">算法走势 <span class="arr" id="marr">▶</span></span><span class="sum" id="msum"></span></div>
   <div id="mbody" hidden>
   <div class="periods" id="mperiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="500">500</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
    <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
   </div>
   <div class="runs" id="mstat"></div>
@@ -228,8 +228,10 @@ var TIP={
  autorow:"自动最优：每期只用「开奖前的历史」自动选出连续猜错最少的一组设置来预测，并在开奖前存档。右边的命中率来自这些真实存档，不是事后回算，所以刚开始期数很少。",
  longest:"最长龙：所选这些期里，同一边连续开出最长的一段。例：单 7 期＝连续开了 7 期单。点一下数字，会在下面的走势里高亮这一段。",
  alt:"最大连跳：单、双一直轮流出现（单双单双…）最长的一段。例：6 期＝单双单双单双。点一下数字可高亮。",
- maxwin:"最大连中：连续猜对最长的一段。点一下可在走势里高亮。",
- maxloss:"最大连错：连续猜错最长的一段，越短越稳（但开奖仍是随机的）。点一下可在走势里高亮。",
+ maxwin:"最大连中：所选这些期里，连续猜对最长的一段。没有预测记录的期会跳过。例：180期里最多连续猜中 6 次。点一下可在走势里高亮。",
+ maxloss:"最大连错：所选这些期里，连续猜错最长的一段，越短越稳（但开奖仍是随机的）。没有预测记录的期会跳过。点一下可在走势里高亮。",
+ currun:"当前连中/连错：从最新一期往回数，已经连续猜对（或猜错）几期。没有预测记录的期会跳过。",
+ p180:"180期：最新 180 期，约 3 小时（每分钟开一期）。选它就能看到近三小时的最大连中、最大连错。",
  hits:"命中：猜中的期数 / 有预测记录的期数，括号里是命中率。",
  foldAi:"AI走势：每一期 AI 在开奖前给出的预测，对了✅错了❌。只统计开启之后、开奖前已存档的期数。点一下展开或收起。",
  foldAuto:"自动最优走势：每期开奖前，只用该期之前的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。从零开始慢慢累积，是真实记录。点一下展开或收起。",
@@ -522,8 +524,15 @@ function trendHtml(m,nextPick,nextBlock,kind){
   else if(kind==="ai"||kind==="auto")cells+="<div class=mk data-p=1 data-b="+(nextBlock||"")+" title='"+(kind==="ai"?"AI 预测生成中":"自动最优需要至少 300 期历史")+"'>…</div>";
   return cells;
 }
+function icw(win){return win?"<i class='ic s'>✓</i>":"<i class='ic d'>✗</i>"}
+function curRun(items){   /* current streak over predicted periods (gaps skipped) */
+  var kind=null,n=0;
+  for(var i=items.length-1;i>=0;i--){var o=items[i].ok;if(o===null||o===undefined)continue;if(kind===null)kind=o;if(o!==kind)break;n++}
+  return kind===null?null:{win:kind,n:n};
+}
 function statHtml(m,pane){
-  return "<span class=tl"+tp("hits")+">命中</span> "+m.hits+"/"+m.total+(m.rate===null?"":"（"+m.rate+"%）")+" · <span class=lnk data-k=max_win"+tp("maxwin")+">最大连中 "+m.max_win.len+"✅</span> · <span class=lnk data-k=max_loss"+tp("maxloss")+">最大连错 "+m.max_loss.len+"❌</span>";
+  var c=curRun(m.items),cur=c?" · <span class=tl"+tp("currun")+">当前"+(c.win?"连中":"连错")+" "+c.n+"</span> "+icw(c.win):"";
+  return "<span class=tl"+tp("hits")+">命中</span> "+m.hits+"/"+m.total+(m.rate===null?"":"（"+m.rate+"%）")+" · <span class=lnk data-k=max_win"+tp("maxwin")+">最大连中 "+m.max_win.len+"</span> "+icw(true)+" · <span class=lnk data-k=max_loss"+tp("maxloss")+">最大连错 "+m.max_loss.len+"</span> "+icw(false)+cur;
 }
 function bindStat(el,m,pane){
   el.querySelectorAll(".lnk").forEach(function(a){a.onclick=function(){var x=m[a.getAttribute("data-k")];jump(pane,x.start,x.len)}});

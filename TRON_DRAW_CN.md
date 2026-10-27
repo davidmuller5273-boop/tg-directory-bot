@@ -95,6 +95,11 @@ echo 'AI_API_KEY=sk-xxxx' | sudo tee -a /opt/tg-directory-bot/.env >/dev/null &&
 - **接口**：沿用 `/api/tron-draw`，新增参数 `auto_limit` 与返回字段 `auto`（enabled / next{block,pick} / params / prev / window / trend）；`ai` 也新增 `prev`；`?block=` 详情多一项 `auto`。**不新增公开路径，Nginx / Caddy 放行名单无需修改。**`/api/tron-draw/ai-broadcast` 与群播报均未改动。
 - **诚实说明**：以上都是统计，开奖是随机的，约 50% 命中属正常，不保证命中。
 
+## 「180期」与机器人接口（近三小时的连中/连错由本程序算好，机器人只显示）
+- **页面**：区块走势、AI走势、自动最优走势、算法走势的期数选项里都多了「180期」（最新 180 期，约 3 小时）。走势栏显示所选期数内的「最大连中 N」「最大连错 N」（✓/✗ 圆形图标，点击在走势里高亮，鼠标停 1 秒有解释）以及「当前连中/连错 N」；只统计开奖前已存档的预测，没有预测的期直接跳过。
+- **`GET /api/tron-draw/ai-broadcast`**（仅本机，原有字段不变）：`window` 新增 `max_win`、`max_loss`——最新 180 个开奖块窗口内、有开奖前存档预测的期里，最长连续命中/连续未中（跳过没有预测的期）。`streak` 不变。即：`window = {periods:180, hits, total, max_win, max_loss}`。
+- **`GET /api/tron-draw/auto-broadcast`（新，仅本机）**：与 ai-broadcast 完全同结构（`enabled, reason, latest_block, latest_ts, next_block, next_pick, recent, window, overall, streak`），数据来自开奖前存档的自动最优预测（`tron_auto_predictions`）；`recent` 为最近 15 个「有预测且已开奖」的期（旧→新，`block/result/pick`）。历史不足 300 期时返回 `{"enabled":false,"reason":"自动最优需要至少 300 期历史（已有 N 期）"}`；**不依赖 AI_API_KEY**。刚上线时是空记录（`recent=[]`、`total=0`），随开奖累积；`next_pick` 若机器人进程还没存，会在请求时补算（同一结果，写一次）。两个接口共用同一个函数，只是数据源不同。**不要加进 Nginx/Caddy 放行名单**——放行规则 `^/api/tron-draw(/best)?$` 本来就不匹配这两个路径（有测试），机器人走 `http://127.0.0.1:8080`。
+
 ## 点击走势格子 / 自动回到最右
 - 点区块走势、AI走势、算法走势里的任一格：自动刷新和自动滚动暂停 1 秒；格子附近弹出提示（日期时间·北京时间 + 区块高度）；页面最底部「区块详情」显示区块高度、完整哈希、区块时间（北京时间）、末位数字、单/双结果，以及 AI 预测、算法预测和 ✅/❌（有就显示）。点别处关闭提示，点另一格更新；手机点按同样可用。详情通过 `/api/tron-draw?block=区块高度` 取得（沿用已放行的路径，Nginx/Caddy 无需再改）。
 - 页面最底部有一行红色大字提示「优化建议，请联系上级，谢谢！」。
