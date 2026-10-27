@@ -4,12 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex">
-<title>开奖走势</title>
+<title>波场一分单双 开奖走势</title>
 <style>
 :root{--single:#12b886;--double:#f03e3e;--bg:#f4f6f8;--card:#fff;--text:#1f2933;--muted:#7b8794;--line:#e4e7eb}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:760px;margin:0 auto;padding:12px}
+.vstats{display:flex;flex-wrap:wrap;gap:6px 0;background:var(--card);border-radius:12px;padding:8px 4px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.vstats .vs{flex:1 1 20%;min-width:68px;text-align:center;padding:2px 4px;line-height:1.25;cursor:help}
+.vstats .vs b{display:block;font-size:17px;font-variant-numeric:tabular-nums}
+.vstats .vs span{font-size:12px;color:var(--muted);white-space:nowrap}
+.vstats .on b{color:var(--single)}
+.vstats .on span:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--single);margin-right:4px;vertical-align:middle}
+@media(max-width:480px){.vstats .vs{flex-basis:33%}}
 .card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 h1{font-size:18px;margin:0}
@@ -22,7 +29,8 @@ h1{font-size:18px;margin:0}
 .periods button{border:1px solid var(--line);background:#fff;border-radius:16px;padding:4px 14px;font-size:14px;cursor:pointer}
 .periods button.on{background:var(--single);border-color:var(--single);color:#fff}
 .periods input{width:84px;padding:4px 8px;border:1px solid var(--line);border-radius:16px;font-size:14px}
-.road{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:6px}
+.road{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:6px;cursor:grab;-webkit-user-select:none;user-select:none}
+.road.dragging{cursor:grabbing}.road.dragging *{cursor:grabbing!important}
 .grid{display:grid;grid-auto-flow:column;gap:4px;width:max-content}
 .cell{width:26px;height:26px}
 .bead{width:26px;height:26px;border-radius:50%;color:#fff;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center}
@@ -94,8 +102,9 @@ th{white-space:nowrap}
 </head>
 <body>
 <div class="wrap">
+ <div class="vstats" id="vstats"><div class="vs" data-tk="vsHu"><b id="vsHu">-</b><span>历史使用次数</span></div><div class="vs" data-tk="vsHp"><b id="vsHp">-</b><span>历史用户</span></div><div class="vs" data-tk="vsTu"><b id="vsTu">-</b><span>今日使用次数</span></div><div class="vs" data-tk="vsTp"><b id="vsTp">-</b><span>今日用户</span></div><div class="vs on" data-tk="vsOn"><b id="vsOn">-</b><span>在线用户</span></div></div>
  <div class="card">
-  <div class="head"><h1>开奖走势</h1><div class="counts"><span class="s">单 <span id="cs">-</span></span> / <span class="d">双 <span id="cd">-</span></span></div></div>
+  <div class="head"><h1>波场一分单双 开奖走势</h1><div class="counts"><span class="s">单 <span id="cs">-</span></span> / <span class="d">双 <span id="cd">-</span></span></div></div>
   <div class="head" style="margin-top:6px"><button class="snd" id="snd" data-tk="snd">🔕 声音：关</button><span class="muted"><span class="lnk" id="tsA" data-tk="tsA">试听✅</span> · <span class="lnk" id="tsB" data-tk="tsB">试听❌</span></span></div>
   <div class="muted" id="lastjudge" data-tk="judge"></div>
   <div class="head" style="margin-top:12px"><span class="sec">区块走势</span>
@@ -200,6 +209,11 @@ function cls(v){return v==="单"?"s":"d"}
 function ic(v,x){return (v==="单"||v==="双")?"<i class='ic "+cls(v)+(x?" "+x:"")+"'>"+v+"</i>":esc(v||"-")}
 /* ---------- plain-language explanations (1 s hover, tap / long-press on phones) ---------- */
 var TIP={
+ vsHu:"历史使用次数：从开始统计到现在，这个网页一共被打开了多少次（每打开或刷新一次算一次，页面自动更新不算）。",
+ vsHp:"历史用户：从开始统计到现在，一共有多少个不同的访客。用户=不同的访客，按访问设备去重，不记录真实IP。",
+ vsTu:"今日使用次数：今天（北京时间 0 点起）网页被打开的次数。",
+ vsTp:"今日用户：今天（北京时间 0 点起）来过的不同访客数。用户=不同的访客，按访问设备去重，不记录真实IP。",
+ vsOn:"在线用户：最近 1 分钟内页面还开着的访客数（约每 4 秒自动更新一次）。",
  snd:"声音：打开后，每开出新的一期，会按你选的「预测来源」判断上一期猜对没有。猜对响清脆的提示音，猜错响低沉的提示音。浏览器需要你先点一下页面才允许出声。",
  tsA:"点这里试听「猜对了」的提示音。",
  tsB:"点这里试听「猜错了」的提示音。",
@@ -380,6 +394,28 @@ function watchRoad(r){
   ["pointerup","pointercancel","mouseup","touchend","touchcancel","mouseleave"].forEach(function(n){r.addEventListener(n,function(){r._down=false;touch()},{passive:true})});
   ["wheel","touchmove","pointermove","keydown"].forEach(function(n){r.addEventListener(n,function(e){if(n==="pointermove"&&!r._down)return;touch()},{passive:true})});
   r.addEventListener("scroll",function(){if(Date.now()-(r._prog||0)<1500)return;touch()},{passive:true});
+  /* mouse click-and-drag scrolling (touch keeps native scrolling); a drag (> 5 px) never counts as a cell click */
+  var DRAG_PX=5,dsx=0,dsl=0,dmoved=false,dact=false;
+  r.addEventListener("mousedown",function(e){
+    if(e.button!==0)return;
+    dact=true;dmoved=false;dsx=e.clientX;dsl=r.scrollLeft;
+  });
+  window.addEventListener("mousemove",function(e){
+    if(!dact)return;
+    var dx=e.clientX-dsx;
+    if(!dmoved){if(Math.abs(dx)<=DRAG_PX)return;dmoved=true;r.classList.add("dragging");hideTip&&hideTip()}
+    r.scrollLeft=dsl-dx;r._t=Date.now();e.preventDefault();
+  });
+  window.addEventListener("mouseup",function(){
+    if(!dact)return;
+    dact=false;r.classList.remove("dragging");r._down=false;touch();
+    if(dmoved)r._swallow=Date.now();
+  });
+  r.addEventListener("dragstart",function(e){e.preventDefault()});
+  r.addEventListener("click",function(e){
+    if(r._swallow&&Date.now()-r._swallow<400){e.stopPropagation();e.preventDefault()}
+    r._swallow=0;
+  },true);
 }
 function followEnd(r,key,store){
   if(key===store.k)return;
@@ -586,8 +622,13 @@ function renderPre(d,kind){
   $(P.meta).textContent="近 "+t.count+" 期，其中已有"+nm+"记录 "+t.total+" 期（· 表示当期没有记录，只统计开奖前已存档的预测）"+(nx?" · 最右侧闪烁为下一期"+nm+"预测："+nx:"");
   followEnd($(P.road),lim+":"+d.latest,scrollKeys[kind]);
 }
+function renderStats(d){
+  var t=d&&d.stats;if(!t)return;
+  var m={vsHu:t.history_uses,vsHp:t.history_users,vsTu:t.today_uses,vsTp:t.today_users,vsOn:t.online};
+  Object.keys(m).forEach(function(k){var e=$(k);if(e&&typeof m[k]==="number")e.textContent=m[k].toLocaleString("en-US")});
+}
 function render(d){
-  lastData=d;markSrc(d);
+  lastData=d;markSrc(d);renderStats(d);
   renderRef(d);renderRuns(d);
   $("cs").textContent=d.counts.single;$("cd").textContent=d.counts.double;
   var ok=null;

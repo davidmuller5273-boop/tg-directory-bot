@@ -26,6 +26,7 @@ from .tron_draw import (
     ai_trend, lookback_needed, my_trend, parse_limit, pick_runs,
     parse_reference_params, record_next_auto_prediction, reference_panel,
 )
+from .tron_stats import TronStats, resolve_client_ip
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
 from .validation import parse_submission_payload
 
@@ -230,9 +231,20 @@ def create_app(config: Config) -> FastAPI:
             "auto": None if auto_pick is None else {"pick": auto_pick, "ok": auto_pick == result},
         }
 
+    tron_stats = TronStats(store)
+    app.state.tron_stats = tron_stats
+
+    def visitor_of(request: Request) -> tuple[str | None, str]:
+        """(real client ip or None for local callers, user agent). Forwarded headers only trusted from loopback."""
+        peer = request.client.host if request.client else None
+        ip = resolve_client_ip(
+            peer, request.headers.get("x-real-ip", ""), request.headers.get("x-forwarded-for", ""),
+        )
+        return ip, request.headers.get("user-agent", "")
+
     @app.get("/api/tron-draw")
     async def tron_draw_api(
-        limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
+        request: Request, limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
         minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", auto_limit: str = "0", block: str = "",
     ):
         if not config.tron_draw_stats:
@@ -248,13 +260,15 @@ def create_app(config: Config) -> FastAPI:
         mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
         ai_n = parse_limit(ai_limit, 0, 5000) if str(ai_limit).strip() not in ("", "0") else 0
         auto_n = parse_limit(auto_limit, 0, 5000) if str(auto_limit).strip() not in ("", "0") else 0
-        return JSONResponse(
-            tron_draw_payload(
-                parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
-                mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n,
-            ),
-            headers={"Cache-Control": "no-store"},
+        payload = tron_draw_payload(
+            parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
+            mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n,
         )
+        # the page's own 4 s poll doubles as the "online" heartbeat (no extra request); never raises
+        ip, agent = visitor_of(request)
+        tron_stats.heartbeat(ip, agent)
+        payload["stats"] = tron_stats.snapshot()
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     auto_lock = threading.Lock()
 
@@ -371,6 +385,8 @@ def create_app(config: Config) -> FastAPI:
     async def tron_draw_page(request: Request):
         if not config.tron_draw_stats:
             raise HTTPException(404)
+        ip, agent = visitor_of(request)
+        tron_stats.record_use(ip, agent)  # one page open = one use
         return templates.TemplateResponse(
             request=request, name="tron_draw.html", context={"request": request},
             headers={"Cache-Control": "no-store"},
