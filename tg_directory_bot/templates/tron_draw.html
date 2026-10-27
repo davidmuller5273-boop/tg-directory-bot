@@ -291,7 +291,7 @@ function showDetail(el,block,pending){
       "<div class=row><span class=k>末位数字：</span>"+x.digit+"</div>"+
       "<div class=row><span class=k>结果：</span><b class='res "+cls(x.result)+"'>"+x.result+"</b>"+(x.verified?"":"（尚未二次确认）")+"</div>"+
       "<div class=row><span class=k>算法预测：</span>"+(x.algo?x.algo.pick+" "+okMark(x.algo.ok):(algoHit(x.block)||"无记录"))+"</div>";
-    if(lastData&&lastData.ai)body+="<div class=row><span class=k>AI预测"+(x.ai?"（"+esc(x.ai.model)+"）":"")+"：</span>"+(x.ai?x.ai.pick+" "+okMark(x.ai.ok):"无记录")+"</div>";
+    if(lastData&&lastData.ai)body+="<div class=row><span class=k>AI预测：</span>"+(x.ai?x.ai.pick+" "+okMark(x.ai.ok):"无记录")+"</div>";
     $("detailbody").innerHTML=body;$("detailbox").hidden=false;
   }).catch(function(){if(seq===detailSeq){tipEl.innerHTML="#"+block+"<br>暂无详情";placeTip(el)}});
 }
@@ -321,7 +321,7 @@ $("srcA").onclick=function(){setSrc("algo")};$("srcI").onclick=function(){setSrc
 function aiRowHtml(d){
   var a=d.ai,w=a.window,nx=a.next?a.next.pick:null;
   var note=w.total<w.limit?"<div class=muted>仅统计开启后开奖前已记录的预测：已有 "+w.total+" 期（所选 "+w.limit+" 期）</div>":"";
-  return "<tr><td>AI（"+esc(a.model)+"）</td><td class='res "+(nx?cls(nx):"")+"'>"+(nx||"…")+"</td><td>"+(w.total?w.hits+"/"+w.total+"（"+w.rate+"%）":"-")+note+"</td></tr>";
+  return "<tr><td>AI</td><td class='res "+(nx?cls(nx):"")+"'>"+(nx||"…")+"</td><td>"+(w.total?w.hits+"/"+w.total+"（"+w.rate+"%）":"-")+note+"</td></tr>";
 }
 function renderRef(d){
   var r=d.reference,f=r.final,big=$("finbig");
@@ -423,7 +423,7 @@ function renderAi(d){
   if(!d.ai){card.hidden=true;return}
   card.hidden=false;
   var t=d.ai.trend,nx=d.ai.next?d.ai.next.pick:null;
-  $("aititle").textContent="AI走势（"+d.ai.model+"）";
+  $("aititle").textContent="AI走势";
   var w=d.ai.window;
   $("asum").innerHTML=sumLine(nx,t||(w&&w.total?w:null),t?ailimit:(w?w.limit:0));
   if(!openS.ai||!t)return;     /* collapsed: no rendering of the road */
