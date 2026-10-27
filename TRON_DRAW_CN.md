@@ -82,6 +82,7 @@ echo 'AI_API_KEY=sk-xxxx' | sudo tee -a /opt/tg-directory-bot/.env >/dev/null &&
 - **页面**：区块走势下面依次是「AI走势 ▶」「算法走势 ▶」两个折叠栏（默认收起，点标题栏展开/收起，状态记在浏览器；标题里一行摘要：下一期预测 + 命中 x/y；收起时不请求、不渲染走势数据，只留摘要。点「最大连中/连错」若栏是收起的会先自动展开再跳转）。展开后各有 50/100/500/自定义、最大连中/最大连错（点击跳转高亮）；两个走势最右边闪烁的格子是下一期预测（单/双）。区块走势旁的「预测来源：算法预测 | AI预测」（浏览器记住，默认算法预测）决定区块走势最右格与列头显示哪个。算法参考表里多一行 AI（预测 + 真实命中 x/y），最终预测旁另有一行「AI参考：单」；**AI 不参与最终预测的投票**。
 - **页面不显示模型名**：页面各处（走势标题、参考表、详情）只写「AI」；模型名只保留在后端、数据库和接口字段 `ai.model`。
 - **接口**：`/api/tron-draw?ai_limit=100` 返回 `ai`（enabled/model/next/window/trend）；未配置时 `ai` 为 null、页面不显示 AI 部分。接口、页面、日志都不包含 key。
+- **播报接口（给 Go 机器人，仅本机）**：`GET /api/tron-draw/ai-broadcast`（无参数，`no-store`）。返回 `enabled/reason/latest_block/latest_ts/next_block/next_pick/recent(最近10期有留底预测的已开奖期，旧→新)/window(最近180个开奖区块里有留底预测的期)/overall(全部留底预测，无上限)/streak(180期窗口内从最新往前的连中win/连错loss，无预测的期跳过)`；只用开奖前留底的预测，按 `AI_MODEL` 过滤；AI 未配置或 `TRON_AI_PREDICT=0` 时 HTTP 200 + `{"enabled":false,"reason":...}`。**不要加进 Nginx/Caddy 放行名单**，机器人走 `http://127.0.0.1:8080`。契约见 safe 仓库 `docs/AI波场单双一分.md`。
 - **诚实说明**：AI参考仅为统计分析，开奖随机，不保证命中；约 50% 命中属随机范围。
 
 ## 点击走势格子 / 自动回到最右

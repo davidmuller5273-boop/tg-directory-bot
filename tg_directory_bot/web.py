@@ -244,6 +244,52 @@ def create_app(config: Config) -> FastAPI:
                 best_cache["key"] = key
             return best_cache["value"]
 
+    AI_BROADCAST_WINDOW = 180
+
+    def tron_ai_broadcast_payload() -> dict:
+        """Compact feed for the Go bot's AI broadcast (localhost use; pre-draw stored predictions only)."""
+        if not config.ai_api_key:
+            return {"enabled": False, "reason": "AI_API_KEY 未配置"}
+        if not config.tron_ai_predict:
+            return {"enabled": False, "reason": "TRON_AI_PREDICT=0 已关闭"}
+        model = config.ai_model
+        rows = store.tron_draw_recent(AI_BROADCAST_WINDOW)
+        latest = int(rows[-1]["block_number"]) if rows else 0
+        next_block = latest + DRAW_INTERVAL if latest else 0
+        next_pick = store.tron_ai_predictions(next_block, next_block, model).get(next_block) if next_block else None
+        window = store.tron_ai_scored(model, low=int(rows[0]["block_number"])) if rows else []
+        hits = sum(1 for _, pick, result in window if pick == result)
+        kind, count = "none", 0
+        for _, pick, result in reversed(window):  # newest first; periods without a prediction are absent
+            win = pick == result
+            if count and (kind == "win") != win:
+                break
+            kind, count = ("win" if win else "loss"), count + 1
+        overall_hits, overall_total = store.tron_ai_overall(model)
+        return {
+            "enabled": True,
+            "reason": "",
+            "latest_block": latest,
+            "latest_ts": int(rows[-1]["block_timestamp_ms"] or 0) if rows else 0,
+            "next_block": next_block,
+            "next_pick": next_pick,
+            "recent": [
+                {"block": block, "result": result, "pick": pick}
+                for block, pick, result in store.tron_ai_scored(model, limit=10)
+            ],
+            "window": {"periods": AI_BROADCAST_WINDOW, "hits": hits, "total": len(window)},
+            "overall": {"hits": overall_hits, "total": overall_total},
+            "streak": {"kind": kind, "count": count},
+        }
+
+    @app.get("/api/tron-draw/ai-broadcast")
+    async def tron_draw_ai_broadcast_api():
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return JSONResponse(
+            await asyncio.to_thread(tron_ai_broadcast_payload), headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/api/tron-draw/best")
     async def tron_draw_best_api():
         if not config.tron_draw_stats:

@@ -393,5 +393,130 @@ class AiWebTest(unittest.TestCase):
         self.assertGreater(html.index("优化建议，请联系上级，谢谢！"), html.index('id="detailbox"'))
 
 
+@unittest.skipIf(TestClient is None, "fastapi not installed")
+class AiBroadcastApiTest(unittest.TestCase):
+    def client(self, temp, **extra):
+        from tg_directory_bot.web import create_app
+        cfg = make_config(temp, **extra)
+        return TestClient(create_app(cfg)), DirectoryStore(cfg.db_path)
+
+    @staticmethod
+    def seed(store, picks, model="gpt-4.1-mini", count=None):
+        """Draw k (block 20*(k+1)) has result S for even k, D for odd k; picks[k] is the stored pick or None."""
+        count = count or len(picks)
+        for k in range(count):
+            n = 20 * (k + 1)
+            store.record_tron_draw(n, make_hash(n, "1" if k % 2 == 0 else "2"), 1_700_000_000_000 + k * 60_000)
+        with store.connect() as conn:
+            for k in range(min(count, len(picks))):
+                if picks[k]:
+                    conn.execute(
+                        "INSERT INTO tron_ai_predictions (block_number,pick,model) VALUES (?,?,?)",
+                        (20 * (k + 1), picks[k], model))
+
+    def test_disabled_reasons(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, _ = self.client(temp, ai_api_key="")
+            with client:
+                response = client.get("/api/tron-draw/ai-broadcast")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"enabled": False, "reason": "AI_API_KEY 未配置"})
+                self.assertEqual(response.headers["cache-control"], "no-store")
+        with tempfile.TemporaryDirectory() as temp:
+            client, _ = self.client(temp, tron_ai_predict=False)
+            with client:
+                data = client.get("/api/tron-draw/ai-broadcast").json()
+                self.assertFalse(data["enabled"])
+                self.assertIn("TRON_AI_PREDICT", data["reason"])
+
+    def test_empty_database(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client, _ = self.client(temp)
+            with client:
+                data = client.get("/api/tron-draw/ai-broadcast").json()
+        self.assertTrue(data["enabled"])
+        self.assertEqual((data["latest_block"], data["latest_ts"], data["next_block"]), (0, 0, 0))
+        self.assertIsNone(data["next_pick"])
+        self.assertEqual(data["recent"], [])
+        self.assertEqual(data["streak"], {"kind": "none", "count": 0})
+        self.assertEqual(data["overall"], {"hits": 0, "total": 0})
+
+    def test_fields_and_semantics(self):
+        # 15 draws: results S,D,S,D,...; no prediction for k=0..2 (before AI was on) and k=8
+        picks = [None, None, None, S, S, D, D, D, None, S, S, D, D, S, S]
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, picks)
+                store.record_tron_ai_prediction(20 * 16, D, "gpt-4.1-mini")        # next period
+                # other model's stored prediction must be ignored
+                with store.connect() as conn:
+                    conn.execute("INSERT INTO tron_ai_predictions (block_number,pick,model) VALUES (?,?,?)",
+                                 (20 * 1, S, "other-model"))
+                response = client.get("/api/tron-draw/ai-broadcast")
+                data = response.json()
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(set(data), {
+            "enabled", "reason", "latest_block", "latest_ts", "next_block", "next_pick",
+            "recent", "window", "overall", "streak"})
+        self.assertEqual((data["enabled"], data["reason"]), (True, ""))
+        self.assertEqual(data["latest_block"], 300)
+        self.assertEqual(data["latest_ts"], 1_700_000_000_000 + 14 * 60_000)
+        self.assertEqual((data["next_block"], data["next_pick"]), (320, D))
+        result = lambda k: S if k % 2 == 0 else D  # noqa: E731
+        scored = [(20 * (k + 1), picks[k], result(k)) for k in range(15) if picks[k]]
+        self.assertEqual(len(scored), 11)
+        recent = data["recent"]
+        self.assertEqual(len(recent), 10)
+        self.assertEqual(recent, [{"block": b, "result": r, "pick": p} for b, p, r in scored[-10:]])
+        self.assertEqual([item["block"] for item in recent], sorted(item["block"] for item in recent))
+        self.assertTrue(all(item["result"] in (S, D) and item["pick"] in (S, D) for item in recent))
+        hits = sum(1 for _, p, r in scored if p == r)
+        self.assertEqual(data["window"], {"periods": 180, "hits": hits, "total": 11})
+        self.assertEqual(data["overall"], {"hits": hits, "total": 11})
+        # newest scored: k=14 pick S result S (win), k=13 pick S result D (loss) -> win streak of 1
+        self.assertEqual(data["streak"], {"kind": "win", "count": 1})
+
+    def test_window_vs_overall_and_streak_skips_gaps(self):
+        count = 200
+        # the first 10 predictions are wrong but fall outside the 180-draw window
+        picks = []
+        for k in range(count):
+            real = S if k % 2 == 0 else D
+            wrong = D if real == S else S
+            picks.append(wrong if k < 10 else real)
+        picks[count - 1] = None  # newest has no prediction: skipped
+        picks[count - 2] = None
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, picks)
+                data = client.get("/api/tron-draw/ai-broadcast").json()
+        self.assertEqual(data["overall"], {"hits": 188, "total": 198})   # 198 scored, 10 wrong
+        self.assertEqual(data["window"]["periods"], 180)
+        self.assertEqual(data["window"]["total"], 178)                   # 180 newest draws minus 2 gaps
+        self.assertEqual(data["window"]["hits"], 178)                    # the 10 wrong ones are older than the 180-draw window
+        self.assertEqual(data["streak"], {"kind": "win", "count": 178})
+        self.assertEqual(len(data["recent"]), 10)
+        self.assertEqual(data["recent"][-1]["block"], 20 * (count - 2))  # k=197 is the newest with a pick
+
+    def test_loss_streak_and_no_key_leak(self):
+        picks = [S, D, S, D, S, S, D, S]
+        with tempfile.TemporaryDirectory() as temp:
+            client, store = self.client(temp)
+            with client:
+                self.seed(store, picks)
+                response = client.get("/api/tron-draw/ai-broadcast")
+        data = response.json()
+        self.assertEqual(data["streak"], {"kind": "loss", "count": 3})
+        self.assertNotIn(DUMMY, response.text)
+        self.assertIsNone(data["next_pick"])
+
+    def test_not_in_nginx_allowlist(self):
+        root = Path(__file__).resolve().parents[1]
+        conf = (root / "deploy/nginx/tron-draw.conf.example").read_text()
+        self.assertNotIn("ai-broadcast", conf)
+
+
 if __name__ == "__main__":
     unittest.main()

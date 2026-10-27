@@ -2267,6 +2267,42 @@ class DirectoryStore(FeatureStoreMixin):
             )
             return cursor.rowcount > 0
 
+    def tron_ai_scored(self, model: str = "", low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
+        """(block, pick, result) of stored AI predictions that have a draw result, oldest first.
+
+        ``low``: only blocks >= low; ``limit``: only the newest ``limit`` (0 = all).
+        """
+        query = (
+            "SELECT p.block_number AS b, p.pick AS pick, d.result AS result "
+            "FROM tron_ai_predictions p JOIN tron_draws d ON d.block_number = p.block_number "
+            "WHERE p.block_number >= ?"
+        )
+        args: list = [int(low)]
+        if model:
+            query += " AND p.model = ?"
+            args.append(str(model)[:80])
+        query += " ORDER BY p.block_number DESC"
+        if limit and int(limit) > 0:
+            query += " LIMIT ?"
+            args.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [(int(r["b"]), str(r["pick"]), str(r["result"])) for r in reversed(rows)]
+
+    def tron_ai_overall(self, model: str = "") -> tuple[int, int]:
+        """(hits, total) over every stored AI prediction that has a draw result (no cap)."""
+        query = (
+            "SELECT COUNT(*) AS total, COALESCE(SUM(p.pick = d.result), 0) AS hits "
+            "FROM tron_ai_predictions p JOIN tron_draws d ON d.block_number = p.block_number"
+        )
+        args: list = []
+        if model:
+            query += " WHERE p.model = ?"
+            args.append(str(model)[:80])
+        with self.connect() as conn:
+            row = conn.execute(query, args).fetchone()
+        return int(row["hits"]), int(row["total"])
+
     def tron_ai_predictions(self, low: int, high: int, model: str = "") -> dict[int, str]:
         """block -> pick; with ``model`` only that model's predictions."""
         query = "SELECT block_number, pick FROM tron_ai_predictions WHERE block_number BETWEEN ? AND ?"
