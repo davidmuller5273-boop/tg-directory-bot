@@ -86,10 +86,19 @@ for db in "${DBS[@]}"; do
   fi
 done
 
+# ---------- 1a. 主项目的 .env（含令牌/密码；只会进入加密压缩包，权限 600 原样保留；内容不会打印）----------
+if [[ -f "$APP_DIR/.env" ]]; then
+  mkdir -p "$STAGE/app"
+  cp -p "$APP_DIR/.env" "$STAGE/app/.env"; chmod 600 "$STAGE/app/.env"
+  log "已加入 $APP_DIR/.env（仅在加密包内）"
+else
+  log "警告：找不到 $APP_DIR/.env，备份里不会有它"; PROBLEMS+=("缺少 .env")
+fi
+
 # ---------- 1b. 钩子（例如另一个机器人的 MySQL 导出）----------
 # 约定：运行 $HOOKS_DIR/*.sh（需可执行，按文件名顺序，root 身份），第 1 个参数是暂存目录；
 # 钩子把文件写到 "$1/<钩子名>/"（<钩子名>=文件名去掉 .sh）。钩子失败只记录，不影响其它部分；
-# 失败钩子的半成品输出会被丢弃。任何 .env 文件（含 *.env、.env.*）都会从备份里剔除。
+# 失败钩子的半成品输出会被丢弃。钩子输出里的 .env/配置文件原样保留（含权限），不做任何剔除。
 HOOKS_RAN=()
 if [[ -d "$HOOKS_DIR" ]]; then
   while IFS= read -r -d '' hook; do
@@ -106,7 +115,6 @@ if [[ -d "$HOOKS_DIR" ]]; then
     fi
   done < <(find "$HOOKS_DIR" -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
 fi
-find "$STAGE" -type f \( -name '.env' -o -name '.env.*' -o -name '*.env' \) -print -delete | sed 's/^/[backup] 已剔除 .env 文件：/' || true
 find "$STAGE" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 [[ -n "$(find "$STAGE" -type f -print -quit)" ]] || die "没有任何内容可备份"
 
@@ -115,7 +123,8 @@ MANIFEST="$TMP/MANIFEST.txt"
   echo "tg-bot-backup"; echo "created: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"; echo "host: $(hostname)"
   echo "hooks: ${HOOKS_RAN[*]:-(none)}"
   echo "problems: ${PROBLEMS[*]:-(none)}"
-  echo "skipped (by design): .env 与所有密钥/令牌、backups/ 目录、data/clones/deleted/ 归档、日志、*.sqlite3-wal/-shm（已并入在线备份）"
+  echo "included: app/.env (mode 600), data/*.sqlite3, hook outputs"
+  echo "skipped (by design): backups/ 目录、data/clones/deleted/ 归档、日志、*.sqlite3-wal/-shm（已并入在线备份）"
   echo "files (sha256):"
   (cd "$STAGE" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
 } >"$MANIFEST"

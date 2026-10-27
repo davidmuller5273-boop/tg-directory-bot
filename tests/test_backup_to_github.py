@@ -102,13 +102,18 @@ class BackupToGithubTests(_Base):
         self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertEqual(con.execute("SELECT count(*) FROM t").fetchone()[0], 6)
         con.close()
-        # not backed up: .env, backups/, deleted archive
+        # .env IS backed up (inside the encrypted archive only), mode 600 preserved
         names = {p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()}
-        self.assertNotIn(".env", names)
+        self.assertIn("app/.env", names)
+        self.assertEqual((out / "app" / ".env").read_text(), (self.app / ".env").read_text())
+        self.assertEqual((out / "app" / ".env").stat().st_mode & 0o777, 0o600)
+        # not backed up: backups/, deleted archive
         self.assertFalse(any(n.startswith("backups/") for n in names))
         self.assertFalse(any("deleted" in n for n in names))
         self.assertIn("MANIFEST.txt", names)
         self.assertNotIn("SECRET-TOKEN-VALUE", (out / "MANIFEST.txt").read_text())
+        # secrets never printed in logs
+        self.assertNotIn("SECRET-TOKEN-VALUE", result.stdout + result.stderr)
 
     def test_wrong_passphrase_cannot_decrypt(self):
         self.assertEqual(self.run_backup().returncode, 0)
@@ -284,14 +289,21 @@ class HooksAndWrapperTests(_Base):
         self.assertEqual((out / "b-good" / "ok.txt").read_text().strip(), "ok")
         self.assertTrue((out / "data" / "directory.sqlite3").exists())
 
-    def test_env_files_from_hooks_are_stripped(self):
-        self.hook("safe.sh", 'echo TOKEN=SECRET-HOOK-VALUE > "$1/safe/.env"; echo TOKEN=SECRET-HOOK-VALUE > "$1/safe/prod.env"; echo ok > "$1/safe/keep.txt"\n')
-        self.assertEqual(self.run_backup().returncode, 0)
+    def test_env_files_from_hooks_are_kept_with_mode(self):
+        self.hook("safe.sh", 'echo TOKEN=SECRET-HOOK-VALUE > "$1/safe/.env"; chmod 600 "$1/safe/.env"; echo ok > "$1/safe/keep.txt"\n')
+        res = self.run_backup()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("SECRET-HOOK-VALUE", res.stdout + res.stderr)
         out = self.restored()
+        self.assertEqual((out / "safe" / ".env").read_text().strip(), "TOKEN=SECRET-HOOK-VALUE")
+        self.assertEqual((out / "safe" / ".env").stat().st_mode & 0o777, 0o600)
         self.assertTrue((out / "safe" / "keep.txt").exists())
-        names = {p.name for p in out.rglob("*") if p.is_file()}
-        self.assertNotIn(".env", names)
-        self.assertNotIn("prod.env", names)
+
+    def test_missing_main_env_is_reported_not_fatal(self):
+        (self.app / ".env").unlink()
+        res = self.run_backup()
+        self.assertEqual(res.returncode, 4, res.stderr + res.stdout)
+        self.assertTrue(self.backup_files())
 
     def test_corrupt_database_does_not_stop_hooks_or_other_dbs(self):
         (self.app / "data" / "clones" / "clone-1.sqlite3").write_bytes(b"not a database" * 100)
@@ -348,6 +360,7 @@ class ScriptStaticTests(unittest.TestCase):
         self.assertIn("sudo cat $STATE_DIR/backup.pass", text)
         self.assertIn("printf '%s' \"$BACKUP_PASS\"", text)
         self.assertIn("旧密码", text)
+        self.assertIn("强密码", text)
         self.assertIn("公钥还没添加，等通知后再运行 sudo systemctl start tg-bot-backup", text)
         self.assertIn("BACKUP_KEEP:-3", text)
         self.assertIn("/usr/local/bin/tgbot-backup", text)

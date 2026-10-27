@@ -42,11 +42,13 @@ sqlite3 /tmp/tg-restore/data/directory.sqlite3 'PRAGMA integrity_check'
 
 ## 3. 恢复到线上
 
-先停服务，再覆盖数据库并删掉旧的 -wal/-shm，最后改属主、启动（单行）：
+先停服务，再覆盖数据库并删掉旧的 -wal/-shm，把 `.env` 放回（权限 600、属主 `tgbot`），最后启动（单行；会覆盖现有 `.env`，如果不想覆盖就删掉其中 `install ...` 那一段）：
 
 ~~~bash
-sudo systemctl stop tg-directory-bot tg-directory-bot-web && sudo rm -f /opt/tg-directory-bot/data/*.sqlite3-wal /opt/tg-directory-bot/data/*.sqlite3-shm && sudo cp -a /tmp/tg-restore/data/. /opt/tg-directory-bot/data/ && sudo chown -R tgbot:tgbot /opt/tg-directory-bot/data && sudo systemctl start tg-directory-bot tg-directory-bot-web
+sudo systemctl stop tg-directory-bot tg-directory-bot-web && sudo rm -f /opt/tg-directory-bot/data/*.sqlite3-wal /opt/tg-directory-bot/data/*.sqlite3-shm && sudo cp -a /tmp/tg-restore/data/. /opt/tg-directory-bot/data/ && sudo chown -R tgbot:tgbot /opt/tg-directory-bot/data && sudo install -m 600 -o tgbot -g tgbot /tmp/tg-restore/app/.env /opt/tg-directory-bot/.env && sudo systemctl start tg-directory-bot tg-directory-bot-web
 ~~~
+
+恢复后确认权限：`sudo ls -l /opt/tg-directory-bot/.env`（应为 `-rw-------`）。钩子里的文件（如 `safe/` 里的 `.env`/配置/`.sql`）按对应项目的位置放回，同样用 `install -m 600` 保持权限，并按 `MANIFEST.txt` 核对。
 
 子机器人（`data/clones/`）的库也会一起恢复；它们的 -wal/-shm 如有残留可一并删除：`sudo find /opt/tg-directory-bot/data/clones -name '*.sqlite3-*' -delete`（先停服务）。
 
@@ -54,9 +56,10 @@ sudo systemctl stop tg-directory-bot tg-directory-bot-web && sudo rm -f /opt/tg-
 
 | 路径 | 内容 | 怎么恢复 |
 | --- | --- | --- |
+| `app/.env` | 目录机器人的 `.env`（令牌、后台密码等机密，权限 600） | 第 3 节，恢复后保持 600 |
 | `data/directory.sqlite3` 等 | 目录机器人主库、扫描库 | 第 3 节 |
 | `data/clones/clone-N.sqlite3` | 子机器人各自的库 | 第 3 节（一起复制） |
-| `<钩子名>/`（如 `safe/`） | 对应钩子导出的文件，例如另一个机器人的 MySQL 导出 `.sql` | 见下面「钩子」 |
+| `<钩子名>/`（如 `safe/`） | 对应钩子放进来的文件，例如另一个机器人的 MySQL 导出 `.sql`，以及它自己的 `.env`/配置（权限 600） | 见下面「钩子」 |
 | `MANIFEST.txt` | 文件清单 + sha256，`hooks:` 行列出成功的钩子，`problems:` 行列出失败的部分 | 仅供核对 |
 
 ### 钩子（hook）约定
@@ -65,7 +68,7 @@ sudo systemctl stop tg-directory-bot tg-directory-bot-web && sudo rm -f /opt/tg-
 
 - 钩子把要备份的文件写到 `"$1/<钩子名>/"` 下，`<钩子名>` 就是脚本文件名去掉 `.sh`（目录已建好；`data` 和 `MANIFEST.txt` 为保留名，不能用）。
 - 钩子成功 = 退出码 0，输出会进入同一个加密压缩包。钩子失败或超时（默认 900 秒，`BACKUP_HOOK_TIMEOUT`）只会被记录并丢弃它的半成品输出，**不会**中断其它部分；最后备份仍会推送，但命令以退出码 4 结束，`systemctl status tg-bot-backup` 显示失败，`sudo tgbot-backup` 显示「部分失败」。
-- 任何名为 `.env`、`.env.*`、`*.env` 的文件都会被自动从备份里剔除，钩子也不要把令牌/密码写进输出。
+- 钩子输出里的任何文件（包括它有意复制进来的 `.env`/配置）都会原样进入加密包，权限保持钩子设定的值（建议 600）；备份脚本不会剔除也不会打印它们。
 - 钩子目录只能由 root 写入（它们以 root 运行）。
 
 示例钩子（只是示例，**没有安装**；假设 MySQL 库名 `safe`，账号写在 root 专用的 `/root/.my.cnf` 里，不要写进脚本）：
@@ -80,4 +83,4 @@ mysqldump --single-transaction --routines safe > "$1/safe/safe.sql"
 
 ## 5. 不在备份里的东西
 
-`.env`（任何项目的机器人令牌、后台密码等）**不会**备份，恢复到新服务器需要自己重新填写；`backups/` 目录、`data/clones/deleted/` 归档和日志也不备份。
+`backups/` 目录、`data/clones/deleted/` 归档和日志不备份。`.env` **在**备份里（`app/.env`），所以备份密码一旦泄露，里面的令牌/密码也会泄露；怀疑泄露时请更换密码并重新备份，同时更换机器人令牌。

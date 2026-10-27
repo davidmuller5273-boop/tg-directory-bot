@@ -16,7 +16,7 @@ else
   read -rsp "请输入备份口令: " BACKUP_PASS </dev/tty; echo
   export BACKUP_PASS; PASS_ARGS=(-pass env:BACKUP_PASS)
 fi
-openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "${PASS_ARGS[@]}" -in "$FILE" | tar -xz -C "$OUT" \
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "${PASS_ARGS[@]}" -in "$FILE" | tar -xzp -C "$OUT" \
   || { echo "解密失败：口令不对或文件损坏" >&2; exit 1; }
 bad=0
 while IFS= read -r -d '' db; do
@@ -25,4 +25,4 @@ while IFS= read -r -d '' db; do
   [[ "$r" == "ok" ]] || bad=1
 done < <(find "$OUT/data" -type f \( -name '*.sqlite3' -o -name '*.sqlite' -o -name '*.db' \) -print0)
 (( bad == 0 )) || { echo "有数据库未通过完整性检查" >&2; exit 2; }
-echo "已解压到 $OUT （data/ 下是数据库，MANIFEST.txt 是清单）"
+echo "已解压到 $OUT （data/ 下是数据库，app/.env 是机器人配置（含密钥，注意保密），MANIFEST.txt 是清单）"
