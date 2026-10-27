@@ -72,6 +72,8 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 .tip{position:absolute;z-index:50;background:#1f2933;color:#fff;border-radius:8px;padding:5px 9px;font-size:12px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.25);pointer-events:none;max-width:240px}
 .mk.sel,.bead.sel{outline:2px solid #364fc7;outline-offset:1px}
 .sec{font-size:16px;font-weight:600}
+.autotag{font-size:12px;color:#1b6e3a;background:#e6f4ea;border-radius:10px;padding:2px 8px}
+.redend{margin:26px 0 30px;text-align:center;color:#e03131;font-size:28px;font-weight:800;line-height:1.4}
 .fold{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
 .fold .arr{display:inline-block;width:1.1em;color:#364fc7}
 .fold .sum{font-size:13px;font-weight:400;color:var(--muted)}
@@ -132,6 +134,8 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
    <label>近M期 <input id="setm" type="number" min="1" max="200" inputmode="numeric"></label>
    <label>少数方M <input id="setmn" type="number" min="1" max="200" inputmode="numeric"></label>
    <button class="snd on" id="bestbtn" type="button">最佳算法</button>
+   <button class="snd" id="autobtn" type="button" aria-pressed="false" title="每个新开奖期自动重新计算最佳参数并填入">每期自动最优：关</button>
+   <span class="autotag" id="autotag" hidden></span>
    <a href="#" id="bestmore" hidden>详情</a>
   </div>
   <div class="note bestbox" id="bestbox" hidden><button class="bx" id="bestx" type="button" aria-label="关闭">×</button><div id="bestfill" hidden></div><div id="bestdetail"></div></div>
@@ -149,6 +153,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
   <div class="head"><strong>区块详情</strong><button class="snd" id="detailx" type="button">关闭</button></div>
   <div id="detailbody"></div>
  </div>
+ <div class="redend">优化建议，请联系上级，谢谢！</div>
 </div>
 <script>
 (function(){
@@ -160,6 +165,7 @@ function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp
 var limit=clamp(localStorage.getItem("trondraw.limit"),100,1,5000);
 var mine=clamp(ls("mine","100"),100,1,5000),ailimit=clamp(ls("ailimit","100"),100,1,5000);
 var openS={ai:ls("open.ai","0")==="1",mine:ls("open.mine","0")==="1"},pendingJump=null,mineLast=null;
+var autoOn=ls("auto","0")==="1",autoLatest=null,autoBusy=false;
 var busy=false,again=false,soundOn=ls("sound","0")==="1";
 var ALG={trend:"顺势",dragon:"跟龙/斩龙",ratio:"近期占比",minority:"近期少数方"};
 var cfg={n:clamp(ls("n","3"),3,2,50),m:clamp(ls("m","100"),100,1,200),mn:clamp(ls("mn","20"),20,1,200),mode:ls("mode","follow")==="cut"?"cut":"follow"};
@@ -442,10 +448,13 @@ function render(d){
     if(ok!==null&&soundOn){ok?soundA():soundB()}
   }else{judge(d)}
   lastLatest=d.latest;
-  if(d.latest&&d.next_draw_block&&d.reference.final.next)remember(d.next_draw_block,d.reference.final.next);
+  /* with 每期自动最优 the shown prediction is only recorded after the new period's parameters are applied */
+  var autoPending=autoOn&&d.latest&&(autoBusy||d.latest!==autoLatest);
+  if(!autoPending&&d.latest&&d.next_draw_block&&d.reference.final.next)remember(d.next_draw_block,d.reference.final.next);
   renderBlock(d);
   renderMine(d);renderAi(d);
   applyHl();
+  if(autoPending&&!autoBusy)autoRun(d.latest);
   if(pendingJump&&openS[pendingJump.pane]&&(pendingJump.pane==="ai"?d.ai&&d.ai.trend:d.my_trend)){var pj=pendingJump;pendingJump=null;jump(pj.pane,pj.start,pj.len)}
 }
 var pauseTimer=0;
@@ -494,8 +503,31 @@ function showBest(b){
   box.innerHTML=html;
 }
 function flash(el){el.classList.remove("filled");void el.offsetWidth;el.classList.add("filled")}
-function fillBest(b){
+function autoMark(){
+  var b=$("autobtn");b.className="snd"+(autoOn?" on":"");b.textContent="每期自动最优："+(autoOn?"开":"关");b.setAttribute("aria-pressed",autoOn?"true":"false");
+  if(!autoOn)$("autotag").hidden=true;
+}
+function autoRun(latest){
+  autoBusy=true;autoLatest=latest;
+  fetch("/api/tron-draw/best",{cache:"no-store"}).then(function(r){return r.json()}).then(function(b){
+    if(!autoOn)return;
+    if(b.ready){
+      showBest(b);fillBest(b,true);$("bestmore").hidden=false;
+      /* the upcoming block is not drawn yet: its prediction is the one shown after the new parameters */
+      if(lastData&&lastData.latest===latest&&lastData.next_draw_block){var m=shownMap();delete m[lastData.next_draw_block];localStorage.setItem(K+"shown",JSON.stringify(m))}
+      return;
+    }
+  }).catch(function(){}).then(function(){autoBusy=false;if(autoOn)load(true)});
+}
+function fillBest(b,auto){
   var A=b.algorithms,dr=A.dragon;
+  if(auto){
+    $("setmode").value=dr.mode;$("setn").value=dr.n;$("setm").value=A.ratio.m;$("setmn").value=A.minority.m;
+    var tg=$("autotag");tg.hidden=false;tg.textContent="自动已更新参数（#"+(b.latest||"")+"："+(dr.mode==="cut"?"斩龙":"跟龙")+" N"+dr.n+" · M"+A.ratio.m+" · 少数方M"+A.minority.m+"）";
+    cfg.n=clamp(dr.n,3,2,50);cfg.m=clamp(A.ratio.m,100,1,200);cfg.mn=clamp(A.minority.m,20,1,200);cfg.mode=dr.mode==="cut"?"cut":"follow";
+    localStorage.setItem(K+"n",cfg.n);localStorage.setItem(K+"m",cfg.m);localStorage.setItem(K+"mn",cfg.mn);localStorage.setItem(K+"mode",cfg.mode);
+    return;
+  }
   $("setmode").value=dr.mode;$("setn").value=dr.n;$("setm").value=A.ratio.m;$("setmn").value=A.minority.m;
   ["setmode","setn","setm","setmn"].forEach(function(id){flash($(id))});
   var line=$("bestfill");line.className="filled-line";line.hidden=false;
@@ -530,6 +562,11 @@ $("bestbtn").onclick=function(){
   }).catch(function(){$("bestdetail").textContent="计算失败，请稍后重试。";$("bestfill").hidden=true;openBest(false)}).then(function(){btn.disabled=false;btn.textContent="最佳算法"});
 };
 $("setn").value=cfg.n;$("setm").value=cfg.m;$("setmn").value=cfg.mn;$("setmode").value=cfg.mode;
+$("autobtn").onclick=function(){
+  autoOn=!autoOn;localStorage.setItem(K+"auto",autoOn?"1":"0");autoMark();
+  autoLatest=null;if(autoOn){if(lastData&&lastData.latest&&!autoBusy)autoRun(lastData.latest);else load(true)}
+};
+autoMark();
 $("setn").onchange=$("setm").onchange=$("setmn").onchange=$("setmode").onchange=saveCfg;
 bindFold("ai");bindFold("mine");markSound();mark("periods",limit);mark("mperiods",mine);mark("aperiods",ailimit);markSrc(null);load();
 setInterval(function(){if(!document.hidden)load()},4000);

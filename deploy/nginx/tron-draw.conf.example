@@ -3,7 +3,7 @@
 server {
     listen 80;
     listen [::]:80;
-    server_name example.com;   # <-- 换成你的域名
+    server_name 188.ms www.188.ms;   # <-- 换成你的域名（带 www 的也要写上）
 
     location = / { return 302 /tron-draw; }
 

@@ -371,7 +371,7 @@ class AiWebTest(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         for token in (
             "AI预测", "算法预测", "srcA", "srcI", "aicard", "detailbox", "RETURN_MS", "pauseUntil",
-            "AI参考", "开奖随机，不保证命中", "afold", "mfold", "abody", "mbody", "open.ai", "open.mine", "pendingJump", "ai_limit", "K+\"src\"",
+            "AI参考", "开奖随机，不保证命中", "afold", "mfold", "autobtn", "每期自动最优", "autoRun", "autoPending", "自动已更新参数", "优化建议，请联系上级，谢谢！", "redend", "abody", "mbody", "open.ai", "open.mine", "pendingJump", "ai_limit", "K+\"src\"",
         ):
             self.assertIn(token, html)
         self.assertNotIn("我的走势", html)
@@ -389,6 +389,8 @@ class AiWebTest(unittest.TestCase):
         self.assertNotIn("a.model", html)
         self.assertNotIn("d.ai.model", html)
         self.assertNotIn("gpt-", html)
+        # red notice is the very last block of the page
+        self.assertGreater(html.index("优化建议，请联系上级，谢谢！"), html.index('id="detailbox"'))
 
 
 if __name__ == "__main__":
