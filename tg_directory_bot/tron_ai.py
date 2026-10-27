@@ -18,11 +18,18 @@ from .tron_draw import DOUBLE, DRAW_INTERVAL, SINGLE
 
 logger = logging.getLogger(__name__)
 
-WINDOWS = (10, 30, 50, 100, 300, 1000)
+WINDOWS = (10, 30, 50, 100, 300, 500, 1000)
+AI_SELF_WINDOW = 10   # how many of the AI's own latest (already drawn) answers are shown back to it
 HISTORY_CAP = 50000
 TIMEOUT_GRACE = 5.0  # hard stop on top of the HTTP timeout
 SYSTEM_PROMPT = (
-    "你是单双参考助手。下面是程序已经算好的单双统计结果，请凭你的直觉判断下一期开 单 还是 双。"
+    "你是单双参考助手。下面是程序已经算好的单双统计结果（全部来自开奖之前的数据），请综合判断下一期开 单 还是 双。\n"
+    "判断要求：\n"
+    "1. 把「当前连龙」和各个统计窗口放在一起看：当前龙有多长，和历史最长龙、龙长度分布、历史上龙长到这个长度后继续或断开的比例相比如何；"
+    "再结合当前连跳（单双交替）的长度，以及最近各窗口里单、双的占比。\n"
+    "2. 不要盲目顺着龙跟，也不要盲目逆着龙反；龙还短时通常没有明显倾向，龙很长、接近或超过历史最长时再认真权衡。\n"
+    "3. 每一期都独立判断，不要因为上一期你答过某一边就重复它；"
+    "如果发现自己最近连续多次答同一边，或者一直在反着龙答，要自我纠正，重新评估。\n"
     "只回答一个字：单 或 双。不要理由，不要任何其它文字。"
 )
 
@@ -52,10 +59,12 @@ def _window_line(label: str, values: list[str]) -> str:
     streak = 1
     while streak < n and values[n - 1 - streak] == values[n - 1]:
         streak += 1
+    longest_s, longest_d = _longest_side(values, SINGLE), _longest_side(values, DOUBLE)
     return (
         f"{label}：单{singles}期({singles * 100 / n:.0f}%) 双{doubles}期({doubles * 100 / n:.0f}%)；"
-        f"当前连{values[-1]}{streak}期；最长单连{_longest_side(values, SINGLE)}期，"
-        f"最长双连{_longest_side(values, DOUBLE)}期；最长连跳(单双交替){_alternating(values)}期"
+        f"当前连龙：连{values[-1]}{streak}期；最长龙{max(longest_s, longest_d)}期"
+        f"（最长单连{longest_s}期，最长双连{longest_d}期）；"
+        f"最长连跳(单双交替){_alternating(values)}期；当前连跳：最新{_tail_alternating(values)}期单双交替"
     )
 
 
@@ -67,21 +76,97 @@ def _longest_side(values: list[str], side: str) -> int:
     return best
 
 
-def build_stats_text(results: list[str]) -> str:
-    """Compact statistics text for the prompt (oldest -> newest ``results``)."""
+def _runs(values: list[str]) -> list[tuple[str, int]]:
+    """[(side, length)] oldest -> newest; the last run is the (still running) current streak."""
+    runs: list[tuple[str, int]] = []
+    for value in values:
+        if runs and runs[-1][0] == value:
+            runs[-1] = (value, runs[-1][1] + 1)
+        else:
+            runs.append((value, 1))
+    return runs
+
+
+def _tail_alternating(values: list[str]) -> int:
+    n = 1 if values else 0
+    while n < len(values) and values[-1 - n] != values[-n]:
+        n += 1
+    return n
+
+
+def _streak_lines(results: list[str]) -> list[str]:
+    """Current long streak against the history of streaks (only past data)."""
+    runs = _runs(results)
+    if not runs:
+        return []
+    side, length = runs[-1]
+    lens = [n for _, n in runs]
+    counts: dict[int, int] = {}
+    for n in lens:
+        counts[n] = counts.get(n, 0) + 1
+    shown = [f"{k}期×{counts[k]}" for k in sorted(counts) if k <= 8]
+    longer = sum(v for k, v in counts.items() if k > 8)
+    if longer:
+        shown.append(f"9期及以上×{longer}")
+    reached = continued = 0
+    for index, (_, n) in enumerate(runs):
+        ongoing = index == len(runs) - 1
+        if (n > length) or (n == length and not ongoing):
+            reached += 1
+            continued += 1 if n > length else 0
+    longest = max(lens)
+    lines = [
+        f"当前连龙：连{side}{length}期（历史最长龙{longest}期；当前龙长度是历史最长的{length * 100 / longest:.0f}%）；"
+        f"当前连跳（单双交替）已{_tail_alternating(results)}期",
+        "历史龙长度分布（全部历史，每条龙算一次）：" + " ".join(shown),
+    ]
+    if reached:
+        lines.append(
+            f"历史上龙长到{length}期（含）之后，下一期继续同方向：{continued}次／共{reached}次({continued * 100 / reached:.0f}%)"
+        )
+    else:
+        lines.append(f"历史上还没有龙长到{length}期之后的记录")
+    return lines
+
+
+def _self_line(ai_history) -> str:
+    """The AI's own latest answers (oldest -> newest), already drawn: [(pick, result)]."""
+    rows = [(str(p), str(r)) for p, r in (ai_history or []) if p in (SINGLE, DOUBLE)][-AI_SELF_WINDOW:]
+    if not rows:
+        return ""
+    picks = [p for p, _ in rows]
+    run = 1
+    while run < len(picks) and picks[-1 - run] == picks[-1]:
+        run += 1
+    hits = sum(1 for p, r in rows if p == r)
+    return (
+        f"你自己最近{len(rows)}次的回答（旧→新）：{''.join(picks)}，对应实际开奖：{''.join(r for _, r in rows)}，"
+        f"命中{hits}/{len(rows)}；你已连续{run}次答{picks[-1]}"
+    )
+
+
+def build_stats_text(results: list[str], ai_history=None) -> str:
+    """Compact statistics text for the prompt (oldest -> newest ``results``).
+
+    ``ai_history`` = the AI's own earlier answers with their (already known) results; nothing from the
+    period being predicted, so the future never leaks in."""
     results = list(results[-HISTORY_CAP:])
     lines = [_window_line(f"最近{size}期", results[-size:]) for size in WINDOWS if len(results) >= size]
     if len(results) < WINDOWS[0]:
         lines.append(_window_line("最近", results))
     lines.append(_window_line(f"全部历史（{len(results)}期）", results))
+    lines.extend(_streak_lines(results))
+    own = _self_line(ai_history)
+    if own:
+        lines.append(own)
     lines.append("最近10期（旧→新）：" + "".join(results[-10:]))
     return "\n".join(lines)
 
 
-def build_messages(results: list[str]) -> list[dict]:
+def build_messages(results: list[str], ai_history=None) -> list[dict]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_stats_text(results) + "\n下一期开单还是双？只回答一个字。"},
+        {"role": "user", "content": build_stats_text(results, ai_history) + "\n下一期开单还是双？只回答一个字。"},
     ]
 
 
@@ -95,7 +180,7 @@ def _payload(model: str, messages: list[dict]) -> dict:
     return body
 
 
-async def request_pick(settings, results: list[str], *, transport=None) -> str | None:
+async def request_pick(settings, results: list[str], ai_history=None, *, transport=None) -> str | None:
     """One chat/completions call; returns 单/双 or None. Never logs headers/keys."""
     url = settings.ai_base_url.rstrip("/") + "/chat/completions"
     timeout = float(settings.ai_timeout_seconds)
@@ -103,7 +188,7 @@ async def request_pick(settings, results: list[str], *, transport=None) -> str |
         response = await client.post(
             url,
             headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
-            json=_payload(settings.ai_model, build_messages(results)),
+            json=_payload(settings.ai_model, build_messages(results, ai_history)),
         )
     response.raise_for_status()
     data = response.json()
@@ -157,17 +242,38 @@ class AiPredictor:
                 return False
             rows = self.store.tron_draw_recent(HISTORY_CAP)
             results = [str(row["result"]) for row in rows]
-            self.task = asyncio.get_running_loop().create_task(self._run(next_block, results))
+            self.task = asyncio.get_running_loop().create_task(
+                self._run(next_block, results, self._own_history(rows))
+            )
             return True
         except Exception:
             logger.exception("TRON AI scheduling failed")
             return False
 
-    async def _run(self, next_block: int, results: list[str]) -> None:
+    def _own_history(self, rows) -> list[tuple[str, str]]:
+        """The AI's own answers for periods that are already drawn (oldest -> newest), contiguous at the
+        newest end.  Only stored, write-once, pre-draw predictions; the period being asked is never included."""
+        try:
+            drawn = {int(row["block_number"]): str(row["result"]) for row in rows[-(AI_SELF_WINDOW * 3):]}
+            if not drawn:
+                return []
+            low, high = min(drawn), max(drawn)
+            picks = self.store.tron_ai_predictions(low, high, self.settings.ai_model)
+            out: list[tuple[str, str]] = []
+            block = high
+            while block >= low and block in picks and block in drawn and len(out) < AI_SELF_WINDOW:
+                out.append((picks[block], drawn[block]))
+                block -= DRAW_INTERVAL
+            return list(reversed(out))
+        except Exception:
+            logger.warning("TRON AI own-history lookup failed")
+            return []
+
+    async def _run(self, next_block: int, results: list[str], ai_history=None) -> None:
         self.stats["calls"] += 1
         try:
             pick = await asyncio.wait_for(
-                request_pick(self.settings, results, transport=self.transport),
+                request_pick(self.settings, results, ai_history, transport=self.transport),
                 timeout=float(self.settings.ai_timeout_seconds) + TIMEOUT_GRACE,
             )
         except Exception as exc:

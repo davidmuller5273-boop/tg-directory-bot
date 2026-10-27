@@ -58,12 +58,12 @@ class PromptTest(unittest.TestCase):
     def test_stats_windows_and_fields(self):
         results = ([S] * 4 + [D] * 2 + [S, D] * 3) * 120  # 1440 results
         text = build_stats_text(results)
-        for label in ("最近10期", "最近30期", "最近50期", "最近100期", "最近300期", "最近1000期", "全部历史（1440期）"):
+        for label in ("最近10期", "最近30期", "最近50期", "最近100期", "最近300期", "最近500期", "最近1000期", "全部历史（1440期）"):
             self.assertIn(label, text)
         self.assertIn("最长单连4期", text)
         self.assertIn("最长双连2期", text)
         self.assertIn("最长连跳", text)
-        self.assertIn("当前连", text)
+        self.assertIn("当前连龙：连", text)
         self.assertIn("%", text)
         self.assertEqual(text.splitlines()[-1], "最近10期（旧→新）：" + "".join(results[-10:]))
 
@@ -71,17 +71,73 @@ class PromptTest(unittest.TestCase):
         text = build_stats_text([S, S, S, D, D, S, D, S, D, D])
         first = text.splitlines()[0]
         self.assertIn("单5期(50%) 双5期(50%)", first)
-        self.assertIn("当前连双2期", first)
+        self.assertIn("当前连龙：连双2期", first)
+        self.assertIn("最长龙3期（最长单连3期，最长双连2期）", first)
+        self.assertIn("当前连跳：最新1期单双交替", first)
         self.assertIn("最长单连3期", first)
         self.assertIn("最长双连2期", first)
         self.assertIn("最长连跳(单双交替)5期", first)
+
+    def test_windows_include_500_in_order(self):
+        self.assertEqual(tron_ai.WINDOWS, (10, 30, 50, 100, 300, 500, 1000))
+        text = build_stats_text([S, D, D] * 200)  # 600 results: 500 yes, 1000 not yet
+        heads = [line.split("：")[0] for line in text.splitlines()]
+        got = [h for h in heads if h in {f"最近{n}期" for n in tron_ai.WINDOWS}]
+        self.assertEqual(got, ["最近10期", "最近30期", "最近50期", "最近100期", "最近300期", "最近500期"])
+        self.assertIn("最近500期", build_stats_text([S, D] * 600))
+        self.assertIn("最近1000期", build_stats_text([S, D] * 600))
+
+    def test_every_window_has_longest_alternation_and_current_alternation(self):
+        results = [S, D] * 600  # 1200, strictly alternating to the newest end
+        lines = build_stats_text(results).splitlines()
+        windows = [l for l in lines if l.startswith("最近") and "期：单" in l or l.startswith("全部历史")]
+        self.assertEqual(len(windows), 8)  # 10,30,50,100,300,500,1000 + all
+        sizes = [10, 30, 50, 100, 300, 500, 1000, 1200]
+        for line, size in zip(windows, sizes):
+            self.assertIn(f"最长连跳(单双交替){size}期", line)
+            self.assertIn(f"当前连跳：最新{size}期单双交替", line)
+            self.assertIn("最长龙1期", line)
+            self.assertIn("当前连龙：连", line)
+        mixed = [S, S, D, D] * 300 + [S, D, S, D, S, D]
+        for line in build_stats_text(mixed).splitlines()[:8]:
+            self.assertIn("当前连跳：最新7期单双交替", line)   # D,S,D,S,D,S,D at the end
+            self.assertIn("最长连跳(单双交替)7期", line) if "最近10期" in line else None
+        self.assertIn("最长龙2期（最长单连2期，最长双连2期）", build_stats_text(mixed).splitlines()[0])
+
+    def test_streak_lines_exact(self):
+        text = build_stats_text([S, S, S, D, D, S, D, S, D, D])
+        self.assertIn("当前连龙：连双2期（历史最长龙3期；当前龙长度是历史最长的67%）；当前连跳（单双交替）已1期", text)
+        self.assertIn("历史龙长度分布（全部历史，每条龙算一次）：1期×3 2期×2 3期×1", text)
+        # runs S3 (longer than 2: continued) and D2 (ended at 2): 1 of 2
+        self.assertIn("历史上龙长到2期（含）之后，下一期继续同方向：1次／共2次(50%)", text)
+        alt = build_stats_text([S, S, D, S, D, S])
+        self.assertIn("当前连龙：连单1期", alt)
+        self.assertIn("当前连跳（单双交替）已5期", alt)
+        long = build_stats_text([D] * 12 + [S, S, S])
+        self.assertIn("9期及以上×1", long)
+
+    def test_prompt_demands_weighing_and_forbids_reasoning(self):
+        p = tron_ai.SYSTEM_PROMPT
+        for needle in ("连龙", "历史最长", "龙长度分布", "连跳", "占比", "不要盲目顺着龙跟", "也不要盲目逆着龙反",
+                       "独立判断", "不要因为上一期你答过某一边就重复它", "自我纠正", "只回答一个字：单 或 双", "不要理由"):
+            self.assertIn(needle, p)
+        self.assertNotIn("sk-", p)
+        self.assertNotIn("gpt", p.casefold())
+
+    def test_self_line_shows_own_streak_and_hits(self):
+        own = [(S, S), (S, D), (D, D), (D, S), (D, D), (D, D)]
+        text = build_stats_text([S, D] * 20, own)
+        self.assertIn("你自己最近6次的回答（旧→新）：单单双双双双，对应实际开奖：单双双单双双，命中4/6；你已连续4次答双", text)
+        self.assertNotIn("你自己最近", build_stats_text([S, D] * 20))
+        capped = build_stats_text([S, D] * 20, [(S, S)] * 15)
+        self.assertIn("最近10次的回答", capped)
 
     def test_small_history_and_no_raw_sequence(self):
         self.assertIn("最近：", build_stats_text([S, D, S]))
         results = ([S, D, D] * 700)
         messages = build_messages(results)
         joined = json.dumps(messages, ensure_ascii=False)
-        self.assertLess(len(joined), 1500)  # statistics only, never the whole sequence
+        self.assertLess(len(joined), 2600)  # statistics only, never the whole sequence
         self.assertNotIn("".join(results[-30:]), joined)
         self.assertEqual([m["role"] for m in messages], ["system", "user"])
 
@@ -190,6 +246,29 @@ class PredictorTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)  # one call per period
         self.assertEqual(self.store.tron_ai_predictions(260, 260), {260: D})
         self.assertEqual(predictor.stats["stored"], 1)
+
+    def test_prompt_carries_own_past_answers_only_never_the_future(self):
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content)["messages"][1]["content"])
+            return httpx.Response(200, json=reply("双"))
+
+        model = self.cfg.ai_model
+        # earlier pre-draw answers for already drawn blocks 200, 220, 240 (+ an older one with a gap before it)
+        with self.store.connect() as conn:
+            for block, pick in ((160, S), (200, D), (220, D), (240, D)):
+                conn.execute(
+                    "INSERT INTO tron_ai_predictions (block_number, pick, model) VALUES (?, ?, ?)", (block, pick, model))
+        predictor = AiPredictor(self.cfg, self.store, transport=httpx.MockTransport(handler))
+        self.run_schedule(predictor)
+        self.assertEqual(len(bodies), 1)
+        results = {int(r["block_number"]): str(r["result"]) for r in self.store.tron_draw_recent(50)}
+        want = "".join(results[b] for b in (200, 220, 240))
+        self.assertIn(f"你自己最近3次的回答（旧→新）：双双双，对应实际开奖：{want}", bodies[0])  # 160 is cut off by the gap
+        self.assertIn("你已连续3次答双", bodies[0])
+        self.assertEqual(self.store.tron_ai_predictions(260, 260), {260: D})   # only the new period is written
+        self.assertEqual(self.store.tron_ai_predictions(200, 240), {200: D, 220: D, 240: D})  # old records untouched
 
     def test_existing_prediction_is_never_overwritten_or_asked_again(self):
         self.store.record_tron_ai_prediction(260, S, self.cfg.ai_model)
