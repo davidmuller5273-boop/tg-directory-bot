@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex">
 <title>波场一分单双 开奖走势</title>
 <style>
-:root{--single:#12b886;--double:#f03e3e;--bg:#f4f6f8;--card:#fff;--text:#1f2933;--muted:#7b8794;--line:#e4e7eb}
+:root{--single:#55b589;--double:#dd4e47;--bg:#f4f6f8;--card:#fff;--text:#1f2933;--muted:#7b8794;--line:#e4e7eb}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:760px;margin:0 auto;padding:12px}
@@ -69,12 +69,13 @@ th{white-space:nowrap}
 .pred{width:26px;height:26px;border-radius:50%;justify-self:center;color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;animation:blink 1s steps(2,start) infinite}
 .pred.s{background:var(--single)}.pred.d{background:var(--double)}
 @keyframes blink{to{visibility:hidden}}
-.mgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(6,26px);gap:4px;width:max-content}
+.mgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(6,30px);gap:2px;width:max-content}
 .mk{min-width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:18px;border-radius:6px}
-.mk.rc{gap:1px;padding:0 1px;min-width:38px;font-size:13px}
-.mk.rc .ic{width:17px;height:17px;font-size:11px}
-.mk.rc .mm{font-size:13px;line-height:1;width:15px;text-align:center}
-.mk.rc.np .mm{color:#adb5bd;font-size:16px}
+.mgrid .mk{min-width:30px;height:30px}
+.mgrid .pred{width:30px;height:30px;font-size:15px}
+.mk.rc{position:relative;width:30px;padding:0;border-radius:50%;font-size:11px}
+.mk.rc .ic{width:30px;height:30px;font-size:15px;font-weight:700}
+.mk.rc .mm{position:absolute;right:-2px;bottom:-2px;width:14px;height:14px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;line-height:1;box-shadow:0 0 0 1px rgba(0,0,0,.12)}
 .legend{font-size:12px;color:var(--muted);margin-top:2px}
 .legend .ic{width:17px;height:17px;font-size:11px}
 .snd{border:1px solid var(--line);background:#fff;border-radius:16px;padding:3px 12px;font-size:13px;cursor:pointer}
@@ -132,7 +133,7 @@ th{white-space:nowrap}
    <input id="acustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
   </div>
   <div class="runs" id="astat"></div>
-  <div class="road" id="aroad"><div class="mgrid" id="agrid"></div></div><div class="legend" data-tk="cellLegend">每格：左边圆圈＝实际开奖，右边 ✅ 猜中 ❌ 没猜中 · 没有预测（鼠标停 1 秒看说明）</div>
+  <div class="road" id="aroad"><div class="mgrid" id="agrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，右下角小标 ✅ 猜中 ❌ 没猜中，没有小标＝没有预测（鼠标停 1 秒看说明）</div>
   <div class="muted" id="ameta"></div>
   <div class="ai">AI参考仅为统计分析，开奖随机，不保证命中。AI 只看到程序算好的统计结果，凭感觉回答「单」或「双」；不参与最终预测的投票。</div>
   </div>
@@ -145,7 +146,7 @@ th{white-space:nowrap}
    <input id="ocustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ogo">确定</button>
   </div>
   <div class="runs" id="ostat"></div>
-  <div class="road" id="oroad"><div class="mgrid" id="ogrid"></div></div><div class="legend" data-tk="cellLegend">每格：左边圆圈＝实际开奖，右边 ✅ 猜中 ❌ 没猜中 · 没有预测（鼠标停 1 秒看说明）</div>
+  <div class="road" id="oroad"><div class="mgrid" id="ogrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，右下角小标 ✅ 猜中 ❌ 没猜中，没有小标＝没有预测（鼠标停 1 秒看说明）</div>
   <div class="muted" id="ometa"></div>
   <div class="ai">自动最优走势是真实记录：每个新区块开奖后，程序只用该期之前的历史算出最佳设置并预测下一期，开奖前就存档、不能改；开奖后再核对。从空白开始累积，没有事后回算。开奖随机，不保证命中。</div>
   </div>
@@ -158,7 +159,7 @@ th{white-space:nowrap}
    <input id="dcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="dgo">确定</button>
   </div>
   <div class="runs" id="dstat"></div>
-  <div class="road" id="droad"><div class="mgrid" id="dgrid"></div></div><div class="legend" data-tk="cellLegend">每格：左边圆圈＝实际开奖，右边 ✅ 猜中 ❌ 没猜中 · 没有预测（鼠标停 1 秒看说明）</div>
+  <div class="road" id="droad"><div class="mgrid" id="dgrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，右下角小标 ✅ 猜中 ❌ 没猜中，没有小标＝没有预测（鼠标停 1 秒看说明）</div>
   <div class="muted" id="dmeta"></div>
   <div class="ai">一天最优走势是真实记录：每个新区块开奖后，程序只取最近 1440 期（约一天）的历史，自动算出最佳设置并预测下一期，开奖前就存档、不能改；开奖后再核对。不足 1440 期时有多少用多少，但至少要 300 期，否则暂无。从空白开始累积，没有事后回算。开奖随机，不保证命中。</div>
   </div>
@@ -171,7 +172,7 @@ th{white-space:nowrap}
    <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
   </div>
   <div class="runs" id="mstat"></div>
-  <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div><div class="legend" data-tk="cellLegend">每格：左边圆圈＝实际开奖，右边 ✅ 猜中 ❌ 没猜中 · 没有预测（鼠标停 1 秒看说明）</div>
+  <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，右下角小标 ✅ 猜中 ❌ 没猜中，没有小标＝没有预测（鼠标停 1 秒看说明）</div>
   <div class="muted" id="mmeta"></div>
   </div>
  </div>
@@ -271,7 +272,7 @@ var TIP={
  foldAi:"AI走势：每一期 AI 在开奖前给出的预测，对了✅错了❌。只统计开启之后、开奖前已存档的期数。点一下展开或收起。",
  foldAuto:"自动最优走势：每期开奖前，只用该期之前的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。从零开始慢慢累积，是真实记录。点一下展开或收起。",
  foldDay:"一天最优算法走势：每期开奖前，只用该期之前最近 1440 期（约一天）的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。从零开始慢慢累积，是真实记录。点一下展开或收起。",
- cellLegend:"每一格是一期：左边的圆圈是这一期实际开出的结果（绿＝单、红＝双），右边的 ✅ 表示当时的预测猜中了，❌ 表示没猜中，灰色的 · 表示这一期没有预测记录。点一格可看详情。",
+ cellLegend:"每一格是一期：圆圈是这一期实际开出的结果（绿＝单、红＝双），右下角的小标 ✅ 表示当时的预测猜中了，❌ 表示没猜中，没有小标表示这一期没有预测记录。点一格可看详情。",
  foldMine:"算法走势：用「输入参数」算出的最终预测，逐期回算的对错。点一下展开或收起。",
  curstreak:"当前连续：从最新一期往回数，同一边连续开了几期。例：3 连单。",
  longstreak:"最长连续：所选期数里同一边连续开出的最长一段。",
@@ -581,8 +582,8 @@ function renderBlock(d){
 function trendHtml(m,nextPick,nextBlock,kind){
   var cells=m.items.map(function(it,i){
     var t="#"+it.block+" 实际开奖"+it.result+" · 预测"+(it.predicted||"无记录")+(it.ok===true?" ✅猜中":it.ok===false?" ❌没猜中":"")+(kind==="mine"?(it.source==="stored"?"（开奖前已记录）":"（逐期回算）"):"");
-    /* left: what was actually drawn (same green/red circle as everywhere); right: hit / miss / no prediction */
-    return "<div class='mk rc"+(it.ok===true||it.ok===false?"":" np")+"' data-i="+i+" data-b="+it.block+" title='"+esc(t)+"'>"+ic(it.result)+"<span class=mm>"+(it.ok===true?"✅":it.ok===false?"❌":"·")+"</span></div>";
+    /* solid circle = what was actually drawn; small badge bottom-right = hit / miss (no badge = no prediction) */
+    return "<div class='mk rc"+(it.ok===true||it.ok===false?"":" np")+"' data-i="+i+" data-b="+it.block+" title='"+esc(t)+"'>"+ic(it.result)+(it.ok===true?"<span class=mm>✅</span>":it.ok===false?"<span class=mm>❌</span>":"")+"</div>";
   }).join("");
   /* the last cell: the pending prediction for the next period (blinking) */
   if(nextPick)cells+="<div class='pred "+cls(nextPick)+"' data-p=1 data-b="+(nextBlock||"")+" title='下一期预测（仅供参考）'>"+nextPick+"</div>";
