@@ -211,11 +211,11 @@ class DayWebTest(unittest.TestCase):
             with client:
                 html = client.get("/tron-draw").text
         # the cell: actual result circle + hit/miss mark (dot for no prediction), hover title with both
-        for token in ("mk rc", "ic(it.result)", "<span class=mm>✅</span>", "<span class=mm>❌</span>", "实际开奖", "cellLegend",
-                      ".mk.rc .ic", "--single:#55b589;--double:#dd4e47", "bottom:-2px", ".mgrid .mk{min-width:30px;height:30px}"):
+        for token in ("mk rc", "ic(it.result)", "✅", "❌", "<span class=mm>", "实际开奖", "cellLegend",
+                      ".mk.rc .ic", "--single:#1fb36b;--double:#e53935", ".mk.rc .mm{display:block;width:30px;height:16px", ".mgrid .mk{min-width:30px;height:30px;align-self:start}"):
             self.assertIn(token, html)
-        self.assertNotIn("<span class=mm>·</span>", html)             # no prediction = circle without badge
-        self.assertIn(".mgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(6,30px);gap:2px", html)
+        self.assertNotIn("<span class=mm>·</span>", html)             # no prediction = empty mark line (keeps rows aligned)
+        self.assertIn("grid-template-rows:repeat(6,48px);row-gap:8px;column-gap:10px", html)  # tight inside, airy between
         self.assertIn(".grid{display:grid;grid-auto-flow:column;gap:4px", html)     # 区块走势 layout untouched
         self.assertIn('g.style.gridTemplateRows="18px repeat("+d.max_rows+",26px)"', html)
         self.assertEqual(html.count('data-tk="cellLegend"'), 4)      # AI / 自动最优 / 一天最优 / 算法走势
