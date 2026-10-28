@@ -1,6 +1,7 @@
 """AI reference prediction: no network, no real key (httpx.MockTransport)."""
 import asyncio
 import json
+import re
 import logging
 import tempfile
 import unittest
@@ -108,21 +109,87 @@ class PromptTest(unittest.TestCase):
         text = build_stats_text([S, S, S, D, D, S, D, S, D, D])
         self.assertIn("当前连龙：连双2期（历史最长龙3期；当前龙长度是历史最长的67%）；当前连跳（单双交替）已1期", text)
         self.assertIn("历史龙长度分布（全部历史，每条龙算一次）：1期×3 2期×2 3期×1", text)
-        # runs S3 (longer than 2: continued) and D2 (ended at 2): 1 of 2
-        self.assertIn("历史上龙长到2期（含）之后，下一期继续同方向：1次／共2次(50%)", text)
+        self.assertIn("答「双」＝跟龙（龙继续），答「单」＝断龙（龙断开）。历史上龙恰好长到2期时，下一期：", text)
+        self.assertIn("  全部历史：跟龙(龙继续)1次(50%) ／ 断龙(龙断开)1次(50%)，共2次", text)
+        self.assertIn("答「单」＝连跳继续（答案与断龙相同），答「双」＝连跳断开（答案与跟龙相同）", text)
+        self.assertIn("  全部历史：连跳继续2次(50%) ／ 连跳断开2次(50%)，共4次", text)
         alt = build_stats_text([S, S, D, S, D, S])
         self.assertIn("当前连龙：连单1期", alt)
         self.assertIn("当前连跳（单双交替）已5期", alt)
         long = build_stats_text([D] * 12 + [S, S, S])
         self.assertIn("9期及以上×1", long)
 
-    def test_prompt_demands_weighing_and_forbids_reasoning(self):
+    def test_prompt_weighs_both_sides_equally_and_forbids_reasoning(self):
         p = tron_ai.SYSTEM_PROMPT
-        for needle in ("连龙", "历史最长", "龙长度分布", "连跳", "占比", "不要盲目顺着龙跟", "也不要盲目逆着龙反",
-                       "独立判断", "不要因为上一期你答过某一边就重复它", "自我纠正", "只回答一个字：单 或 双", "不要理由"):
+        for needle in ("龙继续（跟龙）", "龙断开（断龙）", "并排", "默认不偏向断龙", "也默认不偏向跟龙",
+                       "连1到3期", "基本各占一半", "两种答案都是正当的", "最近 1000/500/300/100 期", "连跳",
+                       "不要因为上一期你答过某一边就重复它", "不要出于习惯总答同一边", "也不要总是逆着龙答",
+                       "自我纠正", "只回答一个字：单 或 双", "不要理由"):
             self.assertIn(needle, p)
+        self.assertNotIn("不要盲目顺着龙跟", p)
         self.assertNotIn("sk-", p)
         self.assertNotIn("gpt", p.casefold())
+
+    def test_continue_break_counts_match_brute_force(self):
+        import random
+        rng = random.Random(11)
+        for _ in range(30):
+            vals = [rng.choice((S, D)) for _ in range(rng.randint(5, 400))]
+            n = len(vals)
+            for kind in ("run", "alt"):
+                for length in (1, 2, 3, 5):
+                    for window in (None, 50, 300):
+                        exp_c = exp_b = 0
+                        for i in range(max(0, n - window) if window else 0, n - 1):
+                            k = 1
+                            if kind == "run":
+                                while k <= i and vals[i - k] == vals[i]:
+                                    k += 1
+                            else:
+                                while k <= i and vals[i - k] != vals[i - k + 1]:
+                                    k += 1
+                            if k != length:
+                                continue
+                            same = vals[i + 1] == vals[i]
+                            if same == (kind == "run"):
+                                exp_c += 1
+                            else:
+                                exp_b += 1
+                        self.assertEqual(tron_ai.continue_break_counts(vals, kind, length, window), (exp_c, exp_b))
+
+    def test_side_by_side_numbers_for_all_windows(self):
+        import random
+        rng = random.Random(5)
+        vals = [rng.choice((S, D)) for _ in range(1100)] + [S, S, S]
+        text = build_stats_text(vals)
+        a = text.index("【跟龙 vs 断龙】")
+        b = text.index("【连跳继续 vs 连跳断开】")
+        c = text.index("你自己") if "你自己" in text else text.index("最近10期（旧→新）")
+        run_block, alt_block = text[a:b], text[b:c]
+        for label in ("全部历史", "最近1000期", "最近500期", "最近300期", "最近100期"):
+            self.assertIn(f"  {label}：跟龙(龙继续)", run_block)
+            self.assertIn(f"  {label}：连跳继续", alt_block)
+        for line in run_block.splitlines()[1:]:
+            self.assertIn("／ 断龙(龙断开)", line)         # both sides always shown together
+            pc, pb = [int(x) for x in re.findall(r"\((\d+)%\)", line)]
+            self.assertLessEqual(abs(pc + pb - 100), 1)
+        small = build_stats_text([S, S, D, S, S])
+        self.assertNotIn("最近100期：跟龙", small)
+        self.assertIn("  全部历史：跟龙(龙继续)0次(0%) ／ 断龙(龙断开)1次(100%)，共1次", small)
+        self.assertIn("无记录", build_stats_text([S, D, S, S, S]))     # nothing to compare for a record-length streak
+
+    def test_habit_line_counts_follow_and_break_from_stored_data(self):
+        # (pick, result, previous result, previous streak)
+        own = [(S, S, S, 4), (D, D, S, 4), (D, S, D, 1), (S, S, S, 1), (S, D, S, 2), (D, D, S, 3)]
+        text = build_stats_text([S, D] * 20, own)
+        self.assertIn("你最近6次相对当时最新一期的倾向：跟龙4次(67%) 断龙2次(33%)；其中当时已连龙3期及以上：跟龙1次 断龙2次", text)
+        self.assertNotIn("你最近30次", text)
+        many = [(S, S, S, 1)] * 12 + [(D, D, S, 1)] * 8
+        text = build_stats_text([S, D] * 20, many)
+        self.assertIn("你最近10次相对当时最新一期的倾向：跟龙2次(20%) 断龙8次(80%)", text)
+        self.assertIn("你最近20次相对当时最新一期的倾向：跟龙12次(60%) 断龙8次(40%)", text)
+        self.assertNotIn("倾向", build_stats_text([S, D] * 20, [(S, S), (D, D)]))  # old 2-tuples: no habit line
+        self.assertNotIn("倾向", build_stats_text([S, D] * 20))
 
     def test_self_line_shows_own_streak_and_hits(self):
         own = [(S, S), (S, D), (D, D), (D, S), (D, D), (D, D)]
@@ -267,6 +334,11 @@ class PredictorTest(unittest.TestCase):
         want = "".join(results[b] for b in (200, 220, 240))
         self.assertIn(f"你自己最近3次的回答（旧→新）：双双双，对应实际开奖：{want}", bodies[0])  # 160 is cut off by the gap
         self.assertIn("你已连续3次答双", bodies[0])
+        # habit: answers for 200/220/240 relative to the result before each (known pre-draw), no future data
+        prev = {b: results[b - 20] for b in (200, 220, 240)}
+        follow = sum(1 for b in (200, 220, 240) if D == prev[b])
+        self.assertIn(f"你最近3次相对当时最新一期的倾向：跟龙{follow}次", bodies[0])
+        self.assertIn("【跟龙 vs 断龙】", bodies[0])
         self.assertEqual(self.store.tron_ai_predictions(260, 260), {260: D})   # only the new period is written
         self.assertEqual(self.store.tron_ai_predictions(200, 240), {200: D, 220: D, 240: D})  # old records untouched
 
