@@ -626,6 +626,12 @@ class DirectoryStore(FeatureStoreMixin):
                     params TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS tron_day_predictions (
+                    block_number INTEGER PRIMARY KEY,
+                    pick TEXT NOT NULL,
+                    params TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS tron_ai_predictions (
                     block_number INTEGER PRIMARY KEY,
                     pick TEXT NOT NULL,
@@ -2273,8 +2279,10 @@ class DirectoryStore(FeatureStoreMixin):
             )
             return cursor.rowcount > 0
 
-    def record_tron_auto_prediction(self, block_number: int, pick: str, params: str = "") -> bool:
-        """Store the 自动最优 prediction for draw block ``block_number`` (write-once, pre-draw only)."""
+    _PRE_TABLES = {"auto": "tron_auto_predictions", "day": "tron_day_predictions"}
+
+    def _record_pre(self, kind: str, block_number: int, pick: str, params: str) -> bool:
+        table = self._PRE_TABLES[kind]
         if pick not in ("单", "双") or int(block_number) <= 0:
             return False
         with self.connect() as conn:
@@ -2283,24 +2291,24 @@ class DirectoryStore(FeatureStoreMixin):
             ).fetchone():
                 return False  # already drawn: never a look-ahead record
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO tron_auto_predictions (block_number, pick, params) VALUES (?, ?, ?)",
+                f"INSERT OR IGNORE INTO {table} (block_number, pick, params) VALUES (?, ?, ?)",
                 (int(block_number), pick, str(params)[:200]),
             )
             return cursor.rowcount > 0
 
-    def tron_auto_predictions(self, low: int, high: int) -> dict[int, str]:
+    def _pre_predictions(self, kind: str, low: int, high: int) -> dict[int, str]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT block_number, pick FROM tron_auto_predictions WHERE block_number BETWEEN ? AND ?",
+                f"SELECT block_number, pick FROM {self._PRE_TABLES[kind]} WHERE block_number BETWEEN ? AND ?",
                 (int(low), int(high)),
             ).fetchall()
         return {int(row["block_number"]): str(row["pick"]) for row in rows}
 
-    def tron_auto_scored(self, low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
-        """(block, pick, result) of stored 自动最优 predictions that have a draw result, oldest first."""
+    def _pre_scored(self, kind: str, low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
+        table = self._PRE_TABLES[kind]
         query = (
             "SELECT p.block_number AS b, p.pick AS pick, d.result AS result "
-            "FROM tron_auto_predictions p JOIN tron_draws d ON d.block_number = p.block_number "
+            f"FROM {table} p JOIN tron_draws d ON d.block_number = p.block_number "
             "WHERE p.block_number >= ? ORDER BY p.block_number DESC"
         )
         args: list = [int(low)]
@@ -2311,21 +2319,56 @@ class DirectoryStore(FeatureStoreMixin):
             rows = conn.execute(query, args).fetchall()
         return [(int(r["b"]), str(r["pick"]), str(r["result"])) for r in reversed(rows)]
 
-    def tron_auto_overall(self) -> tuple[int, int]:
-        """(hits, total) over every stored 自动最优 prediction that has a draw result."""
+    def _pre_overall(self, kind: str) -> tuple[int, int]:
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS total, COALESCE(SUM(p.pick = d.result), 0) AS hits "
-                "FROM tron_auto_predictions p JOIN tron_draws d ON d.block_number = p.block_number",
+                f"FROM {self._PRE_TABLES[kind]} p JOIN tron_draws d ON d.block_number = p.block_number",
             ).fetchone()
         return int(row["hits"]), int(row["total"])
 
-    def tron_auto_params(self, block_number: int) -> str:
+    def _pre_params(self, kind: str, block_number: int) -> str:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT params FROM tron_auto_predictions WHERE block_number=?", (int(block_number),),
+                f"SELECT params FROM {self._PRE_TABLES[kind]} WHERE block_number=?", (int(block_number),),
             ).fetchone()
         return str(row["params"]) if row else ""
+
+    # 自动最优 (all stored history)
+    def record_tron_auto_prediction(self, block_number: int, pick: str, params: str = "") -> bool:
+        """Store the 自动最优 prediction for draw block ``block_number`` (write-once, pre-draw only)."""
+        return self._record_pre("auto", block_number, pick, params)
+
+    def tron_auto_predictions(self, low: int, high: int) -> dict[int, str]:
+        return self._pre_predictions("auto", low, high)
+
+    def tron_auto_scored(self, low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
+        """(block, pick, result) of stored 自动最优 predictions that have a draw result, oldest first."""
+        return self._pre_scored("auto", low, limit)
+
+    def tron_auto_overall(self) -> tuple[int, int]:
+        """(hits, total) over every stored 自动最优 prediction that has a draw result."""
+        return self._pre_overall("auto")
+
+    def tron_auto_params(self, block_number: int) -> str:
+        return self._pre_params("auto", block_number)
+
+    # 一天最优 (same search, newest 1440 periods only)
+    def record_tron_day_prediction(self, block_number: int, pick: str, params: str = "") -> bool:
+        """Store the 一天最优 prediction for draw block ``block_number`` (write-once, pre-draw only)."""
+        return self._record_pre("day", block_number, pick, params)
+
+    def tron_day_predictions(self, low: int, high: int) -> dict[int, str]:
+        return self._pre_predictions("day", low, high)
+
+    def tron_day_scored(self, low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
+        return self._pre_scored("day", low, limit)
+
+    def tron_day_overall(self) -> tuple[int, int]:
+        return self._pre_overall("day")
+
+    def tron_day_params(self, block_number: int) -> str:
+        return self._pre_params("day", block_number)
 
     def tron_ai_scored(self, model: str = "", low: int = 0, limit: int = 0) -> list[tuple[int, str, str]]:
         """(block, pick, result) of stored AI predictions that have a draw result, oldest first.

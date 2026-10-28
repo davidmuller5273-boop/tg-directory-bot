@@ -385,7 +385,7 @@ class BroadcastFeedTest(unittest.TestCase):
             client, _ = self.client(temp)
             with client:
                 html = client.get("/tron-draw").text
-        self.assertEqual(html.count('data-n="180"'), 4)  # 区块走势 / AI走势 / 自动最优走势 / 算法走势
+        self.assertEqual(html.count('data-n="180"'), 5)  # 区块走势 / AI走势 / 自动最优走势 / 一天最优算法走势 / 算法走势
         for token in ("data-tk=\"p180\"", "function icw(", "function curRun(", "当前\"+(c.win", "最大连中", "最大连错", "currun:"):
             self.assertIn(token, html)
 

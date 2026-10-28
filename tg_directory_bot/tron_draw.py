@@ -691,22 +691,54 @@ def auto_best_pick(results: list[str]) -> tuple[str, dict] | None:
     return (pick, params) if pick else None
 
 
-def record_next_auto_prediction(store) -> bool:
-    """Compute + store (write-once, before the draw) the 自动最优 prediction for the next draw block."""
+DAY_PERIODS = 1440   # 一天最优: one day of one-minute draws
+
+
+def day_best_pick(results: list[str]) -> tuple[str, dict] | None:
+    """Same search as ``auto_best_pick`` but only on the newest 1440 periods of ``results`` (history strictly
+    before the predicted period).  Fewer than 1440 periods: use what there is, but only from 300 periods on."""
+    return auto_best_pick(list(results[-DAY_PERIODS:]))
+
+
+def _record_next_search_prediction(store, kind: str) -> bool:
+    """Compute + store (write-once, before the draw) the 自动最优 ("auto") or 一天最优 ("day") prediction."""
     newest = store.tron_draw_recent(1)
     if not newest:
         return False
     next_block = int(newest[0]["block_number"]) + DRAW_INTERVAL
-    if next_block in store.tron_auto_predictions(next_block, next_block):
+    if kind == "day":
+        existing, record, pick_fn, periods = store.tron_day_predictions, store.record_tron_day_prediction, day_best_pick, DAY_PERIODS
+    else:
+        existing, record, pick_fn, periods = store.tron_auto_predictions, store.record_tron_auto_prediction, auto_best_pick, BEST_MAX_PERIODS
+    if next_block in existing(next_block, next_block):
         return False
-    rows = store.tron_draw_recent(BEST_MAX_PERIODS)
+    rows = store.tron_draw_recent(periods)
     if int(rows[-1]["block_number"]) + DRAW_INTERVAL != next_block:
         return False  # a newer draw landed meanwhile; that period will be handled on its own
-    found = auto_best_pick([str(row["result"]) for row in rows])
+    found = pick_fn([str(row["result"]) for row in rows])
     if found is None:
         return False
     pick, params = found
-    return store.record_tron_auto_prediction(next_block, pick, json.dumps(params, sort_keys=True))
+    return record(next_block, pick, json.dumps(params, sort_keys=True))
+
+
+def record_next_auto_prediction(store) -> bool:
+    """Compute + store (write-once, before the draw) the 自动最优 prediction for the next draw block."""
+    return _record_next_search_prediction(store, "auto")
+
+
+def record_next_day_prediction(store) -> bool:
+    """Compute + store (write-once, before the draw) the 一天最优 prediction for the next draw block."""
+    return _record_next_search_prediction(store, "day")
+
+
+def record_next_search_predictions(store) -> None:
+    """Both searches for the next period; one failing never stops the other (worker thread)."""
+    for name, fn in (("auto", record_next_auto_prediction), ("day", record_next_day_prediction)):
+        try:
+            fn(store)
+        except Exception as exc:
+            logger.warning("TRON %s-best prediction failed: %s", name, type(exc).__name__)
 
 
 def parse_reference_params(
@@ -838,7 +870,7 @@ class TronDrawRecorder:
         while True:
             self._auto_dirty = False
             try:
-                await asyncio.to_thread(record_next_auto_prediction, self.store)
+                await asyncio.to_thread(record_next_search_predictions, self.store)
             except Exception as exc:  # statistics only; recording draws must not fail
                 logger.warning("TRON auto-best prediction failed: %s", type(exc).__name__)
             if not self._auto_dirty:

@@ -24,7 +24,7 @@ from .storage import DirectoryStore
 from .tron_draw import (
     BEST_MAX_PERIODS, BEST_MIN_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
     ai_trend, lookback_needed, my_trend, parse_limit, pick_runs,
-    parse_reference_params, record_next_auto_prediction, reference_panel,
+    parse_reference_params, record_next_auto_prediction, record_next_day_prediction, reference_panel,
 )
 from .tron_stats import TronStats, resolve_client_ip
 from .time_utils import beijing_now_text, format_beijing_time, format_beijing_timestamp_ms
@@ -94,12 +94,12 @@ def create_app(config: Config) -> FastAPI:
     # --- public TRON 单/双 draw statistics (no login; no admin data) ---
     def tron_draw_payload(
         limit: int, streak_n: int = 3, recent_m: int = 100, mode: str = "follow",
-        minority_m: int = 20, mine_limit: int = 0, ai_limit: int = 0, auto_limit: int = 0,
+        minority_m: int = 20, mine_limit: int = 0, ai_limit: int = 0, auto_limit: int = 0, day_limit: int = 0,
     ) -> dict:
         extra = lookback_needed(streak_n, recent_m, minority_m)
         ai_on = bool(config.tron_ai_enabled)
         ai_limit = ai_limit if ai_on else 0
-        all_rows = store.tron_draw_recent(limit + extra + max(mine_limit, ai_limit, auto_limit))
+        all_rows = store.tron_draw_recent(limit + extra + max(mine_limit, ai_limit, auto_limit, day_limit))
         rows = all_rows[-limit:]
         params = {"streak_n": streak_n, "recent_m": recent_m, "mode": mode, "minority_m": minority_m}
         reference = reference_panel([str(row["result"]) for row in all_rows], limit, **params)
@@ -164,14 +164,18 @@ def create_app(config: Config) -> FastAPI:
                 ai.update(pre_draw_source(stored_ai, ai_limit))
         ensure_auto_prediction()
         auto = {"enabled": True, "next": None, "window": None, "trend": None, "prev": None, "params": None}
+        day = {"enabled": True, "next": None, "window": None, "trend": None, "prev": None, "params": None}
         if all_rows:
             stored_auto = store.tron_auto_predictions(int(all_rows[0]["block_number"]), next_block)
             auto.update(pre_draw_source(stored_auto, auto_limit))
-            if auto["next"]:
-                try:
-                    auto["params"] = json.loads(store.tron_auto_params(next_block) or "null")
-                except ValueError:
-                    auto["params"] = None
+            stored_day = store.tron_day_predictions(int(all_rows[0]["block_number"]), next_block)
+            day.update(pre_draw_source(stored_day, day_limit))
+            for source, params_of in ((auto, store.tron_auto_params), (day, store.tron_day_params)):
+                if source["next"]:
+                    try:
+                        source["params"] = json.loads(params_of(next_block) or "null")
+                    except ValueError:
+                        source["params"] = None
         cells, columns = bead_road([str(row["result"]) for row in rows])
         singles = sum(1 for row in rows if row["result"] == SINGLE)
         latest = rows[-1] if rows else None
@@ -186,6 +190,7 @@ def create_app(config: Config) -> FastAPI:
             "blocks": [int(row["block_number"]) for row in rows],
             "ai": ai,
             "auto": auto,
+            "day": day,
             "reference": reference,
             "runs": longest_runs([str(row["result"]) for row in rows]),
             "previous": previous,
@@ -220,6 +225,7 @@ def create_app(config: Config) -> FastAPI:
             if config.tron_ai_enabled else None
         )
         auto_pick = store.tron_auto_predictions(block, block).get(int(block))
+        day_pick = store.tron_day_predictions(block, block).get(int(block))
         return {
             "block": int(row["block_number"]), "hash": str(row["block_hash"]),
             "digit": int(row["last_digit"]), "result": result,
@@ -229,6 +235,7 @@ def create_app(config: Config) -> FastAPI:
             "algo": None if algo is None else {"pick": algo, "ok": algo == result},
             "ai": None if ai_pick is None else {"pick": ai_pick, "ok": ai_pick == result, "model": config.ai_model},
             "auto": None if auto_pick is None else {"pick": auto_pick, "ok": auto_pick == result},
+            "day": None if day_pick is None else {"pick": day_pick, "ok": day_pick == result},
         }
 
     tron_stats = TronStats(store)
@@ -245,7 +252,8 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/tron-draw")
     async def tron_draw_api(
         request: Request, limit: str = "100", streak_n: str = "", recent_m: str = "", mode: str = "",
-        minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", auto_limit: str = "0", block: str = "",
+        minority_m: str = "", mine_limit: str = "0", ai_limit: str = "0", auto_limit: str = "0", day_limit: str = "0",
+        block: str = "",
     ):
         if not config.tron_draw_stats:
             raise HTTPException(404)
@@ -260,9 +268,10 @@ def create_app(config: Config) -> FastAPI:
         mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
         ai_n = parse_limit(ai_limit, 0, 5000) if str(ai_limit).strip() not in ("", "0") else 0
         auto_n = parse_limit(auto_limit, 0, 5000) if str(auto_limit).strip() not in ("", "0") else 0
+        day_n = parse_limit(day_limit, 0, 5000) if str(day_limit).strip() not in ("", "0") else 0
         payload = tron_draw_payload(
             parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
-            mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n,
+            mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n, day_limit=day_n,
         )
         # the page's own 4 s poll doubles as the "online" heartbeat (no extra request); never raises
         ip, agent = visitor_of(request)
@@ -279,10 +288,17 @@ def create_app(config: Config) -> FastAPI:
             if not newest:
                 return
             nxt = int(newest[0]["block_number"]) + DRAW_INTERVAL
-            if nxt in store.tron_auto_predictions(nxt, nxt):
-                return
-            with auto_lock:
-                record_next_auto_prediction(store)
+            for exists, record in (
+                (store.tron_auto_predictions, record_next_auto_prediction),
+                (store.tron_day_predictions, record_next_day_prediction),
+            ):
+                if nxt in exists(nxt, nxt):
+                    continue
+                try:
+                    with auto_lock:
+                        record(store)
+                except Exception:
+                    logging.getLogger(__name__).warning("TRON best prediction failed", exc_info=False)
         except Exception:
             logging.getLogger(__name__).warning("TRON auto-best prediction failed", exc_info=False)
 
@@ -357,6 +373,19 @@ def create_app(config: Config) -> FastAPI:
             15,
         )
 
+    def tron_day_broadcast_payload() -> dict:
+        """Same feed for 一天最优 (search on the newest 1440 periods; needs at least 300 periods of history)."""
+        have = store.tron_draw_total()
+        if have < BEST_MIN_PERIODS:
+            return {"enabled": False, "reason": f"一天最优需要至少 {BEST_MIN_PERIODS} 期历史（已有 {have} 期）"}
+        ensure_auto_prediction()
+        return broadcast_feed(
+            lambda block: store.tron_day_predictions(block, block).get(block),
+            lambda low=0, limit=0: store.tron_day_scored(low=low, limit=limit),
+            store.tron_day_overall,
+            15,
+        )
+
     @app.get("/api/tron-draw/ai-broadcast")
     async def tron_draw_ai_broadcast_api():
         if not config.tron_draw_stats:
@@ -371,6 +400,14 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(404)
         return JSONResponse(
             await asyncio.to_thread(tron_auto_broadcast_payload), headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/tron-draw/day-broadcast")
+    async def tron_draw_day_broadcast_api():
+        if not config.tron_draw_stats:
+            raise HTTPException(404)
+        return JSONResponse(
+            await asyncio.to_thread(tron_day_broadcast_payload), headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/api/tron-draw/best")
