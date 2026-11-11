@@ -533,7 +533,7 @@ class AiWebTest(unittest.TestCase):
         self.assertLess(html.index('id="afold"'), html.index('id="mfold"'))
         self.assertLess(html.index('id="mfold"'), html.index('id="setn"'))
         self.assertLess(html.index('id="setn"'), html.index('id="detailbox"'))
-        self.assertIn('"&mine_limit="+(openS.mine?mine:0)', html)
+        self.assertIn('"&mine_limit="+(openS.mine?(mine==="all"?"all":mine):0)', html)
         self.assertNotIn(DUMMY, html)
         # the page never renders the model name (the API field `model` stays)
         self.assertNotIn("x.ai.model", html)

@@ -13,7 +13,8 @@ from tg_directory_bot.chain import ChainQueryError
 from tg_directory_bot.config import Config
 from tg_directory_bot.storage import DirectoryStore
 from tg_directory_bot.tron_draw import (
-    TronDrawRecorder, bead_road, draw_result, is_draw_block, last_digit, parse_limit,
+    TronDrawRecorder, VIEW_MAX_PERIODS, bead_road, draw_result, is_draw_block, last_digit, parse_limit,
+    parse_view_limit,
 )
 from tg_directory_bot import tron_draw as td
 from tg_directory_bot.tron_scanner import ScanDB, TronBlockScanner
@@ -61,8 +62,19 @@ class RulesTest(unittest.TestCase):
     def test_parse_limit(self):
         self.assertEqual(parse_limit("abc"), 100)
         self.assertEqual(parse_limit("0"), 1)
-        self.assertEqual(parse_limit("999999"), 5000)
+        self.assertEqual(parse_limit("5000"), 5000)  # old display cap is no longer a ceiling
+        self.assertEqual(parse_limit("100000"), 100000)
+        self.assertEqual(parse_limit("999999"), 999999)
         self.assertEqual(parse_limit(" 50 "), 50)
+        self.assertEqual(td.BEST_MAX_PERIODS, 5000)  # prediction search cap unchanged
+        # "all" / 「全部」means every stored period
+        self.assertEqual(parse_view_limit("all", total=12345), 12345)
+        self.assertEqual(parse_view_limit("全部", total=8), 8)
+        self.assertEqual(parse_view_limit("ALL", total=8), 8)
+        self.assertEqual(parse_view_limit("0", none_if_zero=True, total=8), 0)
+        self.assertEqual(parse_view_limit("0", total=8), 1)
+        self.assertEqual(parse_view_limit("all", none_if_zero=True, total=0), 1)
+
 
 
 class BeadRoadTest(unittest.TestCase):
@@ -329,10 +341,20 @@ class WebTest(unittest.TestCase):
                 self.assertEqual(tuned["count"], 10)
                 self.assertEqual(client.get("/api/tron-draw?limit=500").json()["count"], 30)
                 self.assertEqual(client.get("/api/tron-draw?limit=zzz").json()["limit"], 100)
+                huge = client.get("/api/tron-draw?limit=999999").json()
+                self.assertEqual(huge["limit"], 999999)  # request is not clipped to 5000
+                self.assertEqual(huge["count"], 30)  # all recorded periods are returned
+                self.assertEqual(client.get("/api/tron-draw?limit=all").json()["count"], 30)
+                self.assertEqual(client.get("/api/tron-draw?limit=全部").json()["count"], 30)
                 page = client.get("/tron-draw")
                 self.assertEqual(page.status_code, 200)
                 self.assertIn("开奖走势", page.text)
                 self.assertIn("区块走势", page.text)
+                self.assertEqual(page.text.count('data-n="all"'), 5)  # 全部 on every trend
+                self.assertIn(">全部<", page.text)
+                self.assertIn('limit==="all"?"all":limit', page.text)
+                self.assertNotIn('max="5000"', page.text)
+                self.assertNotIn("VIEW_MAX=100000", page.text)
                 # admin area stays behind login
                 self.assertEqual(client.get("/entries", follow_redirects=False).status_code, 303)
 

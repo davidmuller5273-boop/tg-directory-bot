@@ -119,8 +119,8 @@ th{white-space:nowrap}
    <span class="src" id="srcbox"><span class="tl" data-tk="srcl">预测来源：</span><button class="snd" id="srcI" type="button" data-src="ai" data-tk="sai" hidden>AI预测</button><button class="snd" id="srcO" type="button" data-src="auto" data-tk="sauto">自动最优算法预测</button><button class="snd" id="srcD" type="button" data-src="day" data-tk="sday">一天最优算法预测</button><button class="snd" id="srcA" type="button" data-src="input" data-tk="sinput">输入参数算法预测</button></span></div>
   <div class="curpred" id="curpred" data-tk="cur"></div>
   <div class="periods" id="periods">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
-   <input id="custom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button><button data-n="all" data-tk="pall">全部</button>
+   <input id="custom" type="number" min="1" inputmode="numeric" placeholder="自定义"><button id="go">确定</button>
   </div>
   <div class="runs" id="runs"></div>
   <div class="road" id="road"><div class="grid" id="grid"></div></div>
@@ -130,8 +130,8 @@ th{white-space:nowrap}
   <div class="fold" id="afold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldAi"><span id="aititle">AI走势</span> <span class="arr" id="aarr">▶</span></span><span class="sum" id="asum"></span></div>
   <div id="abody" hidden>
   <div class="periods" id="aperiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
-   <input id="acustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button><button data-n="all" data-tk="pall">全部</button>
+   <input id="acustom" type="number" min="1" inputmode="numeric" placeholder="自定义"><button id="ago">确定</button>
   </div>
   <div class="runs" id="astat"></div>
   <div class="road" id="aroad"><div class="mgrid" id="agrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，紧挨着右边 ✅ 猜中 ❌ 没猜中，空着＝没有预测（鼠标停 1 秒看说明）</div>
@@ -143,8 +143,8 @@ th{white-space:nowrap}
   <div class="fold" id="ofold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldAuto">自动最优走势 <span class="arr" id="oarr">▶</span></span><span class="sum" id="osum"></span></div>
   <div id="obody" hidden>
   <div class="periods" id="operiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
-   <input id="ocustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="ogo">确定</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button><button data-n="all" data-tk="pall">全部</button>
+   <input id="ocustom" type="number" min="1" inputmode="numeric" placeholder="自定义"><button id="ogo">确定</button>
   </div>
   <div class="runs" id="ostat"></div>
   <div class="road" id="oroad"><div class="mgrid" id="ogrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，紧挨着右边 ✅ 猜中 ❌ 没猜中，空着＝没有预测（鼠标停 1 秒看说明）</div>
@@ -156,8 +156,8 @@ th{white-space:nowrap}
   <div class="fold" id="dfold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldDay">一天最优算法走势 <span class="arr" id="darr">▶</span></span><span class="sum" id="dsum"></span></div>
   <div id="dbody" hidden>
   <div class="periods" id="dperiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
-   <input id="dcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="dgo">确定</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button><button data-n="all" data-tk="pall">全部</button>
+   <input id="dcustom" type="number" min="1" inputmode="numeric" placeholder="自定义"><button id="dgo">确定</button>
   </div>
   <div class="runs" id="dstat"></div>
   <div class="road" id="droad"><div class="mgrid" id="dgrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，紧挨着右边 ✅ 猜中 ❌ 没猜中，空着＝没有预测（鼠标停 1 秒看说明）</div>
@@ -169,8 +169,8 @@ th{white-space:nowrap}
   <div class="fold" id="mfold" role="button" tabindex="0" aria-expanded="false"><span class="sec" data-tk="foldMine">算法走势 <span class="arr" id="marr">▶</span></span><span class="sum" id="msum"></span></div>
   <div id="mbody" hidden>
   <div class="periods" id="mperiods" style="margin-top:8px">
-   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button>
-   <input id="mcustom" type="number" min="1" max="5000" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
+   <button data-n="50">50</button><button data-n="100" class="on">100</button><button data-n="180" data-tk="p180">180期</button><button data-n="500">500</button><button data-n="all" data-tk="pall">全部</button>
+   <input id="mcustom" type="number" min="1" inputmode="numeric" placeholder="自定义"><button id="mgo">确定</button>
   </div>
   <div class="runs" id="mstat"></div>
   <div class="road" id="mroad"><div class="mgrid" id="mgrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，紧挨着右边 ✅ 猜中 ❌ 没猜中，空着＝没有预测（鼠标停 1 秒看说明）</div>
@@ -215,9 +215,10 @@ function ls(k,d){var v=localStorage.getItem(K+k);return v===null?d:v}
 function clamp(v,d,lo,hi){v=parseInt(v,10);if(isNaN(v))v=d;return Math.max(lo,Math.min(hi,v))}
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
-var limit=clamp(localStorage.getItem("trondraw.limit"),100,1,5000);
-var mine=clamp(ls("mine","100"),100,1,5000),ailimit=clamp(ls("ailimit","100"),100,1,5000);
-var autolimit=clamp(ls("autolimit","100"),100,1,5000),daylimit=clamp(ls("daylimit","100"),100,1,5000);
+function viewLimit(v,d){return (v==="all")?"all":clamp(v,d,1,1e15)}   /* no 5000 display cap; "all" = 有多少看多少 */
+var limit=viewLimit(localStorage.getItem("trondraw.limit"),100);
+var mine=viewLimit(ls("mine","100"),100),ailimit=viewLimit(ls("ailimit","100"),100);
+var autolimit=viewLimit(ls("autolimit","100"),100),daylimit=viewLimit(ls("daylimit","100"),100);
 var openS={ai:ls("open.ai","0")==="1",auto:ls("open.auto","0")==="1",day:ls("open.day","0")==="1",mine:ls("open.mine","0")==="1"},pendingJump=null,mineLast=null;
 var autoOn=ls("auto","0")==="1",autoLatest=null,autoBusy=false;
 var busy=false,again=false,soundOn=ls("sound","0")==="1";
@@ -269,6 +270,7 @@ var TIP={
  maxloss:"最大连错：所选这些期里，连续猜错最长的一段，越短越稳（但开奖仍是随机的）。没有预测记录的期会跳过。点一下可在走势里高亮。",
  currun:"当前连中/连错：从最新一期往回数，已经连续猜对（或猜错）几期。没有预测记录的期会跳过。",
  p180:"180期：最新 180 期，约 3 小时（每分钟开一期）。选它就能看到近三小时的最大连中、最大连错。",
+ pall:"全部：不再限制只能看最近 5000 期，有多少已记录的历史就显示多少。历史很长时走势条会比较长，可能稍慢。",
  hits:"命中：猜中的期数 / 有预测记录的期数，括号里是命中率。",
  foldAi:"AI走势：每一期 AI 在开奖前给出的预测，对了✅错了❌。只统计开启之后、开奖前已存档的期数。点一下展开或收起。",
  foldAuto:"自动最优走势：每期开奖前，只用该期之前的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。连跳满 6 且连挂满 6 时，下一期会临时顺势反开，只此一期后恢复原算法。从零开始慢慢累积，是真实记录。点一下展开或收起。",
@@ -316,7 +318,10 @@ document.addEventListener("click",function(e){      /* tap */
 applyTips();
 function mark(box,val){
   var btns=document.querySelectorAll("#"+box+" button[data-n]");
-  for(var i=0;i<btns.length;i++){btns[i].className=(parseInt(btns[i].getAttribute("data-n"),10)===val)?"on":""}
+  for(var i=0;i<btns.length;i++){
+    var n=btns[i].getAttribute("data-n");
+    btns[i].className=(n==="all"?val==="all":parseInt(n,10)===val)?"on":"";
+  }
 }
 /* ---------- sound (WebAudio, no files) ---------- */
 var actx=null;
@@ -474,7 +479,7 @@ function showDetail(el,block,pending){
     return;
   }
   tipEl.innerHTML="#"+block+"<br>加载中…";placeTip(el);
-  var q="/api/tron-draw?block="+block+"&limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn;
+  var q="/api/tron-draw?block="+block+"&limit="+(limit==="all"?"all":limit)+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn;
   fetch(q,{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(x){
     if(seq!==detailSeq)return;
     tipEl.innerHTML="#"+x.block+"<br>"+esc(x.time||"时间未知")+"（北京时间）<br>"+x.result+" · 末位 "+x.digit;placeTip(el);
@@ -684,19 +689,21 @@ function load(force){
   var now=Date.now();
   if(now<pauseUntil){clearTimeout(pauseTimer);pauseTimer=setTimeout(function(){load(force)},pauseUntil-now+30);return}
   if(busy){if(force)again=true;return}busy=true;
-  var q="/api/tron-draw?limit="+limit+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+"&mine_limit="+(openS.mine?mine:0)+"&ai_limit="+(openS.ai?ailimit:0)+"&auto_limit="+(openS.auto?autolimit:0)+"&day_limit="+(openS.day?daylimit:0);
+  var q="/api/tron-draw?limit="+(limit==="all"?"all":limit)+"&streak_n="+cfg.n+"&recent_m="+cfg.m+"&mode="+cfg.mode+"&minority_m="+cfg.mn+"&mine_limit="+(openS.mine?(mine==="all"?"all":mine):0)+"&ai_limit="+(openS.ai?(ailimit==="all"?"all":ailimit):0)+"&auto_limit="+(openS.auto?(autolimit==="all"?"all":autolimit):0)+"&day_limit="+(openS.day?(daylimit==="all"?"all":daylimit):0);
   fetch(q,{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){busy=false;if(again){again=false;load()}});
 }
-function setLimit(n){limit=Math.max(1,Math.min(5000,n||100));localStorage.setItem("trondraw.limit",limit);mark("periods",limit);load()}
-function setMine(n){mine=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"mine",mine);mark("mperiods",mine);load()}
-function setAuto(n){autolimit=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"autolimit",autolimit);mark("operiods",autolimit);mark("dperiods",daylimit);load()}
-function setDay(n){daylimit=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"daylimit",daylimit);mark("dperiods",daylimit);load()}
-function setAi(n){ailimit=Math.max(1,Math.min(5000,n||100));localStorage.setItem(K+"ailimit",ailimit);mark("aperiods",ailimit);load()}
-document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(parseInt(b.getAttribute("data-n"),10))}});
-document.querySelectorAll("#mperiods button[data-n]").forEach(function(b){b.onclick=function(){setMine(parseInt(b.getAttribute("data-n"),10))}});
-document.querySelectorAll("#operiods button[data-n]").forEach(function(b){b.onclick=function(){setAuto(parseInt(b.getAttribute("data-n"),10))}});
-document.querySelectorAll("#dperiods button[data-n]").forEach(function(b){b.onclick=function(){setDay(parseInt(b.getAttribute("data-n"),10))}});
-document.querySelectorAll("#aperiods button[data-n]").forEach(function(b){b.onclick=function(){setAi(parseInt(b.getAttribute("data-n"),10))}});
+function asView(n){return n==="all"?"all":Math.max(1,parseInt(n,10)||100)}
+function setLimit(n){limit=asView(n);localStorage.setItem("trondraw.limit",limit);mark("periods",limit);load()}
+function setMine(n){mine=asView(n);localStorage.setItem(K+"mine",mine);mark("mperiods",mine);load()}
+function setAuto(n){autolimit=asView(n);localStorage.setItem(K+"autolimit",autolimit);mark("operiods",autolimit);mark("dperiods",daylimit);load()}
+function setDay(n){daylimit=asView(n);localStorage.setItem(K+"daylimit",daylimit);mark("dperiods",daylimit);load()}
+function setAi(n){ailimit=asView(n);localStorage.setItem(K+"ailimit",ailimit);mark("aperiods",ailimit);load()}
+function btnView(b){var n=b.getAttribute("data-n");return n==="all"?n:parseInt(n,10)}
+document.querySelectorAll("#periods button[data-n]").forEach(function(b){b.onclick=function(){setLimit(btnView(b))}});
+document.querySelectorAll("#mperiods button[data-n]").forEach(function(b){b.onclick=function(){setMine(btnView(b))}});
+document.querySelectorAll("#operiods button[data-n]").forEach(function(b){b.onclick=function(){setAuto(btnView(b))}});
+document.querySelectorAll("#dperiods button[data-n]").forEach(function(b){b.onclick=function(){setDay(btnView(b))}});
+document.querySelectorAll("#aperiods button[data-n]").forEach(function(b){b.onclick=function(){setAi(btnView(b))}});
 $("go").onclick=function(){var v=parseInt($("custom").value,10);if(v>0)setLimit(v)};
 $("mgo").onclick=function(){var v=parseInt($("mcustom").value,10);if(v>0)setMine(v)};
 $("ogo").onclick=function(){var v=parseInt($("ocustom").value,10);if(v>0)setAuto(v)};

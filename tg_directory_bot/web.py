@@ -23,7 +23,7 @@ from .lottery import LOTTERY_GAMES
 from .storage import DirectoryStore
 from .tron_draw import (
     BEST_MAX_PERIODS, BEST_MIN_PERIODS, CANONICAL_KEY, DRAW_INTERVAL, best_params, MAX_ROWS, SINGLE, bead_road, config_key, longest_runs,
-    ai_trend, lookback_needed, my_trend, parse_limit, pick_runs,
+    ai_trend, lookback_needed, my_trend, parse_limit, parse_view_limit, pick_runs,
     parse_reference_params, record_next_auto_prediction, record_next_day_prediction, reference_panel,
 )
 from .tron_stats import TronStats, resolve_client_ip
@@ -258,19 +258,21 @@ def create_app(config: Config) -> FastAPI:
         if not config.tron_draw_stats:
             raise HTTPException(404)
         if str(block).strip():  # detail of one draw: /api/tron-draw?block=12345
+            total = store.tron_draw_total()
             detail = tron_draw_block_detail(
-                parse_limit(block, 0, 10**12), parse_limit(limit),
+                parse_limit(block, 0, 10**12), parse_view_limit(limit, total=total),
                 parse_reference_params(streak_n, recent_m, mode, minority_m),
             )
             if detail is None:
                 raise HTTPException(404)
             return JSONResponse(detail, headers={"Cache-Control": "no-store"})
-        mine = parse_limit(mine_limit, 0, 5000) if str(mine_limit).strip() not in ("", "0") else 0
-        ai_n = parse_limit(ai_limit, 0, 5000) if str(ai_limit).strip() not in ("", "0") else 0
-        auto_n = parse_limit(auto_limit, 0, 5000) if str(auto_limit).strip() not in ("", "0") else 0
-        day_n = parse_limit(day_limit, 0, 5000) if str(day_limit).strip() not in ("", "0") else 0
+        total = store.tron_draw_total()
+        mine = parse_view_limit(mine_limit, none_if_zero=True, total=total)
+        ai_n = parse_view_limit(ai_limit, none_if_zero=True, total=total)
+        auto_n = parse_view_limit(auto_limit, none_if_zero=True, total=total)
+        day_n = parse_view_limit(day_limit, none_if_zero=True, total=total)
         payload = tron_draw_payload(
-            parse_limit(limit), *parse_reference_params(streak_n, recent_m, mode, minority_m),
+            parse_view_limit(limit, total=total), *parse_reference_params(streak_n, recent_m, mode, minority_m),
             mine_limit=mine, ai_limit=ai_n, auto_limit=auto_n, day_limit=day_n,
         )
         # the page's own 4 s poll doubles as the "online" heartbeat (no extra request); never raises

@@ -38,7 +38,7 @@
 页面由现有后台 Web 服务（`run_web.py`，systemd 服务 `tg-directory-bot-web`）提供，监听 `WEB_HOST:WEB_PORT`（默认 `127.0.0.1:8080`，只在本机）。
 
 - 页面：`/tron-draw`
-- JSON 接口：`/api/tron-draw?limit=100`（limit 1~5000，默认 100）。返回 `counts`、`cells`（珠盘路坐标）、`recent`（最近 20 期）、`latest`、`next_draw_block`。
+- JSON 接口：`/api/tron-draw?limit=100`（默认 100）。**已解除原来「只能看最近 5000 期」的页面查看上限**：区块走势、AI/自动最优/一天最优/算法走势都可以看已记录的全部历史（有多少看多少）。自定义输入不再设 5000 上限，各走势栏增加「全部」按钮；接口也接受 `limit=all`（以及 `mine_limit` / `ai_limit` / `auto_limit` / `day_limit=all`），或任意大于库存的数字，都会返回全部已记录期数。返回 `counts`、`cells`（珠盘路坐标）、`recent`（最近 20 期）、`latest`、`next_draw_block`。**最佳算法搜索和自动最优选参仍只用最近最多 5000 期，预测逻辑未改。**
 - 这两个地址**无需登录**（只含公开的链上数据）；后台其它页面仍需登录。
 
 ## 页面功能（走势 / AI走势 / 算法走势 / 最终预测 / 声音）

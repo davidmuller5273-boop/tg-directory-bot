@@ -79,12 +79,34 @@ def bead_road(results: list[str], max_rows: int = MAX_ROWS) -> tuple[list[dict],
     return cells, (max_col + 1 if cells else 0)
 
 
-def parse_limit(raw, default: int = 100, maximum: int = 5000) -> int:
+# Overflow/garbage-input guard only for page/API view requests. There is no
+# product display cap (有多少看多少): a request of "all" or any number up to
+# this ceiling returns every stored period. Prediction search is unchanged
+# (BEST_MAX_PERIODS stays 5000 for 最佳算法 / 自动最优).
+VIEW_MAX_PERIODS = 10 ** 12
+
+
+def parse_limit(raw, default: int = 100, maximum: int = VIEW_MAX_PERIODS) -> int:
     try:
         value = int(str(raw).strip())
     except (TypeError, ValueError):
         return default
     return max(1, min(maximum, value))
+
+
+def parse_view_limit(raw, default: int = 100, *, total: int = 0, none_if_zero: bool = False) -> int:
+    """Page/API history window: ``all`` / ``全部`` means every stored period.
+
+    ``none_if_zero`` keeps the collapsed-panel convention (empty or 0 → 0, do
+    not load that trend). Other values go through ``parse_limit`` with no
+    5000-period product cap.
+    """
+    text = str(raw).strip()
+    if none_if_zero and text in ("", "0"):
+        return 0
+    if text.casefold() in ("all", "全部"):
+        return max(1, int(total))
+    return parse_limit(raw, default, VIEW_MAX_PERIODS)
 
 
 # --- 参考方向 (fixed algorithms, pure history statistics, no look-ahead) ---

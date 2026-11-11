@@ -226,7 +226,7 @@ class AutoWebTest(unittest.TestCase):
         for key in (
             "n", "mode", "m", "mn", "best", "auto", "final", "thRef", "thBt", "trend", "dragon", "ratio", "minority",
             "ai", "autorow", "longest", "alt", "snd", "tsA", "tsB", "judge", "srcl", "sai", "sauto", "sinput",
-            "foldAi", "foldAuto", "foldMine", "maxwin", "maxloss",
+            "foldAi", "foldAuto", "foldMine", "maxwin", "maxloss", "pall",
         ):
             self.assertIn(key, tips)
             self.assertGreater(len(tips[key]), 12)
@@ -388,7 +388,7 @@ class BroadcastFeedTest(unittest.TestCase):
             with client:
                 html = client.get("/tron-draw").text
         self.assertEqual(html.count('data-n="180"'), 5)  # 区块走势 / AI走势 / 自动最优走势 / 一天最优算法走势 / 算法走势
-        for token in ("data-tk=\"p180\"", "function icw(", "function curRun(", "当前\"+(c.win", "最大连中", "最大连错", "currun:"):
+        for token in ("data-tk=\"p180\"", "data-tk=\"pall\"", "function icw(", "function curRun(", "当前\"+(c.win", "最大连中", "最大连错", "currun:"):
             self.assertIn(token, html)
 
 
