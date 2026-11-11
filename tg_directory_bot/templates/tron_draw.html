@@ -149,7 +149,7 @@ th{white-space:nowrap}
   <div class="runs" id="ostat"></div>
   <div class="road" id="oroad"><div class="mgrid" id="ogrid"></div></div><div class="legend" data-tk="cellLegend">每格：圆圈＝实际开奖，紧挨着右边 ✅ 猜中 ❌ 没猜中，空着＝没有预测（鼠标停 1 秒看说明）</div>
   <div class="muted" id="ometa"></div>
-  <div class="ai">自动最优走势是真实记录：每个新区块开奖后，程序只用该期之前的历史算出最佳设置并预测下一期，开奖前就存档、不能改；开奖后再核对。从空白开始累积，没有事后回算。开奖随机，不保证命中。</div>
+  <div class="ai">自动最优走势是真实记录：每个新区块开奖后，程序只用该期之前的历史算出最佳设置并预测下一期，开奖前就存档、不能改；开奖后再核对。从空白开始累积，没有事后回算。若当时走势连跳已满 6 期、同时自动最优已连挂 6 期，下一期会临时改为「顺势反开」（跟上期实际结果相反），只此一期，之后恢复原来的算法；两个条件再次同时满足时会再走一遍。开奖随机，不保证命中。</div>
   </div>
  </div>
  <div class="card" id="dcard">
@@ -242,7 +242,7 @@ var TIP={
  srcl:"预测来源：决定下面「预测」那一列显示谁的预测、声音按谁来响、上一期按谁来判断。各个来源各记各的，互不混用。",
  sday:"一天最优算法预测：和「自动最优」用同一套找最佳设置的办法，但只看最近 1440 期（约一天）的历史，不看更早的。每开出新的一期就重新找一次，开奖前就存档，事后不能改。不足 1440 期就有多少用多少，少于 300 期则暂无。开奖是随机的，不保证命中。",
  sai:"AI预测：程序把算好的统计结果交给 AI，让它凭感觉回答「单」或「双」。开奖前就存档，事后不能改。开奖是随机的，不保证命中。",
- sauto:"自动最优算法预测：每开出新的一期，程序自动在历史里试很多组设置，挑出「连续猜错最少」的一组来预测，不用你填任何参数。开奖前就存档，事后不能改。",
+ sauto:"自动最优算法预测：每开出新的一期，程序自动在历史里试很多组设置，挑出「连续猜错最少」的一组来预测，不用你填任何参数。开奖前就存档，事后不能改。若当时走势连跳已满 6 期、同时自动最优已连挂 6 期，下一期会临时改为跟上期实际结果相反（顺势反开），只此一期，之后恢复原来的算法，一直循环。",
  sinput:"输入参数算法预测：用下面「参考」里你自己填的设置（龙长N、模式、近M期、少数方M）算出来的最终预测。你一改设置，预测就跟着变。",
  cur:"本期预测：当前所选来源对下一个开奖块的预测。只是统计参考，单、双各约50%，不保证命中。",
  n:"龙长≥N：「龙」就是同一边连续开出。N=3 表示连续开出 3 期同一边才算成龙。例：连开 单、单、单 就是 3 连龙。只对「跟龙/斩龙」这一行有用。",
@@ -262,7 +262,7 @@ var TIP={
  minority:"近期少数方：看最近 M 期里谁出得少，就押出得少的那一边（觉得会补回来）。例：M=20，最近 20 期双只出了 8 次，就押双。",
  ai:"AI：程序把算好的统计结果交给 AI，它凭感觉答单或答双。开奖前存档，不参与「最终预测」的投票。命中率只统计开启之后记录下来的期数。",
  dayrow:"一天最优：每期只取开奖前最近 1440 期（约一天）的历史，自动选出连续猜错最少的一组设置来预测，开奖前存档。右边的命中率来自这些真实存档，不是事后回算，所以刚开始期数很少。",
- autorow:"自动最优：每期只用「开奖前的历史」自动选出连续猜错最少的一组设置来预测，并在开奖前存档。右边的命中率来自这些真实存档，不是事后回算，所以刚开始期数很少。",
+ autorow:"自动最优：每期只用「开奖前的历史」自动选出连续猜错最少的一组设置来预测，并在开奖前存档。连跳满 6 且连挂满 6 时，下一期会临时顺势反开（跟上期实际相反），只此一期后恢复原算法。右边的命中率来自这些真实存档，不是事后回算，所以刚开始期数很少。",
  longest:"最长龙：所选这些期里，同一边连续开出最长的一段。例：单 7 期＝连续开了 7 期单。点一下数字，会在下面的走势里高亮这一段。",
  alt:"最大连跳：单、双一直轮流出现（单双单双…）最长的一段。例：6 期＝单双单双单双。点一下数字可高亮。",
  maxwin:"最大连中：所选这些期里，连续猜对最长的一段。没有预测记录的期会跳过。例：180期里最多连续猜中 6 次。点一下可在走势里高亮。",
@@ -271,7 +271,7 @@ var TIP={
  p180:"180期：最新 180 期，约 3 小时（每分钟开一期）。选它就能看到近三小时的最大连中、最大连错。",
  hits:"命中：猜中的期数 / 有预测记录的期数，括号里是命中率。",
  foldAi:"AI走势：每一期 AI 在开奖前给出的预测，对了✅错了❌。只统计开启之后、开奖前已存档的期数。点一下展开或收起。",
- foldAuto:"自动最优走势：每期开奖前，只用该期之前的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。从零开始慢慢累积，是真实记录。点一下展开或收起。",
+ foldAuto:"自动最优走势：每期开奖前，只用该期之前的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。连跳满 6 且连挂满 6 时，下一期会临时顺势反开，只此一期后恢复原算法。从零开始慢慢累积，是真实记录。点一下展开或收起。",
  foldDay:"一天最优算法走势：每期开奖前，只用该期之前最近 1440 期（约一天）的历史自动选出最佳设置做的预测，开奖前存档、事后不能改，开奖后核对。从零开始慢慢累积，是真实记录。点一下展开或收起。",
  cellLegend:"每一格是一期：圆圈是这一期实际开出的结果（绿＝单、红＝双），紧挨着圆圈右边的 ✅ 表示当时的预测猜中了，❌ 表示没猜中，右边空着表示这一期没有预测记录。点一格可看详情。",
  foldMine:"算法走势：用「输入参数」算出的最终预测，逐期回算的对错。点一下展开或收起。",
@@ -510,7 +510,7 @@ function markSrc(d){
   var sc=curSrc(d);
   $("srcI").className="snd"+(sc==="ai"?" on":"");$("srcO").className="snd"+(sc==="auto"?" on":"");$("srcD").className="snd"+(sc==="day"?" on":"");$("srcA").className="snd"+(sc==="input"?" on":"");
 }
-function paramText(p){return p?(p.mode==="cut"?"斩龙":"跟龙")+" N="+p.streak_n+" · 近M="+p.recent_m+" · 少数方M="+p.minority_m:""}
+function paramText(p){return p?(p.force_reverse?"顺势反开（连跳"+p.jump+"且连挂"+p.loss+"，只此一期）":(p.mode==="cut"?"斩龙":"跟龙")+" N="+p.streak_n+" · 近M="+p.recent_m+" · 少数方M="+p.minority_m):""}
 function renderCur(d){
   var sc=curSrc(d),p=pickOf(d,sc),box=$("curpred");
   if(!d||!d.next_draw_block){box.textContent="";return}
@@ -537,7 +537,7 @@ function renderRef(d){
   var fd=$("finday");
   if(d.day&&d.day.next){fd.hidden=false;fd.innerHTML="一天最优参考："+ic(d.day.next.pick)+"（不参与上面的投票）"}else fd.hidden=true;
   var fo=$("finauto");
-  if(d.auto&&d.auto.next){fo.hidden=false;fo.innerHTML="自动最优参考："+ic(d.auto.next.pick)+"（不参与上面的投票）"}else fo.hidden=true;
+  if(d.auto&&d.auto.next){fo.hidden=false;fo.innerHTML="自动最优参考："+ic(d.auto.next.pick)+(d.auto.params&&d.auto.params.force_reverse?"（本期顺势反开，不参与上面的投票）":"（不参与上面的投票）")}else fo.hidden=true;
   $("ainote").hidden=!d.ai;
   $("finrule").textContent=f.rule;
   $("reftable").innerHTML=Object.keys(ALG).map(function(k){
@@ -571,7 +571,7 @@ function renderBlock(d){
   var nx=pickOf(d,s);
   var p=document.createElement("div");
   if(nx){
-    p.className="pred "+cls(nx);p.textContent=nx;p.title=SRCN[s]+"：对下一期的预测（仅供参考）";
+    p.className="pred "+cls(nx);p.textContent=nx;p.title=SRCN[s]+"：对下一期的预测（仅供参考）"+(s==="auto"&&d.auto&&d.auto.params&&d.auto.params.force_reverse?" · 顺势反开（连跳"+d.auto.params.jump+"且连挂"+d.auto.params.loss+"，只此一期）":"");
   }else if(s!=="input"){p.className="mk";p.textContent="…";p.title=s==="ai"?"AI 预测生成中":(s==="day"?"一天最优":"自动最优")+"需要至少 300 期历史"}
   if(p.className){p.setAttribute("data-b",d.next_draw_block||"");p.setAttribute("data-p","1");p.style.gridColumn=cols+1;p.style.gridRow=lastRow+2;g.appendChild(p)}
   followEnd($("road"),limit+":"+d.latest,scrollKeys.block);
@@ -580,14 +580,14 @@ function renderBlock(d){
     return "<tr><td>#"+r.block+"<div class=muted>"+esc(r.time)+"</div></td><td class=hash>"+hashHtml(r.hash,r.digit)+"</td><td class=res>"+ic(r.result)+"</td></tr>"
   }).join("")||"<tr><td colspan=3 class=muted>暂无数据，等待下一个开奖块。</td></tr>";
 }
-function trendHtml(m,nextPick,nextBlock,kind){
+function trendHtml(m,nextPick,nextBlock,kind,forceNote){
   var cells=m.items.map(function(it,i){
     var t="#"+it.block+" 实际开奖"+it.result+" · 预测"+(it.predicted||"无记录")+(it.ok===true?" ✅猜中":it.ok===false?" ❌没猜中":"")+(kind==="mine"?(it.source==="stored"?"（开奖前已记录）":"（逐期回算）"):"");
     /* solid circle = what was actually drawn; the mark right beside it (to the right) = hit / miss (empty slot = no prediction) */
     return "<div class='mk rc"+(it.ok===true||it.ok===false?"":" np")+"' data-i="+i+" data-b="+it.block+" title='"+esc(t)+"'>"+ic(it.result)+"<span class=mm>"+(it.ok===true?"✅":it.ok===false?"❌":"")+"</span>"+"</div>";
   }).join("");
   /* the last cell: the pending prediction for the next period (blinking) */
-  if(nextPick)cells+="<div class='pred "+cls(nextPick)+"' data-p=1 data-b="+(nextBlock||"")+" title='下一期预测（仅供参考）'>"+nextPick+"</div>";
+  if(nextPick)cells+="<div class='pred "+cls(nextPick)+"' data-p=1 data-b="+(nextBlock||"")+" title='下一期预测（仅供参考）"+(forceNote?" · "+esc(forceNote):"")+"'>"+nextPick+"</div>";
   else if(kind==="ai"||kind==="auto"||kind==="day")cells+="<div class=mk data-p=1 data-b="+(nextBlock||"")+" title='"+(kind==="ai"?"AI 预测生成中":(kind==="day"?"一天最优":"自动最优")+"需要至少 300 期历史")+"'>…</div>";
   return cells;
 }
@@ -649,7 +649,8 @@ function renderPre(d,kind){
   if(kind==="ai")$("aititle").textContent="AI走势";
   $(P.sum).innerHTML=sumLine(nx,t||(w&&w.total?w:null),t?lim:(w?w.limit:0));
   if(!openS[kind]||!t)return;     /* collapsed: no rendering of the road */
-  $(P.grid).innerHTML=trendHtml(t,nx,d.next_draw_block,kind);
+  var forceNote=(kind==="auto"&&a.params&&a.params.force_reverse)?"顺势反开（连跳"+a.params.jump+"且连挂"+a.params.loss+"，只此一期）":"";
+  $(P.grid).innerHTML=trendHtml(t,nx,d.next_draw_block,kind,forceNote);
   $(P.stat).innerHTML=statHtml(t,kind);bindStat($(P.stat),t,kind);
   $(P.meta).textContent="近 "+t.count+" 期，其中已有"+nm+"记录 "+t.total+" 期（· 表示当期没有记录，只统计开奖前已存档的预测）"+(nx?" · 最右侧闪烁为下一期"+nm+"预测："+nx:"");
   followEnd($(P.road),lim+":"+d.latest,scrollKeys[kind]);

@@ -16,7 +16,9 @@ except ImportError:  # pragma: no cover
 from tg_directory_bot import tron_draw
 from tg_directory_bot.storage import DirectoryStore
 from tg_directory_bot.tron_draw import (
-    DRAW_INTERVAL, TronDrawRecorder, auto_best_pick, best_params, record_next_auto_prediction,
+    AUTO_FORCE_JUMP, AUTO_FORCE_LOSS, DRAW_INTERVAL, TronDrawRecorder, auto_best_pick,
+    auto_force_reverse_pick, best_params, current_alternating_len, current_auto_loss_streak,
+    day_best_pick, record_next_auto_prediction, record_next_day_prediction,
 )
 from tests.test_tron_ai import D, DUMMY, S, make_config
 from tests.test_tron_draw import make_hash
@@ -388,6 +390,168 @@ class BroadcastFeedTest(unittest.TestCase):
         self.assertEqual(html.count('data-n="180"'), 5)  # 区块走势 / AI走势 / 自动最优走势 / 一天最优算法走势 / 算法走势
         for token in ("data-tk=\"p180\"", "function icw(", "function curRun(", "当前\"+(c.win", "最大连中", "最大连错", "currun:"):
             self.assertIn(token, html)
+
+
+def add_result(store, result):
+    """Append one already-known draw (for building a tail pattern in tests)."""
+    n = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+    store.record_tron_draw(n, make_hash(n, "1" if result == S else "0"), 1_700_000_000_000 + n)
+    return n
+
+
+def plant_jump_losses(store, jumps, losses):
+    """Append a tail with ``jumps`` current 连跳 and ``losses`` current auto 连挂.
+
+    The first appended result repeats the latest draw so a longer prior alternation
+    cannot inflate 连跳. Auto predictions for the new periods are written pre-draw.
+    The last ``losses`` of those ``jumps`` periods are stored as misses; any earlier
+    new periods are stored as hits (so 连挂 ends at the latest settled period).
+    """
+    last = results_of(store)[-1]
+    cur = last
+    for i in range(jumps):
+        if i:
+            cur = D if cur == S else S
+        nxt = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+        miss = i >= jumps - losses
+        pick = (D if cur == S else S) if miss else cur
+        if not store.record_tron_auto_prediction(nxt, pick, '{"planted":true}'):
+            raise AssertionError("could not plant auto prediction for %s" % nxt)
+        add_result(store, cur)
+
+
+class AutoForceReverseTest(unittest.TestCase):
+    def test_current_alternating_len(self):
+        self.assertEqual(current_alternating_len([]), 0)
+        self.assertEqual(current_alternating_len([S]), 1)
+        self.assertEqual(current_alternating_len([S, S, S]), 1)
+        self.assertEqual(current_alternating_len([S, D, S, D, S, D]), 6)
+        self.assertEqual(current_alternating_len([D, S, D, S, D, S]), 6)
+        self.assertEqual(current_alternating_len([S, S, D, S, D, S, D]), 6)  # SS then 6-period tail starting at the second S
+        self.assertEqual(current_alternating_len([D, S, D, S, S, D, S]), 3)  # only the tail
+        self.assertEqual(current_alternating_len([S, D] * 10), 20)
+
+    def test_current_auto_loss_streak(self):
+        self.assertEqual(current_auto_loss_streak([]), 0)
+        self.assertEqual(current_auto_loss_streak([(20, S, S)]), 0)  # latest hit
+        self.assertEqual(current_auto_loss_streak([(20, S, D), (40, S, D), (60, S, D)]), 3)
+        # a hit breaks the streak even if earlier misses exist
+        self.assertEqual(current_auto_loss_streak([(20, S, D), (40, S, S), (60, S, D), (80, S, D)]), 2)
+        # a gap (period without a stored pick) is absent from the list; pick_runs walks what is there
+        self.assertEqual(current_auto_loss_streak([(20, S, D), (60, S, D), (80, S, D)]), 3)
+
+    def _scored_losses(self, n):
+        return [(20 * i, S, D) for i in range(1, n + 1)]
+
+    def test_threshold_is_inclusive_and_requires_both(self):
+        jump6 = [S, D] * 3          # 连跳 6, last is D → forced pick would be S
+        jump5 = [S] + [S, D] * 2    # 连跳 5 (starts with SS)
+        jump7 = [S, D] * 3 + [S]    # 连跳 7, last is S → forced pick would be D
+        # both at the inclusive threshold
+        found = auto_force_reverse_pick(jump6, self._scored_losses(6))
+        self.assertEqual(found[0], S)
+        self.assertEqual(found[1], {"force_reverse": True, "jump": 6, "loss": 6})
+        # just below either threshold: no force
+        self.assertIsNone(auto_force_reverse_pick(jump6, self._scored_losses(5)))
+        self.assertIsNone(auto_force_reverse_pick(jump5, self._scored_losses(6)))
+        self.assertIsNone(auto_force_reverse_pick(jump5, self._scored_losses(5)))
+        self.assertIsNone(auto_force_reverse_pick([], self._scored_losses(6)))
+        self.assertIsNone(auto_force_reverse_pick(jump6, []))
+        # above both thresholds still forces
+        found = auto_force_reverse_pick(jump7, self._scored_losses(7))
+        self.assertEqual(found[0], D)
+        self.assertEqual(found[1], {"force_reverse": True, "jump": 7, "loss": 7})
+        self.assertEqual((AUTO_FORCE_JUMP, AUTO_FORCE_LOSS), (6, 6))
+
+    def test_record_forces_one_period_then_resumes_and_loops(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = new_store(temp)
+            fill_random(store, 304)
+            plant_jump_losses(store, jumps=6, losses=6)
+            hist = results_of(store)
+            self.assertEqual(current_alternating_len(hist), 6)
+            self.assertEqual(current_auto_loss_streak(store.tron_auto_scored()), 6)
+            last = hist[-1]
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+            forced = D if last == S else S
+            self.assertEqual(store.tron_auto_predictions(nxt, nxt)[nxt], forced)
+            params = json.loads(store.tron_auto_params(nxt))
+            self.assertEqual(params, {"force_reverse": True, "jump": 6, "loss": 6})
+            # write-once: the forced pick is not rewritten
+            self.assertFalse(record_next_auto_prediction(store))
+            # 一天最优 does not use the circuit breaker even when auto would force
+            self.assertTrue(record_next_day_prediction(store))
+            day_params = json.loads(store.tron_day_params(nxt) or "{}")
+            self.assertNotIn("force_reverse", day_params)
+            self.assertEqual(store.tron_day_predictions(nxt, nxt)[nxt], day_best_pick(hist)[0])
+
+            # settle the forced period as a hit (jump continues) → 连挂 resets, resume normal search
+            add_result(store, forced)
+            self.assertEqual(current_auto_loss_streak(store.tron_auto_scored()), 0)
+            self.assertGreaterEqual(current_alternating_len(results_of(store)), 6)
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt2 = nxt + DRAW_INTERVAL
+            hist2 = results_of(store)
+            self.assertEqual(store.tron_auto_predictions(nxt2, nxt2)[nxt2], auto_best_pick(hist2)[0])
+            self.assertNotIn("force_reverse", json.loads(store.tron_auto_params(nxt2)))
+
+            # later both conditions can become true again: plant 6 new misses on a 连跳 tail, then force again
+            add_result(store, store.tron_auto_predictions(nxt2, nxt2)[nxt2])
+            # the above settle may or may not have a prediction already (nxt2). It's already stored.
+            # rebuild a fresh 6/6 tail after this new draw:
+            plant_jump_losses(store, jumps=6, losses=6)
+            self.assertEqual(current_alternating_len(results_of(store)), 6)
+            self.assertEqual(current_auto_loss_streak(store.tron_auto_scored()), 6)
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt3 = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+            last3 = results_of(store)[-1]
+            self.assertEqual(store.tron_auto_predictions(nxt3, nxt3)[nxt3], D if last3 == S else S)
+            self.assertTrue(json.loads(store.tron_auto_params(nxt3))["force_reverse"])
+
+    def test_resume_after_forced_miss_and_no_force_just_below_threshold(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = new_store(temp)
+            fill_random(store, 304)
+            plant_jump_losses(store, jumps=6, losses=5)
+            self.assertEqual(current_alternating_len(results_of(store)), 6)
+            self.assertEqual(current_auto_loss_streak(store.tron_auto_scored()), 5)
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+            hist = results_of(store)
+            self.assertEqual(store.tron_auto_predictions(nxt, nxt)[nxt], auto_best_pick(hist)[0])
+            self.assertNotIn("force_reverse", json.loads(store.tron_auto_params(nxt)))
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = new_store(temp)
+            fill_random(store, 304)
+            plant_jump_losses(store, jumps=6, losses=6)
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt = int(store.tron_draw_recent(1)[0]["block_number"]) + DRAW_INTERVAL
+            last = results_of(store)[-1]
+            forced = store.tron_auto_predictions(nxt, nxt)[nxt]
+            self.assertEqual(forced, D if last == S else S)
+            # settle as a miss (road stops jumping) → 连跳 resets, 连挂 continues; resume normal search
+            add_result(store, last)
+            self.assertEqual(current_alternating_len(results_of(store)), 1)
+            self.assertEqual(current_auto_loss_streak(store.tron_auto_scored()), 7)
+            self.assertTrue(record_next_auto_prediction(store))
+            nxt2 = nxt + DRAW_INTERVAL
+            hist = results_of(store)
+            self.assertEqual(store.tron_auto_predictions(nxt2, nxt2)[nxt2], auto_best_pick(hist)[0])
+            self.assertNotIn("force_reverse", json.loads(store.tron_auto_params(nxt2)))
+
+    def test_page_mentions_the_force_rule(self):
+        if TestClient is None:
+            self.skipTest("fastapi not installed")
+        from tg_directory_bot.web import create_app
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = make_config(temp)
+            with TestClient(create_app(cfg)) as client:
+                html = client.get("/tron-draw").text
+        self.assertIn("force_reverse", html)
+        self.assertIn("顺势反开", html)
+        self.assertIn("连跳已满 6 期", html)
 
 
 if __name__ == "__main__":

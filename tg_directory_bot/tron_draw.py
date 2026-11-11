@@ -673,6 +673,56 @@ def best_params(results: list[str]) -> dict:
 
 AUTO_MIN_PERIODS = BEST_MIN_PERIODS
 
+# Circuit breaker for 自动最优 only (一天最优 / AI / 输入参数 are unchanged).
+# Both thresholds are inclusive (>=). Decision is recomputed independently every
+# period: force at most the one next period, then resume the normal search unless
+# both conditions are still met, in which case force again (一直循环).
+AUTO_FORCE_JUMP = 6  # 连跳: current alternating length on the actual draw road
+AUTO_FORCE_LOSS = 6  # 连挂: auto-best consecutive misses ending at the latest settled period
+
+
+def current_alternating_len(results: list[str]) -> int:
+    """Current 连跳: how many consecutive periods at the end of ``results`` are alternating.
+
+    Same definition as the page/AI 「当前连跳」: the tail run of 单双单双… (or 双单双单…).
+    Empty history is 0; a single period, or a tail of identical results, is 1.
+    """
+    n = 1 if results else 0
+    while n < len(results) and results[-1 - n] != results[-n]:
+        n += 1
+    return n
+
+
+def current_auto_loss_streak(scored: list[tuple[int, str, str]]) -> int:
+    """Current 连挂: consecutive auto-best misses ending at the latest settled scored period.
+
+    ``scored`` is oldest-first (block, pick, result), the same list ``pick_runs`` uses.
+    Periods without a stored pick are simply absent. 0 when the list is empty or the
+    latest scored prediction hit.
+    """
+    info = pick_runs(scored)
+    return info["count"] if info["kind"] == "loss" else 0
+
+
+def auto_force_reverse_pick(
+    results: list[str], scored: list[tuple[int, str, str]],
+) -> tuple[str, dict] | None:
+    """If 连跳 >= 6 and 连挂 >= 6, return the one-period forced reverse pick; else None.
+
+    Forced pick = the opposite of the latest actual result (上期出单 → 双, 上期出双 → 单).
+    The forced period is still a normal auto prediction for history / hit rate /
+    broadcast / trend (write-once into ``tron_auto_predictions``). After it settles,
+    the next period goes back to ``auto_best_pick`` unless both thresholds are still
+    met, in which case this fires again.
+    """
+    if not results:
+        return None
+    jump = current_alternating_len(results)
+    loss = current_auto_loss_streak(scored)
+    if jump < AUTO_FORCE_JUMP or loss < AUTO_FORCE_LOSS:
+        return None
+    return _opposite(results[-1]), {"force_reverse": True, "jump": jump, "loss": loss}
+
 
 def auto_best_pick(results: list[str]) -> tuple[str, dict] | None:
     """Final prediction for the next period with the best parameters found on ``results`` only.
@@ -715,9 +765,15 @@ def _record_next_search_prediction(store, kind: str) -> bool:
     rows = store.tron_draw_recent(periods)
     if int(rows[-1]["block_number"]) + DRAW_INTERVAL != next_block:
         return False  # a newer draw landed meanwhile; that period will be handled on its own
-    found = pick_fn([str(row["result"]) for row in rows])
+    results = [str(row["result"]) for row in rows]
+    found = None
+    if kind == "auto":
+        # Only 自动最优 has the 连跳+连挂 circuit breaker; 一天最优 keeps the plain search.
+        found = auto_force_reverse_pick(results, store.tron_auto_scored())
     if found is None:
-        return False
+        found = pick_fn(results)
+        if found is None:
+            return False
     pick, params = found
     return record(next_block, pick, json.dumps(params, sort_keys=True))
 
